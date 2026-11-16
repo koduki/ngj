@@ -4,7 +4,6 @@ import ngj.parser.*;
 import ngj.typechecker.*;
 import ngj.diagnostic.*;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.Disabled;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -273,7 +272,6 @@ class SyntaxMigrationTest {
     }
     
     @Test
-    @Disabled("Requires List<T> type to be implemented for full iteration check")
     void forWithoutYield_bodyMustBeUnit() throws Exception {
         var source = """
             package test.forunit;
@@ -284,6 +282,7 @@ class SyntaxMigrationTest {
             """;
         
         var result = check(source);
+        assertFalse(result.isValid());
         assertTrue(result.errors().stream()
             .anyMatch(e -> e.id().equals("NGJ-TYPE-018")),
             "for without yield should require Unit body: " + result.errors());
@@ -307,6 +306,258 @@ class SyntaxMigrationTest {
         
         var result = check(source);
         assertTrue(result.isValid(), "while updating local var should be valid: " + result.errors());
+    }
+    
+    // ========== List<T> Tests ==========
+    
+    @Test
+    void emptyList_Nil_valid() throws Exception {
+        var source = """
+            package test.list;
+            
+            public fn empty() -> List<Int> effects() {
+                Nil()
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "Nil() should produce valid List<_>: " + result.errors());
+    }
+    
+    @Test
+    void listOf_withElements_valid() throws Exception {
+        var source = """
+            package test.list;
+            
+            public fn nums() -> List<Int> effects() {
+                listOf(1, 2, 3)
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "listOf(1,2,3) should produce List<Int>: " + result.errors());
+    }
+    
+    @Test
+    void listOf_emptyList_valid() throws Exception {
+        var source = """
+            package test.list;
+            
+            public fn empty() -> List<Int> effects() {
+                listOf()
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "listOf() should produce List<_>: " + result.errors());
+    }
+    
+    @Test
+    void listOf_mixedTypes_error() throws Exception {
+        var source = """
+            package test.list;
+            
+            public fn mixed() -> List<Int> effects() {
+                listOf(1, "two", 3)
+            }
+            """;
+        
+        var result = check(source);
+        assertFalse(result.isValid());
+        assertTrue(result.errors().stream()
+            .anyMatch(e -> e.id().equals("NGJ-TYPE-023")),
+            "listOf with mixed types should error: " + result.errors());
+    }
+    
+    @Test
+    void forOverList_valid() throws Exception {
+        var source = """
+            package test.forlist;
+            
+            public fn process(nums: List<Int>) -> Unit effects() {
+                for (x <- nums) {
+                    val y = x;
+                }
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "for over List<Int> should be valid: " + result.errors());
+    }
+    
+    @Test
+    void forYieldOverList_producesListType() throws Exception {
+        var source = """
+            package test.foryield;
+            
+            public fn double(nums: List<Int>) -> List<Int> effects() {
+                for (x <- nums) yield { x * 2 }
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "for-yield should produce List<Int>: " + result.errors());
+    }
+    
+    @Test
+    void forOverNonList_error() throws Exception {
+        var source = """
+            package test.fornonlist;
+            
+            public fn test(n: Int) -> Unit effects() {
+                for (x <- n) { x; }
+            }
+            """;
+        
+        var result = check(source);
+        assertFalse(result.isValid());
+        assertTrue(result.errors().stream()
+            .anyMatch(e -> e.id().equals("NGJ-TYPE-022")),
+            "for over non-List should error: " + result.errors());
+    }
+    
+    // ========== Outer var capture diagnostic ==========
+    
+    @Test
+    void forBody_outerVarCapture_error() throws Exception {
+        var source = """
+            package test.capture;
+            
+            public fn test(nums: List<Int>) -> Unit effects() {
+                var total = 0;
+                for (x <- nums) {
+                    total = total + x;
+                }
+            }
+            """;
+        
+        var result = check(source);
+        assertFalse(result.isValid());
+        assertTrue(result.errors().stream()
+            .anyMatch(e -> e.id().equals("NGJ-CAPTURE-001")),
+            "Outer var capture in for body should error: " + result.errors());
+    }
+    
+    @Test
+    void forBody_localVar_valid() throws Exception {
+        var source = """
+            package test.localvar;
+            
+            public fn test(nums: List<Int>) -> Unit effects() {
+                for (x <- nums) {
+                    var temp = x * 2;
+                    temp = temp + 1;
+                }
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "Local var in for body should be valid: " + result.errors());
+    }
+    
+    // ========== ? propagation in for body ==========
+    
+    @Test
+    void forBody_propagate_error() throws Exception {
+        var source = """
+            package test.forprop;
+            
+            public fn test(nums: List<Int>) -> Result<Unit, String> effects() {
+                for (x <- nums) {
+                    val r: Result<Int, String> = Ok(x);
+                    val v = r?;
+                    v;
+                };
+                Ok(())
+            }
+            """;
+        
+        var result = check(source);
+        assertFalse(result.isValid());
+        assertTrue(result.errors().stream()
+            .anyMatch(e -> e.id().equals("NGJ-PROP-002")),
+            "? in for body should error: " + result.errors());
+    }
+    
+    @Test
+    void forYield_resultWithoutPropagate_producesListOfResult() throws Exception {
+        var source = """
+            package test.listresult;
+            
+            public fn process(nums: List<Int>) -> List<Result<Int, String>> effects() {
+                for (x <- nums) yield {
+                    val r: Result<Int, String> = Ok(x * 2);
+                    r
+                }
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), 
+            "for-yield with Result body should produce List<Result<T,E>>: " + result.errors());
+    }
+    
+    // ========== Enum match exhaustiveness ==========
+    
+    @Test
+    void enumMatch_exhaustive_valid() throws Exception {
+        var source = """
+            package test.exhaustive;
+            
+            public enum Color { Red(), Green(), Blue() }
+            
+            public fn name(c: Color) -> Int effects() {
+                match (c) {
+                    case Red() => { 1 }
+                    case Green() => { 2 }
+                    case Blue() => { 3 }
+                }
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "Exhaustive enum match should be valid: " + result.errors());
+    }
+    
+    @Test
+    void enumMatch_nonExhaustive_error() throws Exception {
+        var source = """
+            package test.nonexhaustive;
+            
+            public enum Color { Red(), Green(), Blue() }
+            
+            public fn name(c: Color) -> Int effects() {
+                match (c) {
+                    case Red() => { 1 }
+                    case Green() => { 2 }
+                }
+            }
+            """;
+        
+        var result = check(source);
+        assertFalse(result.isValid());
+        assertTrue(result.errors().stream()
+            .anyMatch(e -> e.id().equals("NGJ-MATCH-001")),
+            "Non-exhaustive enum match should error: " + result.errors());
+    }
+    
+    @Test
+    void enumMatch_withWildcard_valid() throws Exception {
+        var source = """
+            package test.wildcard;
+            
+            public enum Color { Red(), Green(), Blue() }
+            
+            public fn name(c: Color) -> Int effects() {
+                match (c) {
+                    case Red() => { 1 }
+                    case _ => { 0 }
+                }
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "Match with wildcard should be valid: " + result.errors());
     }
     
     private ngj.ast.CompilationUnit parse(String source) throws ParseException {

@@ -44,12 +44,15 @@ public final class NameResolver {
         globalSymbols.put("Unit", new Symbol("Unit", Symbol.Kind.TYPE, true));
         globalSymbols.put("Result", new Symbol("Result", Symbol.Kind.TYPE, true));
         globalSymbols.put("Option", new Symbol("Option", Symbol.Kind.TYPE, true));
+        globalSymbols.put("List", new Symbol("List", Symbol.Kind.TYPE, true));
         
         // Built-in constructors
         globalSymbols.put("Ok", new Symbol("Ok", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("Err", new Symbol("Err", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("Some", new Symbol("Some", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("None", new Symbol("None", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("Nil", new Symbol("Nil", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("listOf", new Symbol("listOf", Symbol.Kind.FUNCTION, true));
     }
     
     private void registerTopLevel(TopLevelDecl decl) {

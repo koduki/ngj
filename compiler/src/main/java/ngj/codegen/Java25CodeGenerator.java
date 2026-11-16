@@ -129,6 +129,7 @@ public final class Java25CodeGenerator {
             case GenericTypeExpr generic -> switch (generic.name()) {
                 case "Result" -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Result");
                 case "Option" -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option");
+                case "List" -> ClassDesc.of("java.util.List");
                 default -> ConstantDescs.CD_Object;
             };
             case UnitTypeExpr _ -> ConstantDescs.CD_void;
@@ -233,7 +234,85 @@ public final class Java25CodeGenerator {
     }
     
     private void generateFor(CodeGenContext ctx, ForExpr forExpr) {
-        throw new IllegalStateException("for expression codegen not yet implemented");
+        // Generate iterable expression (should be List)
+        generateExpr(ctx, forExpr.iterable());
+        
+        // Store the list in a temp local
+        int listSlot = ctx.allocateLocal("$list$" + ctx.nextSlot, "Object");
+        ctx.code.astore(listSlot);
+        
+        // Get iterator: list.iterator()
+        ctx.code.aload(listSlot);
+        ctx.code.invokeinterface(
+            ClassDesc.of("java.util.List"),
+            "iterator",
+            MethodTypeDesc.of(ClassDesc.of("java.util.Iterator"))
+        );
+        int iterSlot = ctx.allocateLocal("$iter$" + ctx.nextSlot, "Object");
+        ctx.code.astore(iterSlot);
+        
+        // For yield: create result list
+        int resultListSlot = -1;
+        if (forExpr.hasYield()) {
+            ctx.code.new_(ClassDesc.of("java.util.ArrayList"));
+            ctx.code.dup();
+            ctx.code.invokespecial(
+                ClassDesc.of("java.util.ArrayList"),
+                ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void)
+            );
+            resultListSlot = ctx.allocateLocal("$result$" + ctx.nextSlot, "Object");
+            ctx.code.astore(resultListSlot);
+        }
+        
+        var loopStart = ctx.code.newLabel();
+        var loopEnd = ctx.code.newLabel();
+        
+        ctx.code.labelBinding(loopStart);
+        
+        // Check hasNext()
+        ctx.code.aload(iterSlot);
+        ctx.code.invokeinterface(
+            ClassDesc.of("java.util.Iterator"),
+            "hasNext",
+            MethodTypeDesc.of(ConstantDescs.CD_boolean)
+        );
+        ctx.code.ifeq(loopEnd);
+        
+        // Get next element
+        ctx.code.aload(iterSlot);
+        ctx.code.invokeinterface(
+            ClassDesc.of("java.util.Iterator"),
+            "next",
+            MethodTypeDesc.of(ConstantDescs.CD_Object)
+        );
+        
+        // Store loop variable
+        int elemSlot = ctx.allocateLocal(forExpr.varName(), "Object");
+        ctx.code.astore(elemSlot);
+        
+        // Generate body
+        generateBlock(ctx, forExpr.body());
+        
+        if (forExpr.hasYield()) {
+            // Add result to list
+            ctx.code.aload(resultListSlot);
+            ctx.code.swap();
+            ctx.code.invokeinterface(
+                ClassDesc.of("java.util.List"),
+                "add",
+                MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+            );
+            ctx.code.pop(); // discard boolean result
+        }
+        
+        ctx.code.goto_(loopStart);
+        ctx.code.labelBinding(loopEnd);
+        
+        if (forExpr.hasYield()) {
+            // Push result list as return value
+            ctx.code.aload(resultListSlot);
+        }
     }
     
     private void generateWhile(CodeGenContext ctx, WhileExpr whileExpr) {
@@ -384,6 +463,45 @@ public final class Java25CodeGenerator {
                 }
                 case "None" -> {
                     ctx.code.aconst_null();
+                    return;
+                }
+                case "Nil" -> {
+                    // Create empty ArrayList
+                    ctx.code.new_(ClassDesc.of("java.util.ArrayList"));
+                    ctx.code.dup();
+                    ctx.code.invokespecial(
+                        ClassDesc.of("java.util.ArrayList"),
+                        ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void)
+                    );
+                    return;
+                }
+                case "listOf" -> {
+                    // Create ArrayList with elements
+                    ctx.code.new_(ClassDesc.of("java.util.ArrayList"));
+                    ctx.code.dup();
+                    ctx.code.invokespecial(
+                        ClassDesc.of("java.util.ArrayList"),
+                        ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void)
+                    );
+                    // Add each argument to the list
+                    for (var arg : call.args()) {
+                        ctx.code.dup();
+                        generateExpr(ctx, arg);
+                        // Auto-box primitives
+                        ctx.code.invokestatic(
+                            ClassDesc.of("java.lang.Integer"),
+                            "valueOf",
+                            MethodTypeDesc.of(ClassDesc.of("java.lang.Integer"), ConstantDescs.CD_int)
+                        );
+                        ctx.code.invokeinterface(
+                            ClassDesc.of("java.util.List"),
+                            "add",
+                            MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+                        );
+                        ctx.code.pop();
+                    }
                     return;
                 }
             }

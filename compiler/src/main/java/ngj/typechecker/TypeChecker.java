@@ -46,6 +46,7 @@ public final class TypeChecker {
         typeEnv.put("Unit", new TypeInfo(TypeInfo.Kind.PRIMITIVE, List.of()));
         typeEnv.put("Result", new TypeInfo(TypeInfo.Kind.GENERIC, List.of("T", "E")));
         typeEnv.put("Option", new TypeInfo(TypeInfo.Kind.GENERIC, List.of("T")));
+        typeEnv.put("List", new TypeInfo(TypeInfo.Kind.GENERIC, List.of("T")));
     }
     
     private void registerDecl(TopLevelDecl decl) {
@@ -348,7 +349,7 @@ public final class TypeChecker {
             case UnaryExpr unary -> checkUnaryExpr(unary);
             
             case CallExpr call -> {
-                // Check for built-in Result/Option constructors
+                // Check for built-in Result/Option/List constructors
                 if (call.callee() instanceof IdentExpr ident) {
                     var name = ident.name();
                     if (name.equals("Ok") || name.equals("Err")) {
@@ -360,7 +361,6 @@ public final class TypeChecker {
                             ));
                         } else {
                             var argType = checkExpr(call.args().get(0));
-                            // Return Result<T, ?> or Result<?, E>
                             if (name.equals("Ok") && argType != null) {
                                 yield new GenericTypeExpr("Result", 
                                     List.of(argType, new SimpleTypeExpr("_", call.span())),
@@ -396,6 +396,43 @@ public final class TypeChecker {
                         }
                         yield new GenericTypeExpr("Option", 
                             List.of(new SimpleTypeExpr("_", call.span())), call.span());
+                    } else if (name.equals("Nil")) {
+                        // Empty list constructor: Nil() -> List<_>
+                        if (!call.args().isEmpty()) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "Nil takes no arguments (use listOf for non-empty lists)",
+                                call.span()
+                            ));
+                        }
+                        yield new GenericTypeExpr("List",
+                            List.of(new SimpleTypeExpr("_", call.span())), call.span());
+                    } else if (name.equals("listOf")) {
+                        // List constructor: listOf(a, b, c) -> List<T>
+                        if (call.args().isEmpty()) {
+                            yield new GenericTypeExpr("List",
+                                List.of(new SimpleTypeExpr("_", call.span())), call.span());
+                        } else {
+                            TypeExpr elemType = null;
+                            for (var arg : call.args()) {
+                                var argType = checkExpr(arg);
+                                if (elemType == null) {
+                                    elemType = argType;
+                                } else if (argType != null && !isAssignable(elemType, argType)) {
+                                    diagnostics.add(Diagnostic.error(
+                                        "NGJ-TYPE-023",
+                                        "listOf requires all elements to have the same type",
+                                        arg.span(),
+                                        new ExpectedActual(elemType.toString()),
+                                        new ExpectedActual(argType.toString())
+                                    ));
+                                }
+                            }
+                            if (elemType != null) {
+                                yield new GenericTypeExpr("List", List.of(elemType), call.span());
+                            }
+                            yield new GenericTypeExpr("List", List.of(), call.span());
+                        }
                     }
                 }
                 
@@ -451,16 +488,28 @@ public final class TypeChecker {
     private TypeExpr checkForExpr(ForExpr forExpr) {
         var iterableType = checkExpr(forExpr.iterable());
         
-        pushScope();
-        
         TypeExpr elementType = null;
         if (iterableType instanceof GenericTypeExpr generic && generic.name().equals("List")) {
             if (!generic.typeArgs().isEmpty()) {
                 elementType = generic.typeArgs().get(0);
             }
+        } else if (iterableType != null) {
+            diagnostics.add(Diagnostic.error(
+                "NGJ-TYPE-022",
+                "for loop requires List type, got: " + iterableType,
+                forExpr.iterable().span()
+            ));
         }
         
+        // Collect outer var names before entering for body scope
+        var outerVars = collectOuterMutableVars();
+        
+        pushScope();
+        
         addLocal(forExpr.varName(), elementType, false);
+        
+        // Check for outer var capture and ? propagation in body
+        checkForBodyRestrictions(forExpr.body(), outerVars, forExpr.span());
         
         var bodyType = checkBlock(forExpr.body());
         
@@ -482,6 +531,169 @@ public final class TypeChecker {
                 ));
             }
             return new UnitTypeExpr(forExpr.span());
+        }
+    }
+    
+    private Set<String> collectOuterMutableVars() {
+        var result = new HashSet<String>();
+        for (var mutSet : mutableVars) {
+            result.addAll(mutSet);
+        }
+        return result;
+    }
+    
+    private void checkForBodyRestrictions(BlockExpr body, Set<String> outerVars, SourceSpan forSpan) {
+        // Check for outer var capture (assignment to outer var)
+        checkForOuterVarCapture(body, outerVars);
+        
+        // Check for ? propagation in for body
+        checkForPropagate(body, forSpan);
+    }
+    
+    private void checkForOuterVarCapture(BlockExpr body, Set<String> outerVars) {
+        for (var stmt : body.statements()) {
+            if (stmt instanceof AssignStmt assign) {
+                if (outerVars.contains(assign.name())) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-CAPTURE-001",
+                        "Cannot capture and modify outer 'var' '" + assign.name() + "' inside for body. For bodies may only capture read-only 'val' bindings.",
+                        assign.span()
+                    ));
+                }
+            }
+            checkStmtForOuterVarCapture(stmt, outerVars);
+        }
+        if (body.tailExpr() != null) {
+            checkExprForOuterVarCapture(body.tailExpr(), outerVars);
+        }
+    }
+    
+    private void checkStmtForOuterVarCapture(Statement stmt, Set<String> outerVars) {
+        switch (stmt) {
+            case ExprStmt exprStmt -> checkExprForOuterVarCapture(exprStmt.expr(), outerVars);
+            case ValStmt val -> checkExprForOuterVarCapture(val.initializer(), outerVars);
+            case VarStmt var -> checkExprForOuterVarCapture(var.initializer(), outerVars);
+            case AssignStmt assign -> checkExprForOuterVarCapture(assign.value(), outerVars);
+            case LetStmt let -> checkExprForOuterVarCapture(let.initializer(), outerVars);
+            case ReturnStmt ret -> { if (ret.value() != null) checkExprForOuterVarCapture(ret.value(), outerVars); }
+        }
+    }
+    
+    private void checkExprForOuterVarCapture(Expr expr, Set<String> outerVars) {
+        switch (expr) {
+            case BlockExpr block -> checkForOuterVarCapture(block, outerVars);
+            case IfExpr ifExpr -> {
+                checkExprForOuterVarCapture(ifExpr.condition(), outerVars);
+                checkForOuterVarCapture(ifExpr.thenBranch(), outerVars);
+                if (ifExpr.elseBranch() != null) {
+                    checkExprForOuterVarCapture(ifExpr.elseBranch(), outerVars);
+                }
+            }
+            case MatchExpr matchExpr -> {
+                checkExprForOuterVarCapture(matchExpr.scrutinee(), outerVars);
+                for (var arm : matchExpr.arms()) {
+                    checkExprForOuterVarCapture(arm.body(), outerVars);
+                }
+            }
+            case WhileExpr whileExpr -> {
+                checkExprForOuterVarCapture(whileExpr.condition(), outerVars);
+                checkForOuterVarCapture(whileExpr.body(), outerVars);
+            }
+            case BinaryExpr binary -> {
+                checkExprForOuterVarCapture(binary.left(), outerVars);
+                checkExprForOuterVarCapture(binary.right(), outerVars);
+            }
+            case UnaryExpr unary -> checkExprForOuterVarCapture(unary.operand(), outerVars);
+            case CallExpr call -> {
+                checkExprForOuterVarCapture(call.callee(), outerVars);
+                for (var arg : call.args()) {
+                    checkExprForOuterVarCapture(arg, outerVars);
+                }
+            }
+            case PropagateExpr prop -> checkExprForOuterVarCapture(prop.inner(), outerVars);
+            case ParenExpr paren -> checkExprForOuterVarCapture(paren.inner(), outerVars);
+            case FieldAccessExpr access -> checkExprForOuterVarCapture(access.object(), outerVars);
+            case ConstructorExpr ctor -> {
+                for (var field : ctor.fields()) {
+                    checkExprForOuterVarCapture(field.value(), outerVars);
+                }
+            }
+            default -> {}
+        }
+    }
+    
+    private void checkForPropagate(BlockExpr body, SourceSpan forSpan) {
+        for (var stmt : body.statements()) {
+            checkStmtForPropagate(stmt, forSpan);
+        }
+        if (body.tailExpr() != null) {
+            checkExprForPropagate(body.tailExpr(), forSpan);
+        }
+    }
+    
+    private void checkStmtForPropagate(Statement stmt, SourceSpan forSpan) {
+        switch (stmt) {
+            case ExprStmt exprStmt -> checkExprForPropagate(exprStmt.expr(), forSpan);
+            case ValStmt val -> checkExprForPropagate(val.initializer(), forSpan);
+            case VarStmt var -> checkExprForPropagate(var.initializer(), forSpan);
+            case AssignStmt assign -> checkExprForPropagate(assign.value(), forSpan);
+            case LetStmt let -> checkExprForPropagate(let.initializer(), forSpan);
+            case ReturnStmt ret -> { if (ret.value() != null) checkExprForPropagate(ret.value(), forSpan); }
+        }
+    }
+    
+    private void checkExprForPropagate(Expr expr, SourceSpan forSpan) {
+        switch (expr) {
+            case PropagateExpr prop -> {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-PROP-002",
+                    "? operator is not allowed inside for body. Use explicit match or move the propagation outside the for loop.",
+                    prop.span()
+                ));
+                checkExprForPropagate(prop.inner(), forSpan);
+            }
+            case LambdaExpr _ -> {} // Lambda is a separate propagation boundary, don't recurse
+            case BlockExpr block -> checkForPropagate(block, forSpan);
+            case IfExpr ifExpr -> {
+                checkExprForPropagate(ifExpr.condition(), forSpan);
+                checkForPropagate(ifExpr.thenBranch(), forSpan);
+                if (ifExpr.elseBranch() != null) {
+                    checkExprForPropagate(ifExpr.elseBranch(), forSpan);
+                }
+            }
+            case MatchExpr matchExpr -> {
+                checkExprForPropagate(matchExpr.scrutinee(), forSpan);
+                for (var arm : matchExpr.arms()) {
+                    checkExprForPropagate(arm.body(), forSpan);
+                }
+            }
+            case WhileExpr whileExpr -> {
+                checkExprForPropagate(whileExpr.condition(), forSpan);
+                checkForPropagate(whileExpr.body(), forSpan);
+            }
+            case BinaryExpr binary -> {
+                checkExprForPropagate(binary.left(), forSpan);
+                checkExprForPropagate(binary.right(), forSpan);
+            }
+            case UnaryExpr unary -> checkExprForPropagate(unary.operand(), forSpan);
+            case CallExpr call -> {
+                checkExprForPropagate(call.callee(), forSpan);
+                for (var arg : call.args()) {
+                    checkExprForPropagate(arg, forSpan);
+                }
+            }
+            case ParenExpr paren -> checkExprForPropagate(paren.inner(), forSpan);
+            case FieldAccessExpr access -> checkExprForPropagate(access.object(), forSpan);
+            case ConstructorExpr ctor -> {
+                for (var field : ctor.fields()) {
+                    checkExprForPropagate(field.value(), forSpan);
+                }
+            }
+            case ForExpr nested -> {
+                checkExprForPropagate(nested.iterable(), forSpan);
+                checkForPropagate(nested.body(), forSpan);
+            }
+            default -> {}
         }
     }
     

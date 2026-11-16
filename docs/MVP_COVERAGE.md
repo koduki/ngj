@@ -97,15 +97,24 @@ their implementation status, and explicit exclusions.
 | Named effects `effects(Effect1)` | **No - Reject** | 🔲 | Unsupported feature error |
 | Legacy `! {}` syntax | **No - Reject** | ✅ | Migration diagnostic NGJ-MIGRATE-006 |
 
+### Collections
+
+| Feature | MVP Required | Status | Notes |
+|---------|-------------|--------|-------|
+| `List<T>` | Yes | ✅ | Eager list backed by java.util.List |
+| `Nil()` | Yes | ✅ | Empty list constructor |
+| `listOf(...)` | Yes | ✅ | List literal constructor |
+
 ### Loops and Iteration
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
-| `for (x <- iterable) { ... }` | Yes | ✅ | Scala-style syntax, single generator |
-| `for (x <- iterable) yield { ... }` | Yes | ✅ | List comprehension |
+| `for (x <- list) { ... }` | Yes | ✅ | Iteration over List<T>, single generator |
+| `for (x <- list) yield { ... }` | Yes | ✅ | List comprehension producing List<U> |
 | `while (condition) { ... }` | Yes | ✅ | Loop with parenthesized condition |
-| `?` in for body | **No - Reject** | ✅ | Propagation boundary diagnostic |
-| Outer `var` capture in for | **No - Reject** | 🔲 | Capture diagnostic |
+| `?` in for body | **No - Reject** | ✅ | Propagation boundary diagnostic NGJ-PROP-002 |
+| Outer `var` capture in for | **No - Reject** | ✅ | Capture diagnostic NGJ-CAPTURE-001 |
+| for-yield over non-? Result | Yes | ✅ | Produces List<Result<T,E>>, not Result<List<T>,E> |
 
 ### Execution
 
