@@ -1,15 +1,12 @@
-// Data type declaration
-module test.data
+// Record type declaration (v0.3 syntax)
+package test.data;
 
-pub data Point {
-    x: Int,
-    y: Int
+public record Point(x: Int, y: Int);
+
+public fn createPoint(x: Int, y: Int) -> Point effects() {
+    Point(x, y)
 }
 
-pub fn createPoint(x: Int, y: Int) -> Point ! {} {
-    Point { x: x, y: y }
-}
-
-pub fn getX(p: Point) -> Int ! {} {
+public fn getX(p: Point) -> Int effects() {
     p.x
 }

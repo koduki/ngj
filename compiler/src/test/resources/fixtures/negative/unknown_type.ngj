@@ -1,6 +1,6 @@
 // Unknown types must be rejected
-module test.invalid
+package test.invalid;
 
-pub fn test() -> UnknownType ! {} {
+public fn test() -> UnknownType effects() {
     42
 }

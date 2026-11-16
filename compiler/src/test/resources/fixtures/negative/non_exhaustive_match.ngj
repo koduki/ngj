@@ -1,16 +1,15 @@
 // Non-exhaustive match must be rejected
-module test.invalid
+package test.invalid;
 
-pub enum Status {
-    Active,
-    Pending,
-    Closed
+public enum Status {
+    Active(),
+    Pending(),
+    Closed()
 }
 
-pub fn describe(s: Status) -> Int ! {} {
-    match s {
-        Active => 1,
-        Pending => 2
-        // Missing: Closed
+public fn describe(s: Status) -> Int effects() {
+    match (s) {
+        case Active() => { 1 },
+        case Pending() => { 2 }
     }
 }

@@ -16,19 +16,32 @@ public final class Lexer {
     private final List<Diagnostic> diagnostics = new ArrayList<>();
     
     private static final Map<String, TokenType> KEYWORDS = Map.ofEntries(
-        Map.entry("module", TokenType.MODULE),
+        // v0.3 keywords
+        Map.entry("package", TokenType.PACKAGE),
         Map.entry("import", TokenType.IMPORT),
-        Map.entry("pub", TokenType.PUB),
+        Map.entry("public", TokenType.PUBLIC),
         Map.entry("fn", TokenType.FN),
-        Map.entry("let", TokenType.LET),
+        Map.entry("val", TokenType.VAL),
+        Map.entry("var", TokenType.VAR),
         Map.entry("if", TokenType.IF),
         Map.entry("else", TokenType.ELSE),
         Map.entry("match", TokenType.MATCH),
-        Map.entry("return", TokenType.RETURN),
-        Map.entry("data", TokenType.DATA),
+        Map.entry("case", TokenType.CASE),
+        Map.entry("record", TokenType.RECORD),
         Map.entry("enum", TokenType.ENUM),
+        Map.entry("effects", TokenType.EFFECTS),
+        Map.entry("for", TokenType.FOR),
+        Map.entry("yield", TokenType.YIELD),
+        Map.entry("while", TokenType.WHILE),
         Map.entry("true", TokenType.TRUE),
-        Map.entry("false", TokenType.FALSE)
+        Map.entry("false", TokenType.FALSE),
+        // Legacy v0.2 keywords (for migration diagnostics)
+        Map.entry("module", TokenType.MODULE),
+        Map.entry("pub", TokenType.PUB),
+        Map.entry("data", TokenType.DATA),
+        Map.entry("let", TokenType.LET),
+        Map.entry("return", TokenType.RETURN),
+        Map.entry("mut", TokenType.MUT)
     );
     
     public Lexer(String source, String fileName) {
@@ -79,6 +92,8 @@ public final class Lexer {
             TokenType twoType = switch (two) {
                 case "->" -> TokenType.ARROW;
                 case "=>" -> TokenType.FAT_ARROW;
+                case "::" -> TokenType.DOUBLE_COLON;
+                case "<-" -> TokenType.LEFT_ARROW;
                 case "==" -> TokenType.EQ;
                 case "!=" -> TokenType.NE;
                 case "<=" -> TokenType.LE;

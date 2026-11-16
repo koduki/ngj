@@ -1,24 +1,17 @@
 // Data construction test for AI pilot evaluation
 // Tests understanding of field types and construction
+package pilot.data_construct;
 
-module pilot.data_construct
+public record Point(x: Int, y: Int);
 
-pub data Point {
-    x: Int,
-    y: Int
-}
+public record Rectangle(topLeft: Point, bottomRight: Point);
 
-pub data Rectangle {
-    topLeft: Point,
-    bottomRight: Point
-}
-
-pub fn makeOrigin() -> Point ! {} {
+public fn makeOrigin() -> Point effects() {
     ?originPoint
 }
 
-pub fn makeRect(width: Int, height: Int) -> Rectangle ! {} {
-    let origin: Point = makeOrigin()
-    let corner: Point = Point { x: width, y: height }
+public fn makeRect(width: Int, height: Int) -> Rectangle effects() {
+    val origin: Point = makeOrigin();
+    val corner: Point = Point(width, height);
     ?rectangle
 }

@@ -32,9 +32,9 @@ class AgentApiTest {
     @Test
     void checkReturnsValidStatus() throws Exception {
         var source = """
-            module test.valid
+            package test.valid;
             
-            pub fn answer() -> Int ! {} {
+            public fn answer() -> Int effects() {
                 42
             }
             """;
@@ -62,9 +62,9 @@ class AgentApiTest {
     @Test
     void checkReturnsInvalidForErrors() throws Exception {
         var source = """
-            module test.invalid
+            package test.invalid;
             
-            pub fn test() -> UnknownType ! {} {
+            public fn test() -> UnknownType effects() {
                 42
             }
             """;
@@ -89,9 +89,9 @@ class AgentApiTest {
     @Test
     void checkReturnsIncompleteForHoles() throws Exception {
         var source = """
-            module test.incomplete
+            package test.incomplete;
             
-            pub fn calculate() -> Int ! {} {
+            public fn calculate() -> Int effects() {
                 ?todo
             }
             """;
@@ -115,9 +115,9 @@ class AgentApiTest {
     @Test
     void revisionMismatchReturnsError() throws Exception {
         var source = """
-            module test.valid
+            package test.valid;
             
-            pub fn answer() -> Int ! {} { 42 }
+            public fn answer() -> Int effects() { 42 }
             """;
         var file = tempDir.resolve("valid.ngj");
         Files.writeString(file, source);
@@ -139,9 +139,9 @@ class AgentApiTest {
     @Test
     void contextReturnsHoleInfo() throws Exception {
         var source = """
-            module test.ctx
+            package test.ctx;
             
-            pub fn calculate(x: Int, y: Int) -> Int ! {} {
+            public fn calculate(x: Int, y: Int) -> Int effects() {
                 ?implementation
             }
             """;
@@ -167,9 +167,9 @@ class AgentApiTest {
     @Test
     void contextReturnsErrorForMissingHole() throws Exception {
         var source = """
-            module test.noctx
+            package test.noctx;
             
-            pub fn answer() -> Int ! {} { 42 }
+            public fn answer() -> Int effects() { 42 }
             """;
         var file = tempDir.resolve("noctx.ngj");
         Files.writeString(file, source);
@@ -191,9 +191,9 @@ class AgentApiTest {
     @Test
     void inspectReturnsSymbolInfo() throws Exception {
         var source = """
-            module test.sym
+            package test.sym;
             
-            pub fn myFunction(x: Int) -> Int ! {} {
+            public fn myFunction(x: Int) -> Int effects() {
                 x + 1
             }
             """;
@@ -219,9 +219,9 @@ class AgentApiTest {
     @Test
     void buildRejectsIncompleteSource() throws Exception {
         var source = """
-            module test.incomplete
+            package test.incomplete;
             
-            pub fn calculate() -> Int ! {} {
+            public fn calculate() -> Int effects() {
                 ?todo
             }
             """;
@@ -243,9 +243,9 @@ class AgentApiTest {
     @Test
     void buildSucceedsForValidSource() throws Exception {
         var source = """
-            module test.buildok
+            package test.buildok;
             
-            pub fn answer() -> Int ! {} {
+            public fn answer() -> Int effects() {
                 42
             }
             """;
@@ -270,9 +270,9 @@ class AgentApiTest {
     @Test
     void exitCodeZeroForValidCheck() throws Exception {
         var source = """
-            module test.exitcode
+            package test.exitcode;
             
-            pub fn main() -> Int ! {} { 0 }
+            public fn main() -> Int effects() { 0 }
             """;
         var file = tempDir.resolve("exitcode.ngj");
         Files.writeString(file, source);
@@ -292,9 +292,9 @@ class AgentApiTest {
     @Test
     void exitCodeOneForInvalid() throws Exception {
         var source = """
-            module test.exitcode
+            package test.exitcode;
             
-            pub fn test() -> BadType ! {} { 42 }
+            public fn test() -> BadType effects() { 42 }
             """;
         var file = tempDir.resolve("exitcode.ngj");
         Files.writeString(file, source);
@@ -314,9 +314,9 @@ class AgentApiTest {
     @Test
     void exitCodeTwoForIncomplete() throws Exception {
         var source = """
-            module test.exitcode
+            package test.exitcode;
             
-            pub fn test() -> Int ! {} { ?hole }
+            public fn test() -> Int effects() { ?hole }
             """;
         var file = tempDir.resolve("exitcode.ngj");
         Files.writeString(file, source);

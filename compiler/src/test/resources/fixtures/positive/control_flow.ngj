@@ -1,25 +1,18 @@
-// Control flow: if, let, return
-module test.control
+// Control flow: if, val
+package test.control;
 
-pub fn max(a: Int, b: Int) -> Int ! {} {
-    if a > b {
+public fn max(a: Int, b: Int) -> Int effects() {
+    if (a > b) {
         a
     } else {
         b
     }
 }
 
-pub fn abs(n: Int) -> Int ! {} {
-    if n < 0 {
+public fn abs(n: Int) -> Int effects() {
+    if (n < 0) {
         -n
     } else {
         n
     }
-}
-
-pub fn factorial(n: Int) -> Int ! {} {
-    if n <= 1 {
-        return 1
-    }
-    n * factorial(n - 1)
 }

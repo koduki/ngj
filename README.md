@@ -2,7 +2,7 @@
 
 **NGJ (`ngj`)** is a statically typed, expression-oriented JVM language designed for AI agents to generate and repair human-reviewable applications. It combines modern JVM foundations with a compiler that exposes types, effects, ownership constraints and actionable diagnostics during generation.
 
-**Status: v0.3 specification target, with an initial v0.2 compiler implementation.** Compiler source and tests are present. The canonical syntax migration is tracked in [SYNTAX_MIGRATION.md](docs/SYNTAX_MIGRATION.md); v0.3 examples require that migration before compilation.
+**Status: v0.3 specification implemented.** The compiler, tests and fixtures use v0.3 canonical syntax (`package`/`public`/`record`/`val`/`var`, `effects()`, tail expressions, mandatory semicolons). The syntax migration is documented in [SYNTAX_MIGRATION.md](docs/SYNTAX_MIGRATION.md).
 
 ## Design principles
 

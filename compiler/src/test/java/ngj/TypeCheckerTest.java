@@ -21,9 +21,9 @@ class TypeCheckerTest {
     @Test
     void detectTypeMismatch() throws Exception {
         var source = """
-            module test.mismatch
+            package test.mismatch;
             
-            pub fn test() -> Int ! {} {
+            public fn test() -> Int effects() {
                 "hello"
             }
             """;
@@ -43,14 +43,14 @@ class TypeCheckerTest {
     @Test
     void detectNonExhaustiveMatch() throws Exception {
         var source = """
-            module test.nonexhaust
+            package test.nonexhaust;
             
-            pub enum Status { Ok, Pending, Error }
+            public enum Status { Ok(), Pending(), Error() }
             
-            pub fn test(s: Status) -> Int ! {} {
-                match s {
-                    Ok => 1,
-                    Pending => 2
+            public fn test(s: Status) -> Int effects() {
+                match (s) {
+                    case Ok() => { 1 },
+                    case Pending() => { 2 }
                 }
             }
             """;
@@ -70,9 +70,9 @@ class TypeCheckerTest {
     @Test
     void detectUnknownType() throws Exception {
         var source = """
-            module test.unknown
+            package test.unknown;
             
-            pub fn test() -> UnknownType ! {} {
+            public fn test() -> UnknownType effects() {
                 42
             }
             """;
@@ -92,9 +92,9 @@ class TypeCheckerTest {
     @Test
     void detectHoleAsIncomplete() throws Exception {
         var source = """
-            module test.hole
+            package test.hole;
             
-            pub fn calculate() -> Int ! {} {
+            public fn calculate() -> Int effects() {
                 ?todo
             }
             """;
@@ -114,9 +114,9 @@ class TypeCheckerTest {
     @Test
     void rejectNonEmptyEffectBound() throws Exception {
         var source = """
-            module test.effect
+            package test.effect;
             
-            pub fn read() -> String ! { FsRead } {
+            public fn read() -> String effects(FsRead) {
                 "content"
             }
             """;
@@ -136,9 +136,9 @@ class TypeCheckerTest {
     @Test
     void detectArithmeticTypeMismatch() throws Exception {
         var source = """
-            module test.arith
+            package test.arith;
             
-            pub fn test() -> Int ! {} {
+            public fn test() -> Int effects() {
                 1 + "hello"
             }
             """;
@@ -158,9 +158,9 @@ class TypeCheckerTest {
     @Test
     void detectLogicTypeMismatch() throws Exception {
         var source = """
-            module test.logic
+            package test.logic;
             
-            pub fn test() -> Bool ! {} {
+            public fn test() -> Bool effects() {
                 1 && true
             }
             """;

@@ -1,21 +1,19 @@
-// Result and Option usage
-module test.result
+// Result and Option usage (v0.3 syntax)
+package test.result;
 
-pub data DivError {
-    message: String
-}
+public record DivError(message: String);
 
-pub fn safeDivide(a: Int, b: Int) -> Result<Int, DivError> ! {} {
-    if b == 0 {
-        Err(DivError { message: "Division by zero" })
+public fn safeDivide(a: Int, b: Int) -> Result<Int, DivError> effects() {
+    if (b == 0) {
+        Err(DivError("Division by zero"))
     } else {
         Ok(a / b)
     }
 }
 
-pub fn doubleOrZero(opt: Option<Int>) -> Int ! {} {
-    match opt {
-        Some(value) => value * 2,
-        None => 0
+public fn doubleOrZero(opt: Option<Int>) -> Int effects() {
+    match (opt) {
+        case Some(value) => { value * 2 },
+        case None() => { 0 }
     }
 }

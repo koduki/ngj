@@ -1,16 +1,16 @@
-// Enum and match expression
-module test.enumeration
+// Enum and match expression (v0.3 syntax)
+package test.enumeration;
 
-pub enum Color {
-    Red,
-    Green,
-    Blue
+public enum Color {
+    Red(),
+    Green(),
+    Blue()
 }
 
-pub fn colorToInt(c: Color) -> Int ! {} {
-    match c {
-        Red => 0,
-        Green => 1,
-        Blue => 2
+public fn colorToInt(c: Color) -> Int effects() {
+    match (c) {
+        case Red() => { 0 },
+        case Green() => { 1 },
+        case Blue() => { 2 }
     }
 }

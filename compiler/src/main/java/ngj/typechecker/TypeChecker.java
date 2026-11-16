@@ -5,6 +5,8 @@ import ngj.diagnostic.*;
 import ngj.HoleContext.Binding;
 
 import java.util.*;
+import java.util.Set;
+import java.util.HashSet;
 
 /**
  * Type checking pass: verifies type consistency and collects hole contexts.
@@ -13,6 +15,7 @@ public final class TypeChecker {
     private final List<Diagnostic> diagnostics = new ArrayList<>();
     private final Map<String, TypeInfo> typeEnv = new HashMap<>();
     private final Deque<Map<String, TypeExpr>> scopes = new ArrayDeque<>();
+    private final Deque<Set<String>> mutableVars = new ArrayDeque<>();
     private TypeExpr currentReturnType;
     private List<String> currentEffects;
     
@@ -53,6 +56,12 @@ public final class TypeChecker {
                     .toList();
                 typeEnv.put(data.name(), new TypeInfo(TypeInfo.Kind.DATA, fields));
             }
+            case RecordDecl record -> {
+                var fields = record.params().stream()
+                    .map(p -> new FieldInfo(p.name(), p.type()))
+                    .toList();
+                typeEnv.put(record.name(), new TypeInfo(TypeInfo.Kind.DATA, fields));
+            }
             case EnumDecl enumDecl -> {
                 var variants = enumDecl.variants().stream()
                     .map(v -> new VariantInfo(v.name(), v.fields().stream()
@@ -69,7 +78,14 @@ public final class TypeChecker {
         switch (decl) {
             case FnDecl fn -> checkFn(fn);
             case DataDecl data -> checkData(data);
+            case RecordDecl record -> checkRecord(record);
             case EnumDecl enumDecl -> checkEnum(enumDecl);
+        }
+    }
+    
+    private void checkRecord(RecordDecl record) {
+        for (var param : record.params()) {
+            checkTypeExists(param.type());
         }
     }
     
@@ -143,6 +159,94 @@ public final class TypeChecker {
     
     private void checkStmt(Statement stmt) {
         switch (stmt) {
+            case ValStmt val -> {
+                var initType = checkExpr(val.initializer());
+                
+                TypeExpr varType;
+                if (val.explicitType() != null) {
+                    checkTypeExists(val.explicitType());
+                    varType = val.explicitType();
+                    
+                    if (initType != null && !isAssignable(varType, initType)) {
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-TYPE-002",
+                            "Type mismatch in val binding",
+                            val.span(),
+                            new ExpectedActual(varType.toString()),
+                            new ExpectedActual(initType.toString())
+                        ));
+                    }
+                } else {
+                    varType = initType;
+                    
+                    if (varType == null) {
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-TYPE-003",
+                            "Cannot infer type for val binding. Please add explicit type annotation.",
+                            val.span()
+                        ));
+                    }
+                }
+                
+                addLocal(val.name(), varType, false);
+            }
+            case VarStmt var -> {
+                var initType = checkExpr(var.initializer());
+                
+                TypeExpr varType;
+                if (var.explicitType() != null) {
+                    checkTypeExists(var.explicitType());
+                    varType = var.explicitType();
+                    
+                    if (initType != null && !isAssignable(varType, initType)) {
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-TYPE-002",
+                            "Type mismatch in var binding",
+                            var.span(),
+                            new ExpectedActual(varType.toString()),
+                            new ExpectedActual(initType.toString())
+                        ));
+                    }
+                } else {
+                    varType = initType;
+                    
+                    if (varType == null) {
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-TYPE-003",
+                            "Cannot infer type for var binding. Please add explicit type annotation.",
+                            var.span()
+                        ));
+                    }
+                }
+                
+                addLocal(var.name(), varType, true);
+            }
+            case AssignStmt assign -> {
+                var valueType = checkExpr(assign.value());
+                var targetType = lookupLocal(assign.name());
+                
+                if (targetType == null) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-TYPE-015",
+                        "Unknown variable: " + assign.name(),
+                        assign.span()
+                    ));
+                } else if (!isMutable(assign.name())) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-TYPE-016",
+                        "Cannot reassign immutable binding '" + assign.name() + "'. Use 'var' for mutable bindings.",
+                        assign.span()
+                    ));
+                } else if (valueType != null && !isAssignable(targetType, valueType)) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-TYPE-002",
+                        "Type mismatch in assignment",
+                        assign.span(),
+                        new ExpectedActual(targetType.toString()),
+                        new ExpectedActual(valueType.toString())
+                    ));
+                }
+            }
             case LetStmt let -> {
                 var initType = checkExpr(let.initializer());
                 
@@ -172,9 +276,20 @@ public final class TypeChecker {
                     }
                 }
                 
-                addLocal(let.name(), varType);
+                addLocal(let.name(), varType, false);
             }
-            case ExprStmt expr -> checkExpr(expr.expr());
+            case ExprStmt exprStmt -> {
+                var exprType = checkExpr(exprStmt.expr());
+                if (exprType != null && !getTypeName(exprType).equals("Unit")) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-TYPE-017",
+                        "Expression statement must have Unit type. Did you forget to use the value?",
+                        exprStmt.span(),
+                        new ExpectedActual("Unit"),
+                        new ExpectedActual(exprType.toString())
+                    ));
+                }
+            }
             case ReturnStmt ret -> {
                 if (ret.value() != null) {
                     var valueType = checkExpr(ret.value());
@@ -279,7 +394,8 @@ public final class TypeChecker {
                                 call.span()
                             ));
                         }
-                        yield new GenericTypeExpr("Option", List.of(), call.span());
+                        yield new GenericTypeExpr("Option", 
+                            List.of(new SimpleTypeExpr("_", call.span())), call.span());
                     }
                 }
                 
@@ -323,7 +439,89 @@ public final class TypeChecker {
             case PropagateExpr prop -> checkPropagateExpr(prop);
             
             case ParenExpr paren -> checkExpr(paren.inner());
+            
+            case ForExpr forExpr -> checkForExpr(forExpr);
+            
+            case WhileExpr whileExpr -> checkWhileExpr(whileExpr);
+            
+            case LambdaExpr lambda -> checkLambdaExpr(lambda);
         };
+    }
+    
+    private TypeExpr checkForExpr(ForExpr forExpr) {
+        var iterableType = checkExpr(forExpr.iterable());
+        
+        pushScope();
+        
+        TypeExpr elementType = null;
+        if (iterableType instanceof GenericTypeExpr generic && generic.name().equals("List")) {
+            if (!generic.typeArgs().isEmpty()) {
+                elementType = generic.typeArgs().get(0);
+            }
+        }
+        
+        addLocal(forExpr.varName(), elementType, false);
+        
+        var bodyType = checkBlock(forExpr.body());
+        
+        popScope();
+        
+        if (forExpr.hasYield()) {
+            if (bodyType != null) {
+                return new GenericTypeExpr("List", List.of(bodyType), forExpr.span());
+            }
+            return new GenericTypeExpr("List", List.of(), forExpr.span());
+        } else {
+            if (bodyType != null && !getTypeName(bodyType).equals("Unit")) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-TYPE-018",
+                    "for without yield must have Unit body type",
+                    forExpr.body().span(),
+                    new ExpectedActual("Unit"),
+                    new ExpectedActual(bodyType.toString())
+                ));
+            }
+            return new UnitTypeExpr(forExpr.span());
+        }
+    }
+    
+    private TypeExpr checkWhileExpr(WhileExpr whileExpr) {
+        var condType = checkExpr(whileExpr.condition());
+        if (condType != null && !getTypeName(condType).equals("Bool")) {
+            diagnostics.add(Diagnostic.error(
+                "NGJ-TYPE-010",
+                "While condition must be Bool",
+                whileExpr.condition().span()
+            ));
+        }
+        
+        var bodyType = checkBlock(whileExpr.body());
+        if (bodyType != null && !getTypeName(bodyType).equals("Unit")) {
+            diagnostics.add(Diagnostic.error(
+                "NGJ-TYPE-019",
+                "while body must have Unit type",
+                whileExpr.body().span(),
+                new ExpectedActual("Unit"),
+                new ExpectedActual(bodyType.toString())
+            ));
+        }
+        
+        return new UnitTypeExpr(whileExpr.span());
+    }
+    
+    private TypeExpr checkLambdaExpr(LambdaExpr lambda) {
+        pushScope();
+        
+        for (var param : lambda.params()) {
+            checkTypeExists(param.type());
+            addLocal(param.name(), param.type(), false);
+        }
+        
+        var bodyType = checkBlock(lambda.body());
+        
+        popScope();
+        
+        return bodyType;
     }
     
     private TypeExpr checkBinaryExpr(BinaryExpr binary) {
@@ -426,17 +624,27 @@ public final class TypeChecker {
         TypeExpr elseType = null;
         if (ifExpr.elseBranch() != null) {
             elseType = checkExpr(ifExpr.elseBranch());
-        }
-        
-        // If used as expression, both branches must have compatible types
-        if (elseType != null && thenType != null && !isAssignable(thenType, elseType)) {
-            diagnostics.add(Diagnostic.error(
-                "NGJ-TYPE-011",
-                "If branches must have same type",
-                ifExpr.span(),
-                new ExpectedActual(thenType.toString()),
-                new ExpectedActual(elseType.toString())
-            ));
+            
+            if (thenType != null && elseType != null && !isAssignable(thenType, elseType)) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-TYPE-011",
+                    "If branches must have same type",
+                    ifExpr.span(),
+                    new ExpectedActual(thenType.toString()),
+                    new ExpectedActual(elseType.toString())
+                ));
+            }
+        } else {
+            if (thenType != null && !getTypeName(thenType).equals("Unit")) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-TYPE-021",
+                    "If without else must have Unit then-branch type, or add an else branch",
+                    ifExpr.thenBranch().span(),
+                    new ExpectedActual("Unit"),
+                    new ExpectedActual(thenType.toString())
+                ));
+            }
+            return new UnitTypeExpr(ifExpr.span());
         }
         
         return thenType;
@@ -513,15 +721,20 @@ public final class TypeChecker {
         
         if (innerType != null) {
             var typeName = getTypeName(innerType);
-            if (!typeName.equals("Result") && !typeName.equals("Option")) {
+            if (typeName.equals("Option")) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-TYPE-020",
+                    "? operator is not supported on Option in v0.3. Use match or convert to Result explicitly.",
+                    prop.span()
+                ));
+            } else if (!typeName.equals("Result")) {
                 diagnostics.add(Diagnostic.error(
                     "NGJ-TYPE-013",
-                    "? operator requires Result or Option type",
+                    "? operator requires Result type",
                     prop.span()
                 ));
             }
             
-            // Check that error type matches function's Result error type
             if (innerType instanceof GenericTypeExpr generic && 
                 currentReturnType instanceof GenericTypeExpr returnGeneric) {
                 
@@ -544,7 +757,6 @@ public final class TypeChecker {
             }
         }
         
-        // Result<T, E>? returns T
         if (innerType instanceof GenericTypeExpr generic && !generic.typeArgs().isEmpty()) {
             return generic.typeArgs().get(0);
         }
@@ -632,16 +844,34 @@ public final class TypeChecker {
     
     private void pushScope() {
         scopes.push(new HashMap<>());
+        mutableVars.push(new HashSet<>());
     }
     
     private void popScope() {
         scopes.pop();
+        mutableVars.pop();
     }
     
     private void addLocal(String name, TypeExpr type) {
+        addLocal(name, type, false);
+    }
+    
+    private void addLocal(String name, TypeExpr type, boolean isMutable) {
         if (!scopes.isEmpty()) {
             scopes.peek().put(name, type);
+            if (isMutable && !mutableVars.isEmpty()) {
+                mutableVars.peek().add(name);
+            }
         }
+    }
+    
+    private boolean isMutable(String name) {
+        for (var mutSet : mutableVars) {
+            if (mutSet.contains(name)) {
+                return true;
+            }
+        }
+        return false;
     }
     
     private TypeExpr lookupLocal(String name) {

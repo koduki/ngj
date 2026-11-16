@@ -56,6 +56,22 @@ public final class SymbolFinder {
                 }
                 yield null;
             }
+            case RecordDecl record -> {
+                var id = modulePath + "." + record.name();
+                if (id.equals(symbolId) || record.name().equals(symbolId)) {
+                    yield new SymbolInfo(
+                        id,
+                        "record",
+                        record.name(),
+                        modulePath,
+                        null,
+                        List.of(),
+                        record.isPublic() ? "public" : "private",
+                        "record " + record.name()
+                    );
+                }
+                yield null;
+            }
             case EnumDecl enumDecl -> {
                 var id = modulePath + "." + enumDecl.name();
                 if (id.equals(symbolId) || enumDecl.name().equals(symbolId)) {
@@ -66,11 +82,10 @@ public final class SymbolFinder {
                         modulePath,
                         null,
                         List.of(),
-                        enumDecl.isPublic() ? "pub" : "private",
+                        enumDecl.isPublic() ? "public" : "private",
                         "enum " + enumDecl.name()
                     );
                 }
-                // Check variants
                 for (var variant : enumDecl.variants()) {
                     var variantId = id + "." + variant.name();
                     if (variantId.equals(symbolId) || variant.name().equals(symbolId)) {
@@ -81,7 +96,7 @@ public final class SymbolFinder {
                             modulePath,
                             null,
                             List.of(),
-                            enumDecl.isPublic() ? "pub" : "private",
+                            enumDecl.isPublic() ? "public" : "private",
                             enumDecl.name() + "." + variant.name()
                         );
                     }
