@@ -1,46 +1,28 @@
+// Design example. App adapters below are required contracts, not implemented SDKs.
 module payment.service
 
-import std.http.{Client, Request, Response}
-import std.time.Duration
-import std.telemetry.{span, event, Secret}
+import std.telemetry.event
+import app.payment.{PaymentGateway, FraudRead, PaymentRequest, PaymentId,
+                    PaymentError, checkFraud, chargeRecoverable}
 
-data PaymentId(val: Long)
-data Money(amount: Long, currency: String)
+event PaymentCompleted(paymentId: Long)
 
-data PaymentRequest(
-    id: PaymentId,
-    userId: Long,
-    cardToken: Secret<String>,
-    amount: Money
-)
-
-enum PaymentError {
-    InsufficientFunds,
-    FraudDetected(reason: String),
-    GatewayTimeout,
-    UpstreamError(code: Int)
-}
-
-event PaymentCompleted(
-    paymentId: Long,
-    amount: Long,
-    durationMs: Long
-)
-
+// PaymentGateway is a host-issued capability, not a URL constructed by this code.
+// chargeRecoverable owns durable intent, idempotency and Unknown reconciliation.
 @trace("payment.process")
-fn processPayment(http: Client, req: PaymentRequest) -> Result<PaymentId, PaymentError> {
-    span "payment.validate_and_charge" (payment_id = req.id.val, amount = req.amount.amount) {
-        let (fraudResult, balanceResult) = scope {
-            let f1 = fork { checkFraud(http, req) }
-            let f2 = fork { reserveBalance(http, req.userId, req.amount) }
-            (f1.join()?, f2.join()?)
-        }
-
-        if !fraudResult.isSafe {
-            return Err(PaymentError::FraudDetected(fraudResult.reason))
-        }
-
-        emit PaymentCompleted(req.id.val, req.amount.amount, span.elapsedMs())
-        Ok(req.id)
+pub fn processPayment(gateway: &PaymentGateway, fraud: &FraudRead,
+                      req: PaymentRequest)
+    -> Result<PaymentId, PaymentError> ! { FraudRead, PaymentWrite }
+{
+    // Do not reserve/charge in parallel before the fraud decision is known.
+    let decision = checkFraud(fraud, &req)?
+    if !decision.isSafe {
+        return Err(PaymentError::FraudDetected)
     }
+
+    // Gateway receives the Secret token through its approved sink; no expose().
+    // A timeout may return OutcomeUnknown(operationId), not a definite failure.
+    let receipt = chargeRecoverable(gateway, req)?
+    emit PaymentCompleted(receipt.paymentId.val)
+    Ok(receipt.paymentId)
 }
