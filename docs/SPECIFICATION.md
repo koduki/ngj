@@ -1,7 +1,7 @@
 # NGJ — Concept & Language Specification
 
-> Draft v0.2 / 2026-11-17
-> Status: language design, not an implemented compiler or a production security guarantee.
+> Draft v0.3 / 2026-11-17
+> Status: v0.3 target specification. An initial v0.2 compiler exists; migration and conformance checks are pending.
 > Baseline: Java 25 class files; optional, pinned Valhalla and Native Image backends.
 
 ## 1. 目的・適用範囲
@@ -33,38 +33,38 @@ AIを言語ランタイムやコンパイラの必須依存にはしない。同
 
 ## 2. 構文と基本意味論
 
-### 2.1 モジュール・名前解決
+v0.3の正規構文は[EBNF.md](EBNF.md)、既存compilerからの移行は[SYNTAX_MIGRATION.md](SYNTAX_MIGRATION.md)で定義する。文法と文の区切りについてはEBNF.mdを優先する。システム機能の意味論は本書の後続節で定義し、未実装段階の構文は拒否する。
 
-- ファイルは`module app.name`で始める。importは明示し、ワイルドカードimportは提供しない。
-- 宣言の可視性はデフォルトでmodule内。`pub`だけを外部へ公開する。
-- 型名・値名は解決後のシンボルIDで識別する。曖昧なimportはエラーとし、暗黙の候補選択をしない。
-- 公開関数は引数型、戻り値型、Effect上限を明記する。ローカル変数・非公開関数のEffectは推論できる。再帰する公開APIは明示署名を要する。
-- 暗黙の数値変換、暗黙のnull許容、ユーザー定義の暗黙変換はない。名前付き引数は宣言された引数名と一致させる。
-- `@derive(JsonCodec, CliArgs)`等は登録済みの決定的なコンパイル時展開。生成コードも同じ検査を通す。任意のビルドスクリプト実行権限を与えない。
+### 2.1 正規構文と名前解決
 
-概略構文（完全な字句/EBNF仕様はPhase 1で固定）:
+- ファイルは`package app.name;`で始める。importは一宣言につき一symbolを明示する。
+- 宣言の可視性はデフォルトでpackage内。`public`を公開宣言に使う。
+- 関数はトップレベルに置ける。`fn name(arg: Type) -> Type effects(...)`に統一する。
+- 全関数の引数・戻り値・Effect上限は明示する。val/varの型は局所的に推論できる。
+- `val`は再束縛不可、`var`はローカル再束縛可能。代入は文であり値を返さない。
+- 文は必ずセミコロンで終える。ブロック末尾の結果式には付けない。改行は空白として扱う。
+- 戻り値は末尾式で定義する。`return`は使用しない。Resultの早期失敗は`?`で処理する。
+- if/whileの条件は括弧、本体は波括弧で囲む。matchは`match (value) { case Pattern => { ... } }`。
+- ifの両分岐、matchの全armは期待型に適合させる。else省略時はUnitを要求する。
+- record宣言は`record Name(field: Type);`、生成は`Name(value)`。enum variantも必ず`Variant(...)`形式で定義・構築・分解する。
+- 型名はInt/Long/Bool/String/Unitに統一し、ユーザー定義型も同じ型構文を使う。
+- overload、暗黙変換、継承、名前付き/既定/可変長引数、別名import、任意演算子を初期仕様に含めない。
+- 式中の明示型引数は`f::<T>(x)`。型の位置は`List<T>`。型情報で構文解析を分岐させない。
+- `@derive`は後続段階の登録済み静的展開とし、任意の構文拡張を行わない。
 
-```text
-function := [pub] fn name [<type-parameters>] (parameters)
-            -> type ! {effect-list} [contract-clauses] block
-hole     := ?identifier
-propagate := expression ?
-borrow   := &expression | &mut expression
-```
-
-`?name`は式の開始位置の穴、`expr?`は後置のエラー伝播として区別する。ブロック末尾の式が値。引数・演算子の評価は左から右、`&&` / `||`は短絡評価。`match`は網羅性を検査する。`return`と`?`は包含関数を終了し、その途中のcleanupを実行する。
+`?name`はprimary式の穴、`expr?`は後置伝播。伝播先は最も内側の関数またはlambdaである。普通のblock/if/match/while/build/scopeは伝播先を作らず、forkは子タスクの関数境界を作る。for callback内の伝播規則は5.4節に従う。
 
 ### 2.2 値・同一性・不透明型
 
 | 宣言 | 意味 | 制約 |
 |---|---|---|
-| `data` | 不変の積型、構造的等価性 | 全フィールドが不変。生の可変Java参照を格納しない |
+| `record` | 不変の積型、構造的等価性 | 全フィールドが不変。生の可変Java参照を格納しない |
 | `enum` | 閉じた直和型 | パターン分岐を網羅させる |
 | `resource` | 寿命・所有権を持つ同一性オブジェクト | affine、暗黙コピー禁止 |
 | `actor` | 隔離した可変状態とメッセージ処理 | 状態への直接外部アクセス禁止 |
-| `opaque data` | module外から表現・コンストラクターを隠す値 | 公開された検証済み生成関数だけが構築可能 |
+| `opaque record` | package外から表現・コンストラクターを隠す値 | 公開された検証済み生成関数だけが構築可能 |
 
-`==`は値の等価性。`===`は同一性のある型でのみ使用できる。`data`内の参照も安全な不変表現でなければならず、`final`フィールドだけでは深い不変性の証拠にならない。
+`==`は値の等価性。`===`は同一性のある型でのみ使用できる。`record`内の参照も安全な不変表現でなければならず、`final`フィールドだけでは深い不変性の証拠にならない。
 
 `Copy`は複製しても寿命・権限・消費制約を破らない型の性質、`Send`は所有権を別タスクへ移せる性質、`Share`は共有借用を並行使用できる性質。コンパイラがフィールドから導出し、アプリ側の無検査な宣言は禁止する。`Copy`は物理的なメモリコピーを必須としない。メソッド呼び出しのreceiverは宣言された`self`モードに従って自動借用できるが、通常の関数引数の借用は`&`で明示する。
 
@@ -74,7 +74,7 @@ borrow   := &expression | &mut expression
 
 - `Int`は符号付き32bit、`Long`は符号付き64bit、`Byte`は符号なし8bit。通常の整数演算はオーバーフローを検出し、タスクfaultにする。必要な回復は`checkedAdd`等の`Result` APIで記述する。wrap/saturateは明示APIのみ。
 - `Result<T,E>`と`Option<T>`を正規の失敗・不在表現とする。v0.1の代替候補`T | E`は採用しない。
-- `?`は`Err(e)`を現在の関数へ伝播する。異なるエラー型には明示的な`mapErr`を必要とする。失敗する値の黙殺はエラーとし、意図的な破棄には理由付きの明示操作を要する。
+- `?`は`Err(e)`を現在の関数へ伝播する。異なるエラー型には明示的なmatchまたはmapErrによる変換を必要とする。Optionへの?は提供せず、matchまたはResultへの明示変換を使う。式文にはUnit型を要求する。Resultを破棄する場合もmatch等で明示的に扱う。
 - NGJには`null`リテラルとユーザーの`throw`構文を提供しない。ただしVM障害、契約違反、オーバーフロー、ランタイム不変条件違反は存在する。
 - 回復可能なドメインエラーは`Result`、協調キャンセルは`Cancelled`、プログラミング上のfaultはタスク失敗として区別する。OOM等のVM致命障害の回復やcleanup成功は保証しない。
 
@@ -90,21 +90,21 @@ borrow   := &expression | &mut expression
 - `&mut T`: 排他的借用。同時に他の借用を持てない。
 - 借用中は所有者のmove/close/freezeを拒否する。
 - closureへのcaptureにも同じ規則を適用。`fork`はcaptureのSend/Shareと寿命を検査する。
-- MVPの借用期間は字句スコープ単位。非字句ライフタイムは診断の改善後に導入できる。
+- 所有権機能の初期実装の借用期間は字句スコープ単位。非字句ライフタイムは診断の改善後に導入できる。
 
 ### 3.2 buildと不変コレクション
 
-```rust
-let values = build MutableList<Int> {
-    this.add(1)
-    this.add(2)
-    this
-}
+```scala
+val values = build (builder: MutableList<Int>) {
+    builder.add(1);
+    builder.add(2);
+    builder
+};
 ```
 
-`this`はblock内の一意なbuilder。正常終了時に消費し、不変`List<Int>`へ変換する。別名・可変slice・closureを外へ逃がすことは拒否する。早期return/Err/cancel/faultではbuilderを破棄し、不完全な値を公開しない。
+`builder`はblock内の一意なbuilder。正常終了時に消費し、不変`List<Int>`へ変換する。別名・可変slice・closureを外へ逃がすことは拒否する。Err伝播/cancel/faultではbuilderを破棄し、不完全な値を公開しない。
 
-`let mut`によるローカル変数の再束縛は許すが、共有オブジェクトの可変性を意味しない。純粋関数内でも外から観測できないローカル構築は許す。
+`var`によるローカル変数の再束縛は許すが、共有オブジェクトの可変性を意味しない。純粋関数内でも外から観測できないローカル構築は許す。
 
 `List`/`Map`/`Set`は不変APIと構造共有を基本とする。独占しているbacking storageを再利用できるbuilderではゼロコピーfreezeを行う。表現変換が必要な場合のコピー・ノード割当は許容し、性能報告へ記録する。永続データ構造全体の無割当や全操作のロックフリー性は保証しない。
 
@@ -136,21 +136,21 @@ DBのcommit/rollbackや支払い解放を、メモリ解放と同じ暗黙destru
 
 ### 4.1 Effect集合
 
-```rust
-pub fn calculateFee(amount: Money) -> Money ! {} { ... }
-pub fn findUser(db: &DbRead<Users>, id: UserId)
-    -> Result<Option<User>, DbError> ! { DbRead } { ... }
+```scala
+public fn calculateFee(amount: Money) -> Money effects() { ?fee }
+public fn findUser(db: &DbRead<Users>, id: UserId)
+    -> Result<Option<User>, DbError> effects(DbRead) { ?find_user }
 ```
 
-`! {}`は外部観測可能な業務副作用なし。時刻、乱数、環境変数、ファイル、ネットワーク、DB、process起動、機密解除はそれぞれEffectとして扱う。例: `Clock`, `Random`, `EnvRead`, `FsRead`, `FsWrite`, `Net`, `DbRead`, `DbWrite`, `PaymentWrite`, `Declassify`。
+`effects()`は外部観測可能な業務副作用なし。時刻、乱数、環境変数、ファイル、ネットワーク、DB、process起動、機密解除はそれぞれEffectとして扱う。例: `Clock`, `Random`, `EnvRead`, `FsRead`, `FsWrite`, `Net`, `DbRead`, `DbWrite`, `PaymentWrite`, `Declassify`。
 
 信頼されたアダプターは複数の下位操作を、対象が限定されたドメインEffectにまとめられる（例: PaymentWrite）。manifestには下位操作・Capability・監査要件を残し、無制限な権限を隠さない。通常のアプリコードにはこのEffect再分類を許さない。
 
 式のEffectは実行され得る子式と呼び出し先Effectの和集合。分岐は両側の和集合。関数本体の推論結果は宣言上限の部分集合でなければならない。上位関数もclosureのEffectを保持する。純粋callbackを要求するAPIへ副作用付きclosureを渡せない。
 
-再利用可能な高階関数にはEffect変数`ε`を用いた有限集合上の多相性を設ける。MVPでは明示的な単一Effect変数と和集合に制限し、handlerによる任意Effect消去は導入しない。`fork`内のEffectも親の推論結果に含め、並列化で権限検査を迂回できない。
+高階関数とEffect多相性は後続段階で定義する。初期の副作用検査は明示された有限集合の和集合・部分集合検査に限定する。callback本体のEffectも呼び出し元へ伝播し、forやforkへの移動で権限検査を迂回できない。
 
-`! {}`は停止性や無faultを意味しない。コンパイラ管理の計測は業務Effectと区別するが、公開/マスク済みデータのみを許し、権限や情報フロー検査を迂回しない。再現テストでは無効化または収集先を固定する。
+`effects()`は停止性や無faultを意味しない。コンパイラ管理の計測は業務Effectと区別するが、公開/マスク済みデータのみを許し、権限や情報フロー検査を迂回しない。再現テストでは無効化または収集先を固定する。
 
 ### 4.2 Capabilityとホストポリシー
 
@@ -177,7 +177,7 @@ Effectは「操作の種類」、Capabilityは「どの対象に何を許すか�
 | 正常なscope終了 | 全子タスクを待機。未処理のタスク失敗を`ScopeError`として返す |
 | 子のfault / task failure | fail-fastで兄弟へキャンセル要求し、終了を待つ |
 | 子が`Err(E)`という値を返した | 自動キャンセルしない。親が処理し、親のErr終了でキャンセルできる |
-| 親のErr/早期return/cancel | 未完了の子へキャンセル要求し、join・cleanupしてから退出 |
+| 親のErr/Err伝播/cancel | 未完了の子へキャンセル要求し、join・cleanupしてから退出 |
 | deadline超過 | キャンセル要求。強制停止・一定時間内の退出を保証しない |
 
 scope式の正常結果は`Result<T,ScopeError>`。明示joinした失敗は観測済みとして二重報告しない。未観測失敗は生成順で安定して列挙する。scope内の`?`による包含関数の退出でも子タスクの終了待ちを省略しない。
@@ -188,7 +188,7 @@ scope式の正常結果は`Result<T,ScopeError>`。明示joinした失敗は観�
 
 `Channel<T>`は容量を必須とするbounded channel。満杯ならsendを待機し、キャンセル/closeを型付きエラーで返す。無制限bufferは明示的な別APIとする。`T: Send`を要求し、send成功時に所有権を移譲、失敗時は値を返す。`Share`な不変値の共有はpayloadコピー不要だが、キューの同期コストは存在する。
 
-actorはmailboxから一件ずつ処理し、状態はactor内に閉じる。actor handleはメッセージ送信権限であり、可変状態の共有参照ではない。actorも親scopeに属し、終了・キャンセルを待機する。MVPではメッセージ処理中の再入を認めない。相互待機によるdeadlockを型だけで排除するとは主張しない。
+actorはmailboxから一件ずつ処理し、状態はactor内に閉じる。actor handleはメッセージ送信権限であり、可変状態の共有参照ではない。actorも親scopeに属し、終了・キャンセルを待機する。actorの初期実装ではメッセージ処理中の再入を認めない。相互待機によるdeadlockを型だけで排除するとは主張しない。
 
 ### 5.3 Typestateと外部操作
 
@@ -202,6 +202,16 @@ release(Pending) -> Released | Unknown(RecoveryToken)
 タイムアウトは失敗確定ではない。`RecoveryToken`は操作ID、idempotency key、照会に必要な情報を保持し、信頼された復旧ストアへの永続化を必要とする。クラッシュ時は型検査が実行できないため、外部変更前のdurable intentと冪等APIをアダプター側で実装する。
 
 構造化キャンセルは外部副作用のrollbackではない。不正検知の成功前に残高確保を並列実行するなら、補償と結果不明の復旧が必要。サンプルでは検査を先行させ、決済処理は復旧契約を持つアダプターへ集約する。
+
+### 5.4 for / for-yield / while
+
+`for (x <- xs) yield { body }`は各反復の値を収集し、`for (x <- xs) { body }`と`while (condition) { body }`はUnitを返す。Scalaの区別に合わせる。
+
+初期対応は即時評価の標準Listと単一generatorに限定する。入力は一度評価し、左から右にbodyを実行する。for-yieldの結果はList、空入力なら空List。for/whileのbodyはUnit。遅延列、guard、複数generator、任意map/flatMapプロトコルは後続仕様に分離する。
+
+forのbodyはcallback境界であり、body直下の?は拒否する。body内のwhileにもこの規則が及ぶ。検証結果を収集するならList<Result<T,E>>を明示的に生成する。複数結果をまとめるtraverse等は標準ライブラリの型付き操作として追加する。独立したlambda内の?はそのlambdaだけから退出する。
+
+for callbackとlambdaは初期実装で外側のvarをcaptureできない。valのcaptureにも所有権規則を適用する。body内で宣言したvarは使用可能。外側の状態を更新する繰り返しには、その関数内のwhileを使う。break/continue/非局所returnは初期対応に含めない。
 
 ## 6. 情報フロー・機密・出典
 
@@ -218,13 +228,16 @@ v0.2の最初の実装は**明示的なデータフロー**を対象とする。
 
 ## 7. 契約・反例・検証
 
-`requires`は呼び出し前条件、`ensures`は正常な戻り値への後条件。resource invariantは公開操作の出入口で検査する。契約式は純粋で、検査中の副作用・機密出力を禁止する。検証対象の整数は実装のbit幅とoverflow意味論に合わせる。
+後続段階の契約は署名末尾のrequires(condition)、ensures(condition)の順に記述する。`requires`は呼び出し前条件、`ensures`は正常な戻り値への後条件。resource invariantは公開操作の出入口で検査する。契約式は純粋で、検査中の副作用・機密出力を禁止する。検証対象の整数は実装のbit幅とoverflow意味論に合わせる。
 
-```rust
-pub fn checkedLength(n: Int) -> Result<Long, LengthError> ! {}
-    ensures match result { Ok(v) => v >= 0, Err(_) => true }
+```scala
+public fn checkedLength(n: Int) -> Result<Long, LengthError> effects()
+    ensures (match (result) {
+        case Ok(v) => { v >= 0L },
+        case Err(_) => { true }
+    })
 {
-    if n < 0 { Err(LengthError::Negative) } else { Ok(n.toLong()) }
+    if (n < 0) { Err(LengthError.Negative()) } else { Ok(n.toLong()) }
 }
 ```
 
@@ -283,7 +296,7 @@ Class-File APIによる走査は既知のreflection、Unsafe、native、dynamic 
 
 - NGJの通常コードから実行時reflectionは禁止。
 - 選択したAOT profileで許可されるJava内部reflectionは、信頼されたadapterとreachability metadata、Native Imageのbuild/smoke testを必要とする。
-- `unsafe java_interop`は監査対象の境界表示であり、許可の発行ではない。restricted sourceでは禁止し、allowlistに固定されたadapter module内だけに限定する。
+- `unsafe java_interop`は監査対象の境界表示であり、許可の発行ではない。restricted sourceでは禁止し、allowlistに固定されたadapter package内だけに限定する。
 - v0.1の`aot_verified = true`という自己申告は廃止。検証結果はツールチェーン・依存hash・metadata・試験結果に紐付いたbuild artifactで表す。
 - `synchronized`だけを根拠にJava 25向けコードを拒否しない。JDK 24のJEP 491による改善を踏まえ、native pinning、ロック競合、割り込み非対応等を別々に評価する。
 
@@ -324,12 +337,12 @@ Loom/ScopedValue/StructuredTaskScopeの利用可否・preview flagsはprofileに
 
 詳細な完了条件は[VALIDATION.md](VALIDATION.md)を参照する。
 
-1. **Phase 1:** fn/data/enum/Result/Option、module、最小型検査、java25出力、Typed Holes、構造化診断、型文脈検索。Effect宣言を保存し、未実装の強制機能を黙って受理しない。
+1. **Phase 1:** fn/record/enum/Result/Option、package、最小型検査、java25出力、Typed Holes、構造化診断、型文脈検索。空のeffects()を検査し、未実装の強制機能を黙って受理しない。
 2. **Phase 2:** Effect/Capability、所有権・freeze、Bytes/Arena、Java adapterの信頼境界、restricted build。小さい意味論モデルとnegative testsを先に用意する。
 3. **Phase 3:** scope/fork/Channel/actor、Typestate、契約・property tests、明示的情報フロー、OTel/JFR、逐次I/O replay。
 4. **Phase 4:** Valhalla、選択的特殊化、Native Image互換性行列、限定的証明器、AI生成の比較実験。
 
-未決事項: 完全なEBNF、効果多相性の一般化範囲、actor supervisionの拡張、非字句借用、任意handler、暗黙情報フロー、並行replay、証明器の具体選定。未決機能を利用するソースは`unsupported_feature`として拒否し、実装済み保証と混在させない。
+未決事項: システム機能の拡張EBNF、効果多相性の一般化範囲、actor supervisionの拡張、非字句借用、任意handler、暗黙情報フロー、並行replay、証明器の具体選定。未決機能を利用するソースは`unsupported_feature`として拒否し、実装済み保証と混在させない。
 
 ## 12. v0.1からの変更
 
@@ -339,3 +352,9 @@ Loom/ScopedValue/StructuredTaskScopeの利用可否・preview flagsはprofileに
 - freeze、Arena、join、キャンセル、cleanup、外部操作の結果不明を詳細化。
 - Effect/Capability、Typestate、情報フロー、契約、再実行、信頼境界を追加。
 - サンプルは安全なアダプター境界を使う設計例へ更新。コンパイル済みと誤認させない。
+
+## 13. v0.3の複雑性削減
+
+構文はEBNF.mdに一元化し、旧表記を別名として受理しない。通常終了は末尾式、回復可能な失敗はResultに統一する。全関数の境界型・Effectを明示し、推論は局所的に限定する。Scala方式のループを標準Listから導入し、callbackからの非局所退出を廃止する。所有権・並行性・情報フローの保証は各段階の検査が完成してから有効化する。
+
+既存compilerはv0.2の実装であり、v0.3への移行と適合性確認は[SYNTAX_MIGRATION.md](SYNTAX_MIGRATION.md)の受入条件で管理する。

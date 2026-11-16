@@ -1,0 +1,25 @@
+// v0.3 target example. Current v0.2 compiler migration is pending.
+package example.syntax;
+
+public record Amount(value: Long);
+
+public enum InputError {
+    Negative()
+}
+
+public fn validate(value: Long) -> Result<Amount, InputError> effects() {
+    if (value < 0L) {
+        Err(InputError.Negative())
+    } else {
+        Ok(Amount(value))
+    }
+}
+
+public fn checkedValue(value: Long) -> Result<Long, InputError> effects() {
+    val amount = validate(value)?;
+    Ok(amount.value)
+}
+
+public fn incomplete(value: Long) -> Result<Amount, InputError> effects() {
+    ?validated_amount
+}

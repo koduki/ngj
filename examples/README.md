@@ -1,6 +1,8 @@
 # Design examples
 
-すべてdraft v0.2の設計例であり、コンパイル・実行済みではない。コンパイラ、標準ライブラリ、`app.*` adapterはまだ存在しない。例は意味論と責務分担を説明するもので、動作するSDKや本番決済処理を提供しない。
+[syntax_v03.ngj](syntax_v03.ngj)をv0.3正規構文の基準例とする。現在のcompilerはv0.2構文からの移行が必要であり、この例は実行確認前である。incomplete関数には意図的なholeがあり、移行後もrelease buildは拒否する。
+
+以下の既存例はv0.2のアーキテクチャ設計例として保存する。app.* adapterを省略した例であり、実行可能なテストfixtureはcompiler/src/test/resourcesにある。旧例のmodule/pub/data/let/returnはv0.3で受理する別名ではない。変更規則は[SYNTAX_MIGRATION.md](../docs/SYNTAX_MIGRATION.md)を参照する。
 
 | ファイル | 示すもの | 特に必要な試験 |
 |---|---|---|

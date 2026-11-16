@@ -1,7 +1,8 @@
 # NGJ MVP Coverage Matrix
 
 > Issue #2 tracking document
-> Status: Implementation in progress
+> Status: v0.2 implementation tracking baseline. Existing marks have not been revalidated in this syntax revision.
+> The v0.3 target uses package/public/record/val, effects(), mandatory separators and tail results. See [migration requirements](SYNTAX_MIGRATION.md). The tables below describe the v0.2 baseline, not alternative accepted v0.3 spellings.
 
 This document tracks which language and tooling features are included in the MVP,
 their implementation status, and explicit exclusions.
