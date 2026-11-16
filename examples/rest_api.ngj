@@ -1,171 +1,58 @@
+// Design example. Trusted adapters isolate JDBC/credentials and HTTP capabilities.
 module app.api
 
-import std.http.{Server, Router, Request, Response, Status}
-import std.json.{toJson, fromJson}
-import std.telemetry.{span, event, Secret}
-import std.time.Instant
-import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet}
-
-// 1. Domain Models (Valhalla Value Class)
-data UserId(val: Long)
+import std.http.{Request, Response, Status}
+import std.json.fromJson
+import std.telemetry.event
+import app.users.{UserId, CreateUserReq,
+                  UserRead, UserWrite, validateCreateUser,
+                  findById, createUser, jsonResponse}
 
 @derive(JsonCodec)
-data CreateUserReq(
-    name: String,
-    email: String,
-    password: Secret<String>
-)
+data ErrorRes(code: String, message: String)
+event UserCreated(userId: Long)
 
-@derive(JsonCodec)
-data UserRes(
-    id: Long,
-    name: String,
-    email: String,
-    createdAt: String
-)
-
-@derive(JsonCodec)
-data ErrorRes(
-    code: String,
-    message: String
-)
-
-enum ApiError {
-    InvalidInput(msg: String),
-    NotFound(msg: String),
-    DbFailure(detail: String)
-}
-
-event UserCreatedEvent(userId: Long, durationMs: Long)
-
-// 2. DB Repository (Strict AOT Java Interop Boundary)
-resource UserRepository(dbUrl: String, dbUser: String, dbPass: Secret<String>) {
-
-    fn findById(self, id: UserId) -> Result<Option<UserRes>, ApiError> {
-        span "db.users.find_by_id" (user_id = id.val) {
-            unsafe java_interop(aot_verified = true) {
-                let conn = DriverManager.getConnection(self.dbUrl, self.dbUser, self.dbPass.expose())
-                    .mapErr(|e| ApiError::DbFailure(e.message))?
-                defer conn.close()
-
-                let stmt = conn.prepareStatement(
-                    "SELECT id, name, email, created_at FROM users WHERE id = ?"
-                ).mapErr(|e| ApiError::DbFailure(e.message))?
-                defer stmt.close()
-                stmt.setLong(1, id.val)
-
-                let rs = stmt.executeQuery().mapErr(|e| ApiError::DbFailure(e.message))?
-                defer rs.close()
-
-                if rs.next().mapErr(|e| ApiError::DbFailure(e.message))? {
-                    Ok(Some(UserRes(
-                        id        = rs.getLong("id")?,
-                        name      = rs.getString("name").toOption().unwrapOr(""),
-                        email     = rs.getString("email").toOption().unwrapOr(""),
-                        createdAt = rs.getString("created_at").toOption().unwrapOr("")
-                    )))
-                } else {
-                    Ok(None)
-                }
-            }
-        }
+pub fn handleGetUser(repo: &UserRead, req: Request)
+    -> Response ! { DbRead }
+{
+    let id = match req.pathParam("id").andThen(|s| s.parseLong().ok()) {
+        Some(value) => UserId(value),
+        None => return jsonResponse(Status::BadRequest,
+            ErrorRes("INVALID_ID", "User ID must be a number"))
     }
-
-    fn create(self, req: CreateUserReq, hashedPass: String) -> Result<UserRes, ApiError> {
-        span "db.users.insert" {
-            unsafe java_interop(aot_verified = true) {
-                let conn = DriverManager.getConnection(self.dbUrl, self.dbUser, self.dbPass.expose())
-                    .mapErr(|e| ApiError::DbFailure(e.message))?
-                defer conn.close()
-
-                let now = Instant.now().toString()
-                let stmt = conn.prepareStatement(
-                    "INSERT INTO users (name, email, password_hash, created_at) VALUES (?, ?, ?, ?) RETURNING id"
-                ).mapErr(|e| ApiError::DbFailure(e.message))?
-                defer stmt.close()
-
-                stmt.setString(1, req.name)
-                stmt.setString(2, req.email)
-                stmt.setString(3, hashedPass)
-                stmt.setString(4, now)
-
-                let rs = stmt.executeQuery().mapErr(|e| ApiError::DbFailure(e.message))?
-                defer rs.close()
-                rs.next()?
-
-                let newId = rs.getLong("id")?
-                emit UserCreatedEvent(newId, span.elapsedMs())
-
-                Ok(UserRes(newId, req.name, req.email, now))
-            }
-        }
-    }
-}
-
-// 3. HTTP Handlers (Virtual Thread synchronous style)
-fn handleGetUser(repo: UserRepository, req: Request) -> Response {
-    let idOpt = req.pathParam("id").andThen(|s| s.parseLong().ok())
-    let userId = match idOpt {
-        Some(id) => UserId(id),
-        None     => return jsonResponse(Status::BadRequest, ErrorRes("INVALID_ID", "User ID must be a number"))
-    }
-
-    match repo.findById(userId) {
+    match findById(repo, id) {
         Ok(Some(user)) => jsonResponse(Status::Ok, user),
-        Ok(None)       => jsonResponse(Status::NotFound, ErrorRes("NOT_FOUND", "User not found")),
-        Err(err)       => mapErrorResponse(err)
+        Ok(None) => jsonResponse(Status::NotFound,
+            ErrorRes("NOT_FOUND", "User not found")),
+        Err(_) => jsonResponse(Status::InternalServerError,
+            ErrorRes("INTERNAL_ERROR", "Database error"))
     }
 }
 
-fn handleCreateUser(repo: UserRepository, req: Request) -> Response {
+pub fn handleCreateUser(repo: &UserWrite, req: Request)
+    -> Response ! { DbWrite }
+{
+    // Parsing alone does not establish business validity or grant authority.
     let body = match fromJson<CreateUserReq>(req.bodyBytes()) {
-        Ok(data) => data,
-        Err(e)   => return jsonResponse(Status::BadRequest, ErrorRes("INVALID_JSON", e.message))
+        Ok(value) => value,
+        Err(_) => return jsonResponse(Status::BadRequest,
+            ErrorRes("INVALID_JSON", "Invalid request"))
     }
-
-    if body.name.isEmpty() || !body.email.contains("@") {
-        return jsonResponse(Status::BadRequest, ErrorRes("VALIDATION_ERROR", "Name and valid email are required"))
+    let validated = match validateCreateUser(body) {
+        Ok(value) => value,
+        Err(_) => return jsonResponse(Status::BadRequest,
+            ErrorRes("INVALID_INPUT", "Invalid user data"))
     }
-
-    let hashed = hashPassword(body.password.expose())
-
-    match repo.create(body, hashed) {
-        Ok(created) => jsonResponse(Status::Created, created),
-        Err(err)    => mapErrorResponse(err)
-    }
-}
-
-fn jsonResponse<T: JsonCodec>(status: Status, payload: T) -> Response {
-    Response::builder(status)
-        .header("Content-Type", "application/json; charset=utf-8")
-        .body(payload.toJson())
-}
-
-fn mapErrorResponse(err: ApiError) -> Response {
-    match err {
-        ApiError::InvalidInput(msg) => jsonResponse(Status::BadRequest, ErrorRes("INVALID_INPUT", msg)),
-        ApiError::NotFound(msg)     => jsonResponse(Status::NotFound, ErrorRes("NOT_FOUND", msg)),
-        ApiError::DbFailure(_)      => jsonResponse(Status::InternalServerError, ErrorRes("INTERNAL_ERROR", "Database error"))
+    // Adapter handles password hashing and JDBC; this module cannot unwrap Secret.
+    match createUser(repo, validated) {
+        Ok(user) => {
+            emit UserCreated(user.id)
+            jsonResponse(Status::Created, user)
+        },
+        Err(_) => jsonResponse(Status::InternalServerError,
+            ErrorRes("INTERNAL_ERROR", "Database error"))
     }
 }
 
-// 4. Entrypoint
-fn main() -> Int {
-    let repo = UserRepository(
-        dbUrl  = env("DB_URL").unwrapOr("jdbc:postgresql://localhost:5432/app"),
-        dbUser = env("DB_USER").unwrapOr("app_user"),
-        dbPass = Secret(env("DB_PASS").unwrapOr("secret"))
-    )
-
-    let router = Router::new()
-        .get("/users/:id", |req| handleGetUser(repo, req))
-        .post("/users",    |req| handleCreateUser(repo, req))
-
-    println("Starting NGJ API Server on :8080...")
-
-    Server::bind("0.0.0.0", 8080)
-        .withTelemetry(autoTrace = true)
-        .serve(router)
-
-    return 0
-}
+// Host bootstrapping, routing and capability issuance live outside this generated
+// module. No raw DriverManager, unsafe block, or aot_verified self-attestation.

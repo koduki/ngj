@@ -1,0 +1,11 @@
+// Intentionally incomplete: context/check accepts the sketch; build MUST reject it.
+module example.agent_holes
+
+import std.io.Bytes
+import net.protocol.{PacketFrame, ParseError}
+
+pub fn parseFrames<'a>(raw: Bytes<'a>)
+    -> Result<List<PacketFrame<'a>>, ParseError> ! {}
+{
+    ?parse_frames
+}

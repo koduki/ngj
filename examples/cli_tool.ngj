@@ -1,49 +1,49 @@
+// Design example. Input is split at line boundaries, not arbitrary byte chunks.
 module cli.main
 
-import std.cli.{Args, parseArgs}
-import std.json.{toJson, fromJson}
-import std.fs.readBytes
+import std.cli.parseArgs
+import std.concurrent.{TaskError, ScopeError}
+import std.fs.{FsRead, readOwnedBytes}
+import std.console.{Console, writeLine}
+import app.logs.{partitionLines, countErrors, combine, SummaryReport}
 
-@derive(CliArgs, JsonCodec)
-data CliConfig(
-    inputFile: String,
-    workers: Int = 8,
-    pretty: Bool = false
-)
+@derive(CliArgs)
+data CliConfig(inputFile: String, workers: Int = 8)
 
-@derive(JsonCodec)
-data SummaryReport(
-    totalLines: Long,
-    errorCount: Long
-)
-
-fn main(rawArgs: List<String>) -> Int {
-    let config = match parseArgs<CliConfig>(rawArgs) {
-        Ok(cfg) => cfg,
-        Err(msg) => {
-            println("Usage error: ${msg}")
-            return 1
-        }
+// Host supplies capabilities; source code cannot mint them from a path/string.
+pub fn run(fs: &FsRead, out: &Console, rawArgs: List<String>)
+    -> Result<Int, CliError> ! { FsRead, ConsoleWrite }
+{
+    let config = parseArgs<CliConfig>(rawArgs)
+        .mapErr(|_| CliError::Arguments)?
+    if config.workers < 1 || config.workers > 64 {
+        return Err(CliError::Arguments)
     }
-
-    let content = match readBytes(config.inputFile) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            println("Failed to read file: ${e}")
-            return 2
-        }
-    }
+    let content = readOwnedBytes(fs, config.inputFile)
+        .mapErr(|_| CliError::Input)?
+    // Bounded partitions, preserving final unterminated line and UTF-8 boundaries.
+    let chunks = partitionLines(content.asBytes(), config.workers)
 
     let report = scope {
-        content.chunks(config.workers)
-            .map(|chunk| fork { countErrors(chunk) })
-            .map(|task| task.join())
-            .fold(SummaryReport(0, 0), |acc, r| SummaryReport(
-                totalLines = acc.totalLines + r.totalLines,
-                errorCount = acc.errorCount + r.errorCount
-            ))
-    }
+        // Eager map starts all tasks before joining; views borrow content.
+        let tasks = chunks.map(|chunk| fork { countErrors(chunk) })
+        let mut total = SummaryReport(0, 0)
+        for task in tasks {
+            let partial = task.join().mapErr(|e| CliError::Task(e))?
+            total = combine(total, partial).mapErr(|_| CliError::Overflow)?
+        }
+        total
+    }.mapErr(|e| CliError::Scope(e))?
 
-    println(report.toJson(pretty = config.pretty))
-    return 0
+    writeLine(out, report.toJson()).mapErr(|_| CliError::Output)?
+    Ok(0)
+}
+
+pub enum CliError {
+    Arguments,
+    Input,
+    Output,
+    Overflow,
+    Task(detail: TaskError),
+    Scope(detail: ScopeError)
 }

@@ -1,45 +1,48 @@
+// Design example, not compiler-validated. See examples/README.md.
 module net.protocol
 
-import std.io.{Bytes, ByteOrder}
-import std.concurrent.Channel
+import std.io.{Bytes, ByteOrder, BoundsError}
 
-data PacketFrame(
-    streamId: Int,
-    flags: Byte,
-    payload: Bytes
-)
+pub data PacketFrame<'a>(streamId: Int, flags: Byte, payload: Bytes<'a>)
 
-fn parseFrames(rawBuffer: Bytes) -> Result<List<PacketFrame>, String> {
-    let frames = build MutableList<PacketFrame> {
-        let mut cursor = 0
-        while cursor + 9 <= rawBuffer.len() {
-            let streamId = rawBuffer.readInt(cursor, ByteOrder::BigEndian)?
-            let flags    = rawBuffer.readByte(cursor + 4)?
-            let length   = rawBuffer.readInt(cursor + 5, ByteOrder::BigEndian)?
+pub enum ParseError {
+    IncompleteHeader,
+    NegativeLength,
+    IncompletePayload,
+    Bounds(detail: BoundsError)
+}
 
+// Views in the result retain the input lifetime. The backing owner must survive.
+pub fn parseFrames<'a>(raw: Bytes<'a>)
+    -> Result<List<PacketFrame<'a>>, ParseError> ! {}
+{
+    let frames = build MutableList<PacketFrame<'a>> {
+        let mut cursor: Long = 0
+        while cursor < raw.len() {
+            // cursor <= len is the loop invariant; subtraction cannot overflow.
+            let remaining = raw.len() - cursor
+            if remaining < 9 { return Err(ParseError::IncompleteHeader) }
+
+            let streamId = raw.readInt(cursor, ByteOrder::BigEndian)
+                .mapErr(|e| ParseError::Bounds(e))?
+            let flags = raw.readByte(cursor + 4)
+                .mapErr(|e| ParseError::Bounds(e))?
+            let signedLength = raw.readInt(cursor + 5, ByteOrder::BigEndian)
+                .mapErr(|e| ParseError::Bounds(e))?
+            if signedLength < 0 { return Err(ParseError::NegativeLength) }
+
+            let length = signedLength.toLong()
             let payloadStart = cursor + 9
-            let payloadEnd   = payloadStart + length
-            if payloadEnd > rawBuffer.len() {
-                return Err("Incomplete frame payload")
+            // Check by subtraction BEFORE adding length, including hostile lengths.
+            if length > raw.len() - payloadStart {
+                return Err(ParseError::IncompletePayload)
             }
-
-            let slice = rawBuffer.slice(payloadStart, length)
-            this.add(PacketFrame(streamId, flags, slice))
-
-            cursor = payloadEnd
+            let payload = raw.slice(payloadStart, length)
+                .mapErr(|e| ParseError::Bounds(e))?
+            this.add(PacketFrame(streamId, flags, payload))
+            cursor = payloadStart + length
         }
         this
     }
-
     Ok(frames)
-}
-
-fn dispatchWorker(rx: Channel<PacketFrame>) {
-    for frame in rx {
-        match frame.flags {
-            0x01 => handleData(frame.streamId, frame.payload),
-            0x02 => handlePing(frame.streamId),
-            _    => ()
-        }
-    }
 }
