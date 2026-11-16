@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="ngj.ResultOptionTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-11-16T16:34:24" hostname="cursor" time="0.006">
+<testsuite name="ngj.ResultOptionTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-11-16T16:39:12" hostname="cursor" time="0.005">
   <properties/>
-  <testcase name="errWithCorrectArgument()" classname="ngj.ResultOptionTest" time="0.001"/>
+  <testcase name="errWithCorrectArgument()" classname="ngj.ResultOptionTest" time="0.0"/>
   <testcase name="propagateOnNonResultType()" classname="ngj.ResultOptionTest" time="0.001"/>
-  <testcase name="noneWithNoArguments()" classname="ngj.ResultOptionTest" time="0.001"/>
+  <testcase name="noneWithNoArguments()" classname="ngj.ResultOptionTest" time="0.0"/>
   <testcase name="propagateWithSameErrorType()" classname="ngj.ResultOptionTest" time="0.0"/>
   <testcase name="okWithCorrectArgument()" classname="ngj.ResultOptionTest" time="0.0"/>
   <testcase name="someWithCorrectArgument()" classname="ngj.ResultOptionTest" time="0.0"/>
