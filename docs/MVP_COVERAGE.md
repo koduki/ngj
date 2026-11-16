@@ -92,11 +92,11 @@ their implementation status, and explicit exclusions.
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
-| Java 25 class output | Yes | 🔲 | Class-File API |
-| `final class` for data | Yes | 🔲 | JVM representation |
+| Java 25 class output | Yes | ✅ | Class-File API (standard since Java 24) |
+| `final class` for data | Yes | ✅ | JVM representation |
 | Sealed hierarchy for enum | Yes | 🔲 | JVM representation |
-| Integer overflow fault | Yes | 🔲 | Runtime check |
-| Short-circuit evaluation | Yes | 🔲 | Left-to-right |
+| Integer overflow fault | Yes | ✅ | Runtime check via Math.xxxExact |
+| Short-circuit evaluation | Yes | ✅ | Left-to-right |
 
 ## CLI Coverage
 

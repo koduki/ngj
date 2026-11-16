@@ -2,17 +2,22 @@ package ngj.codegen;
 
 import ngj.ast.*;
 
-import org.objectweb.asm.*;
-import static org.objectweb.asm.Opcodes.*;
-
+import java.lang.classfile.*;
+import java.lang.classfile.attribute.*;
+import java.lang.classfile.instruction.*;
+import java.lang.constant.*;
+import java.lang.invoke.*;
 import java.nio.file.*;
 import java.util.*;
 
+import static java.lang.classfile.ClassFile.*;
+
 /**
- * Code generator targeting Java 25 class files using ASM.
- * Note: Targets Java 21 bytecode for MVP, can be upgraded to Java 25 when available.
+ * Code generator targeting Java 25 class files using the standard Class-File API.
  */
 public final class Java25CodeGenerator {
+    
+    private static final int CLASS_FILE_VERSION = 69;
     
     private String currentModule;
     private Path outputDir = Path.of("build/classes");
@@ -63,69 +68,68 @@ public final class Java25CodeGenerator {
     
     private byte[] generateFunction(FnDecl fn) {
         var className = currentModule.replace('.', '/') + "/" + fn.name() + "$Fn";
+        var classDesc = ClassDesc.ofInternalName(className);
         
-        var cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-        cw.visit(V21, ACC_PUBLIC | ACC_FINAL, className, null, "java/lang/Object", null);
-        
-        var methodDesc = buildMethodDescriptor(fn);
-        var mv = cw.visitMethod(ACC_PUBLIC | ACC_STATIC, "invoke", methodDesc, null, null);
-        mv.visitCode();
-        
-        var ctx = new CodeGenContext(mv, fn);
-        generateBlock(ctx, fn.body());
-        
-        if (!ctx.hasReturn) {
-            var retType = getTypeName(fn.returnType());
-            switch (retType) {
-                case "Unit" -> mv.visitInsn(RETURN);
-                case "Int", "Bool" -> mv.visitInsn(IRETURN);
-                case "Long" -> mv.visitInsn(LRETURN);
-                default -> mv.visitInsn(ARETURN);
+        return ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
+            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            var methodDesc = buildMethodDescriptor(fn);
+            classBuilder.withMethod("invoke", methodDesc, ACC_PUBLIC | ACC_STATIC, mb -> {
+                mb.withCode(codeBuilder -> {
+                    var ctx = new CodeGenContext(codeBuilder, fn);
+                    generateBlock(ctx, fn.body());
+                    
+                    if (!ctx.hasReturn) {
+                        var retType = getTypeName(fn.returnType());
+                        switch (retType) {
+                            case "Unit" -> codeBuilder.return_();
+                            case "Int", "Bool" -> codeBuilder.ireturn();
+                            case "Long" -> codeBuilder.lreturn();
+                            default -> codeBuilder.areturn();
+                        }
+                    }
+                });
+            });
+            
+            if (fn.params().isEmpty() && getTypeName(fn.returnType()).equals("Int")) {
+                var mainDesc = MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String.arrayType());
+                classBuilder.withMethod("main", mainDesc, ACC_PUBLIC | ACC_STATIC, mb -> {
+                    mb.withCode(codeBuilder -> {
+                        codeBuilder.invokestatic(classDesc, "invoke", methodDesc);
+                        codeBuilder.invokestatic(ClassDesc.of("java.lang.System"), "exit", 
+                            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_int));
+                        codeBuilder.return_();
+                    });
+                });
             }
-        }
-        
-        mv.visitMaxs(0, 0);
-        mv.visitEnd();
-        
-        if (fn.params().isEmpty() && getTypeName(fn.returnType()).equals("Int")) {
-            var mainMv = cw.visitMethod(ACC_PUBLIC | ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null);
-            mainMv.visitCode();
-            mainMv.visitMethodInsn(INVOKESTATIC, className, "invoke", methodDesc, false);
-            mainMv.visitMethodInsn(INVOKESTATIC, "java/lang/System", "exit", "(I)V", false);
-            mainMv.visitInsn(RETURN);
-            mainMv.visitMaxs(0, 0);
-            mainMv.visitEnd();
-        }
-        
-        cw.visitEnd();
-        return cw.toByteArray();
+        });
     }
     
-    private String buildMethodDescriptor(FnDecl fn) {
-        var sb = new StringBuilder("(");
-        for (var param : fn.params()) {
-            sb.append(typeToDescriptor(param.type()));
-        }
-        sb.append(")");
-        sb.append(typeToDescriptor(fn.returnType()));
-        return sb.toString();
+    private MethodTypeDesc buildMethodDescriptor(FnDecl fn) {
+        var paramTypes = fn.params().stream()
+            .map(p -> typeToClassDesc(p.type()))
+            .toArray(ClassDesc[]::new);
+        var returnType = typeToClassDesc(fn.returnType());
+        return MethodTypeDesc.of(returnType, paramTypes);
     }
     
-    private String typeToDescriptor(TypeExpr type) {
+    private ClassDesc typeToClassDesc(TypeExpr type) {
         return switch (type) {
             case SimpleTypeExpr simple -> switch (simple.name()) {
-                case "Int" -> "I";
-                case "Long" -> "J";
-                case "Bool" -> "Z";
-                case "String" -> "Ljava/lang/String;";
-                default -> "L" + currentModule.replace('.', '/') + "/" + simple.name() + ";";
+                case "Int" -> ConstantDescs.CD_int;
+                case "Long" -> ConstantDescs.CD_long;
+                case "Bool" -> ConstantDescs.CD_boolean;
+                case "String" -> ConstantDescs.CD_String;
+                default -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + simple.name());
             };
             case GenericTypeExpr generic -> switch (generic.name()) {
-                case "Result" -> "L" + currentModule.replace('.', '/') + "/Result;";
-                case "Option" -> "L" + currentModule.replace('.', '/') + "/Option;";
-                default -> "Ljava/lang/Object;";
+                case "Result" -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Result");
+                case "Option" -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option");
+                default -> ConstantDescs.CD_Object;
             };
-            case UnitTypeExpr _ -> "V";
+            case UnitTypeExpr _ -> ConstantDescs.CD_void;
         };
     }
     
@@ -147,9 +151,9 @@ public final class Java25CodeGenerator {
                 var typeName = type != null ? getTypeName(type) : "Object";
                 int slot = ctx.allocateLocal(let.name(), typeName);
                 switch (typeName) {
-                    case "Long" -> ctx.mv.visitVarInsn(LSTORE, slot);
-                    case "Int", "Bool" -> ctx.mv.visitVarInsn(ISTORE, slot);
-                    default -> ctx.mv.visitVarInsn(ASTORE, slot);
+                    case "Long" -> ctx.code.lstore(slot);
+                    case "Int", "Bool" -> ctx.code.istore(slot);
+                    default -> ctx.code.astore(slot);
                 }
             }
             case ExprStmt expr -> {
@@ -161,10 +165,10 @@ public final class Java25CodeGenerator {
                 }
                 var retType = getTypeName(ctx.fn.returnType());
                 switch (retType) {
-                    case "Unit" -> ctx.mv.visitInsn(RETURN);
-                    case "Int", "Bool" -> ctx.mv.visitInsn(IRETURN);
-                    case "Long" -> ctx.mv.visitInsn(LRETURN);
-                    default -> ctx.mv.visitInsn(ARETURN);
+                    case "Unit" -> ctx.code.return_();
+                    case "Int", "Bool" -> ctx.code.ireturn();
+                    case "Long" -> ctx.code.lreturn();
+                    default -> ctx.code.areturn();
                 }
                 ctx.hasReturn = true;
             }
@@ -191,10 +195,10 @@ public final class Java25CodeGenerator {
     
     private void generateLiteral(CodeGenContext ctx, LiteralExpr lit) {
         switch (lit.kind()) {
-            case INT -> ctx.mv.visitLdcInsn((Integer) lit.value());
-            case LONG -> ctx.mv.visitLdcInsn((Long) lit.value());
-            case BOOL -> ctx.mv.visitLdcInsn((Boolean) lit.value() ? 1 : 0);
-            case STRING -> ctx.mv.visitLdcInsn((String) lit.value());
+            case INT -> ctx.code.ldc((Integer) lit.value());
+            case LONG -> ctx.code.ldc((Long) lit.value());
+            case BOOL -> ctx.code.ldc((Boolean) lit.value() ? 1 : 0);
+            case STRING -> ctx.code.ldc((String) lit.value());
             case UNIT -> {}
         }
     }
@@ -204,12 +208,12 @@ public final class Java25CodeGenerator {
         if (slot != null) {
             var typeName = ctx.getLocalType(ident.name());
             switch (typeName) {
-                case "Int", "Bool" -> ctx.mv.visitVarInsn(ILOAD, slot);
-                case "Long" -> ctx.mv.visitVarInsn(LLOAD, slot);
-                default -> ctx.mv.visitVarInsn(ALOAD, slot);
+                case "Int", "Bool" -> ctx.code.iload(slot);
+                case "Long" -> ctx.code.lload(slot);
+                default -> ctx.code.aload(slot);
             }
         } else {
-            ctx.mv.visitInsn(ACONST_NULL);
+            ctx.code.aconst_null();
         }
     }
     
@@ -227,93 +231,83 @@ public final class Java25CodeGenerator {
         generateExpr(ctx, binary.right());
         
         switch (binary.op()) {
-            case ADD -> ctx.mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "addExact", "(II)I", false);
-            case SUB -> ctx.mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "subtractExact", "(II)I", false);
-            case MUL -> ctx.mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "multiplyExact", "(II)I", false);
-            case DIV -> ctx.mv.visitInsn(IDIV);
-            case MOD -> ctx.mv.visitInsn(IREM);
-            case EQ -> generateComparison(ctx, IF_ICMPEQ);
-            case NE -> generateComparison(ctx, IF_ICMPNE);
-            case LT -> generateComparison(ctx, IF_ICMPLT);
-            case LE -> generateComparison(ctx, IF_ICMPLE);
-            case GT -> generateComparison(ctx, IF_ICMPGT);
-            case GE -> generateComparison(ctx, IF_ICMPGE);
+            case ADD -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "addExact", 
+                MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_int, ConstantDescs.CD_int));
+            case SUB -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "subtractExact",
+                MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_int, ConstantDescs.CD_int));
+            case MUL -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "multiplyExact",
+                MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_int, ConstantDescs.CD_int));
+            case DIV -> ctx.code.idiv();
+            case MOD -> ctx.code.irem();
+            case EQ -> generateComparison(ctx, Opcode.IF_ICMPEQ);
+            case NE -> generateComparison(ctx, Opcode.IF_ICMPNE);
+            case LT -> generateComparison(ctx, Opcode.IF_ICMPLT);
+            case LE -> generateComparison(ctx, Opcode.IF_ICMPLE);
+            case GT -> generateComparison(ctx, Opcode.IF_ICMPGT);
+            case GE -> generateComparison(ctx, Opcode.IF_ICMPGE);
             default -> {}
         }
     }
     
-    private void generateComparison(CodeGenContext ctx, int opcode) {
-        var trueLabel = new Label();
-        var endLabel = new Label();
-        
-        ctx.mv.visitJumpInsn(opcode, trueLabel);
-        ctx.mv.visitLdcInsn(0);
-        ctx.mv.visitJumpInsn(GOTO, endLabel);
-        ctx.mv.visitLabel(trueLabel);
-        ctx.mv.visitLdcInsn(1);
-        ctx.mv.visitLabel(endLabel);
+    private void generateComparison(CodeGenContext ctx, Opcode opcode) {
+        ctx.code.ifThenElse(opcode, 
+            tb -> tb.ldc(1),
+            fb -> fb.ldc(0));
     }
     
     private void generateShortCircuitAnd(CodeGenContext ctx, BinaryExpr binary) {
-        var falseLabel = new Label();
-        var endLabel = new Label();
+        var falseLabel = ctx.code.newLabel();
+        var endLabel = ctx.code.newLabel();
         
         generateExpr(ctx, binary.left());
-        ctx.mv.visitJumpInsn(IFEQ, falseLabel);
+        ctx.code.ifeq(falseLabel);
         
         generateExpr(ctx, binary.right());
-        ctx.mv.visitJumpInsn(GOTO, endLabel);
+        ctx.code.goto_(endLabel);
         
-        ctx.mv.visitLabel(falseLabel);
-        ctx.mv.visitLdcInsn(0);
+        ctx.code.labelBinding(falseLabel);
+        ctx.code.ldc(0);
         
-        ctx.mv.visitLabel(endLabel);
+        ctx.code.labelBinding(endLabel);
     }
     
     private void generateShortCircuitOr(CodeGenContext ctx, BinaryExpr binary) {
-        var trueLabel = new Label();
-        var endLabel = new Label();
+        var trueLabel = ctx.code.newLabel();
+        var endLabel = ctx.code.newLabel();
         
         generateExpr(ctx, binary.left());
-        ctx.mv.visitJumpInsn(IFNE, trueLabel);
+        ctx.code.ifne(trueLabel);
         
         generateExpr(ctx, binary.right());
-        ctx.mv.visitJumpInsn(GOTO, endLabel);
+        ctx.code.goto_(endLabel);
         
-        ctx.mv.visitLabel(trueLabel);
-        ctx.mv.visitLdcInsn(1);
+        ctx.code.labelBinding(trueLabel);
+        ctx.code.ldc(1);
         
-        ctx.mv.visitLabel(endLabel);
+        ctx.code.labelBinding(endLabel);
     }
     
     private void generateUnary(CodeGenContext ctx, UnaryExpr unary) {
         generateExpr(ctx, unary.operand());
         
         switch (unary.op()) {
-            case NEG -> ctx.mv.visitInsn(INEG);
+            case NEG -> ctx.code.ineg();
             case NOT -> {
-                ctx.mv.visitLdcInsn(1);
-                ctx.mv.visitInsn(IXOR);
+                ctx.code.ldc(1);
+                ctx.code.ixor();
             }
         }
     }
     
     private void generateIf(CodeGenContext ctx, IfExpr ifExpr) {
-        var elseLabel = new Label();
-        var endLabel = new Label();
-        
         generateExpr(ctx, ifExpr.condition());
-        ctx.mv.visitJumpInsn(IFEQ, elseLabel);
-        
-        generateBlock(ctx, ifExpr.thenBranch());
-        ctx.mv.visitJumpInsn(GOTO, endLabel);
-        
-        ctx.mv.visitLabel(elseLabel);
-        if (ifExpr.elseBranch() != null) {
-            generateExpr(ctx, ifExpr.elseBranch());
-        }
-        
-        ctx.mv.visitLabel(endLabel);
+        ctx.code.ifThenElse(Opcode.IFNE,
+            tb -> generateBlock(ctx.withCode(tb), ifExpr.thenBranch()),
+            fb -> {
+                if (ifExpr.elseBranch() != null) {
+                    generateExpr(ctx.withCode(fb), ifExpr.elseBranch());
+                }
+            });
     }
     
     private void generateCall(CodeGenContext ctx, CallExpr call) {
@@ -326,44 +320,42 @@ public final class Java25CodeGenerator {
             
             switch (methodName) {
                 case "Ok", "Err", "Some" -> {
-                    ctx.mv.visitInsn(ACONST_NULL);
+                    ctx.code.aconst_null();
                     return;
                 }
                 case "None" -> {
-                    ctx.mv.visitInsn(ACONST_NULL);
+                    ctx.code.aconst_null();
                     return;
                 }
             }
             
-            var className = currentModule.replace('.', '/') + "/" + methodName + "$Fn";
-            ctx.mv.visitMethodInsn(INVOKESTATIC, className, "invoke", "()Ljava/lang/Object;", false);
+            var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + methodName + "$Fn");
+            ctx.code.invokestatic(classDesc, "invoke", MethodTypeDesc.of(ConstantDescs.CD_Object));
         }
     }
     
     private void generateConstructor(CodeGenContext ctx, ConstructorExpr ctor) {
-        var className = currentModule.replace('.', '/') + "/" + ctor.typePath();
+        var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + ctor.typePath());
         
-        ctx.mv.visitTypeInsn(NEW, className);
-        ctx.mv.visitInsn(DUP);
+        ctx.code.new_(classDesc);
+        ctx.code.dup();
         
         for (var field : ctor.fields()) {
             generateExpr(ctx, field.value());
         }
         
-        var sb = new StringBuilder("(");
-        for (int i = 0; i < ctor.fields().size(); i++) {
-            sb.append("Ljava/lang/Object;");
-        }
-        sb.append(")V");
+        var paramTypes = new ClassDesc[ctor.fields().size()];
+        Arrays.fill(paramTypes, ConstantDescs.CD_Object);
+        var ctorDesc = MethodTypeDesc.of(ConstantDescs.CD_void, paramTypes);
         
-        ctx.mv.visitMethodInsn(INVOKESPECIAL, className, "<init>", sb.toString(), false);
+        ctx.code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
     }
     
     private void generateMatch(CodeGenContext ctx, MatchExpr matchExpr) {
         generateExpr(ctx, matchExpr.scrutinee());
         
         if (!matchExpr.arms().isEmpty()) {
-            ctx.mv.visitInsn(POP);
+            ctx.code.pop();
             generateExpr(ctx, matchExpr.arms().get(0).body());
         }
     }
@@ -374,98 +366,96 @@ public final class Java25CodeGenerator {
     
     private void generateFieldAccess(CodeGenContext ctx, FieldAccessExpr access) {
         generateExpr(ctx, access.object());
-        ctx.mv.visitFieldInsn(GETFIELD, "java/lang/Object", access.fieldName(), "Ljava/lang/Object;");
+        ctx.code.getfield(ConstantDescs.CD_Object, access.fieldName(), ConstantDescs.CD_Object);
     }
     
     private byte[] generateData(DataDecl data) {
         var className = currentModule.replace('.', '/') + "/" + data.name();
+        var classDesc = ClassDesc.ofInternalName(className);
         
-        var cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-        cw.visit(V21, ACC_PUBLIC | ACC_FINAL, className, null, "java/lang/Object", null);
-        
-        for (var field : data.fields()) {
-            cw.visitField(ACC_PUBLIC | ACC_FINAL, field.name(), 
-                typeToDescriptor(field.type()), null, null).visitEnd();
-        }
-        
-        var ctorDesc = buildConstructorDescriptor(data.fields());
-        var mv = cw.visitMethod(ACC_PUBLIC, "<init>", ctorDesc, null, null);
-        mv.visitCode();
-        mv.visitVarInsn(ALOAD, 0);
-        mv.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
-        
-        int slot = 1;
-        for (var field : data.fields()) {
-            mv.visitVarInsn(ALOAD, 0);
-            var typeName = getTypeName(field.type());
-            if (typeName.equals("Int") || typeName.equals("Bool")) {
-                mv.visitVarInsn(ILOAD, slot++);
-            } else if (typeName.equals("Long")) {
-                mv.visitVarInsn(LLOAD, slot);
-                slot += 2;
-            } else {
-                mv.visitVarInsn(ALOAD, slot++);
+        return ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
+            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            for (var field : data.fields()) {
+                var fieldDesc = typeToClassDesc(field.type());
+                classBuilder.withField(field.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL);
             }
-            mv.visitFieldInsn(PUTFIELD, className, field.name(), typeToDescriptor(field.type()));
-        }
-        
-        mv.visitInsn(RETURN);
-        mv.visitMaxs(0, 0);
-        mv.visitEnd();
-        
-        var eqMv = cw.visitMethod(ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z", null, null);
-        eqMv.visitCode();
-        eqMv.visitVarInsn(ALOAD, 0);
-        eqMv.visitVarInsn(ALOAD, 1);
-        var eqLabel = new Label();
-        var endLabel = new Label();
-        eqMv.visitJumpInsn(IF_ACMPEQ, eqLabel);
-        eqMv.visitLdcInsn(0);
-        eqMv.visitJumpInsn(GOTO, endLabel);
-        eqMv.visitLabel(eqLabel);
-        eqMv.visitLdcInsn(1);
-        eqMv.visitLabel(endLabel);
-        eqMv.visitInsn(IRETURN);
-        eqMv.visitMaxs(0, 0);
-        eqMv.visitEnd();
-        
-        var hcMv = cw.visitMethod(ACC_PUBLIC, "hashCode", "()I", null, null);
-        hcMv.visitCode();
-        hcMv.visitVarInsn(ALOAD, 0);
-        hcMv.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "hashCode", "()I", false);
-        hcMv.visitInsn(IRETURN);
-        hcMv.visitMaxs(0, 0);
-        hcMv.visitEnd();
-        
-        cw.visitEnd();
-        return cw.toByteArray();
+            
+            var ctorParamTypes = data.fields().stream()
+                .map(f -> typeToClassDesc(f.type()))
+                .toArray(ClassDesc[]::new);
+            var ctorDesc = MethodTypeDesc.of(ConstantDescs.CD_void, ctorParamTypes);
+            
+            classBuilder.withMethod(ConstantDescs.INIT_NAME, ctorDesc, ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME, 
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    
+                    int slot = 1;
+                    for (var field : data.fields()) {
+                        code.aload(0);
+                        var typeName = getTypeName(field.type());
+                        var fieldDesc = typeToClassDesc(field.type());
+                        if (typeName.equals("Int") || typeName.equals("Bool")) {
+                            code.iload(slot++);
+                        } else if (typeName.equals("Long")) {
+                            code.lload(slot);
+                            slot += 2;
+                        } else {
+                            code.aload(slot++);
+                        }
+                        code.putfield(classDesc, field.name(), fieldDesc);
+                    }
+                    
+                    code.return_();
+                });
+            });
+            
+            classBuilder.withMethod("equals", MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object),
+                ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.aload(1);
+                    code.ifThenElse(Opcode.IF_ACMPEQ,
+                        tb -> tb.ldc(1),
+                        fb -> fb.ldc(0));
+                    code.ireturn();
+                });
+            });
+            
+            classBuilder.withMethod("hashCode", MethodTypeDesc.of(ConstantDescs.CD_int), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, "hashCode", 
+                        MethodTypeDesc.of(ConstantDescs.CD_int));
+                    code.ireturn();
+                });
+            });
+        });
     }
     
     private byte[] generateEnum(EnumDecl enumDecl) {
         var className = currentModule.replace('.', '/') + "/" + enumDecl.name();
+        var classDesc = ClassDesc.ofInternalName(className);
         
-        var cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-        cw.visit(V21, ACC_PUBLIC | ACC_ABSTRACT, className, null, "java/lang/Object", null);
-        
-        var mv = cw.visitMethod(ACC_PRIVATE, "<init>", "()V", null, null);
-        mv.visitCode();
-        mv.visitVarInsn(ALOAD, 0);
-        mv.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
-        mv.visitInsn(RETURN);
-        mv.visitMaxs(0, 0);
-        mv.visitEnd();
-        
-        cw.visitEnd();
-        return cw.toByteArray();
-    }
-    
-    private String buildConstructorDescriptor(List<FieldDecl> fields) {
-        var sb = new StringBuilder("(");
-        for (var field : fields) {
-            sb.append(typeToDescriptor(field.type()));
-        }
-        sb.append(")V");
-        return sb.toString();
+        return ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
+            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            classBuilder.withMethod(ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void),
+                ACC_PRIVATE, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    code.return_();
+                });
+            });
+        });
     }
     
     private String getTypeName(TypeExpr type) {
@@ -477,15 +467,15 @@ public final class Java25CodeGenerator {
     }
     
     private class CodeGenContext {
-        final MethodVisitor mv;
+        final CodeBuilder code;
         final FnDecl fn;
         final Map<String, Integer> locals = new HashMap<>();
         final Map<String, String> localTypes = new HashMap<>();
         int nextSlot;
         boolean hasReturn = false;
         
-        CodeGenContext(MethodVisitor mv, FnDecl fn) {
-            this.mv = mv;
+        CodeGenContext(CodeBuilder code, FnDecl fn) {
+            this.code = code;
             this.fn = fn;
             this.nextSlot = 0;
             
@@ -499,6 +489,15 @@ public final class Java25CodeGenerator {
                     nextSlot++;
                 }
             }
+        }
+        
+        CodeGenContext withCode(CodeBuilder newCode) {
+            var ctx = new CodeGenContext(newCode, fn);
+            ctx.locals.putAll(this.locals);
+            ctx.localTypes.putAll(this.localTypes);
+            ctx.nextSlot = this.nextSlot;
+            ctx.hasReturn = this.hasReturn;
+            return ctx;
         }
         
         int allocateLocal(String name, String typeName) {
