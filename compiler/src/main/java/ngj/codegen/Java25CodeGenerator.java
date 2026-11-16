@@ -143,14 +143,13 @@ public final class Java25CodeGenerator {
         switch (stmt) {
             case LetStmt let -> {
                 generateExpr(ctx, let.initializer());
-                int slot = ctx.allocateLocal(let.name());
                 var type = let.explicitType();
-                if (type != null && getTypeName(type).equals("Long")) {
-                    ctx.mv.visitVarInsn(LSTORE, slot);
-                } else if (type != null && (getTypeName(type).equals("Int") || getTypeName(type).equals("Bool"))) {
-                    ctx.mv.visitVarInsn(ISTORE, slot);
-                } else {
-                    ctx.mv.visitVarInsn(ASTORE, slot);
+                var typeName = type != null ? getTypeName(type) : "Object";
+                int slot = ctx.allocateLocal(let.name(), typeName);
+                switch (typeName) {
+                    case "Long" -> ctx.mv.visitVarInsn(LSTORE, slot);
+                    case "Int", "Bool" -> ctx.mv.visitVarInsn(ISTORE, slot);
+                    default -> ctx.mv.visitVarInsn(ASTORE, slot);
                 }
             }
             case ExprStmt expr -> {
@@ -203,7 +202,12 @@ public final class Java25CodeGenerator {
     private void generateIdent(CodeGenContext ctx, IdentExpr ident) {
         Integer slot = ctx.getLocal(ident.name());
         if (slot != null) {
-            ctx.mv.visitVarInsn(ALOAD, slot);
+            var typeName = ctx.getLocalType(ident.name());
+            switch (typeName) {
+                case "Int", "Bool" -> ctx.mv.visitVarInsn(ILOAD, slot);
+                case "Long" -> ctx.mv.visitVarInsn(LLOAD, slot);
+                default -> ctx.mv.visitVarInsn(ALOAD, slot);
+            }
         } else {
             ctx.mv.visitInsn(ACONST_NULL);
         }
@@ -476,6 +480,7 @@ public final class Java25CodeGenerator {
         final MethodVisitor mv;
         final FnDecl fn;
         final Map<String, Integer> locals = new HashMap<>();
+        final Map<String, String> localTypes = new HashMap<>();
         int nextSlot;
         boolean hasReturn = false;
         
@@ -487,6 +492,7 @@ public final class Java25CodeGenerator {
             for (var param : fn.params()) {
                 locals.put(param.name(), nextSlot);
                 var typeName = getTypeName(param.type());
+                localTypes.put(param.name(), typeName);
                 if (typeName.equals("Long")) {
                     nextSlot += 2;
                 } else {
@@ -495,14 +501,24 @@ public final class Java25CodeGenerator {
             }
         }
         
-        int allocateLocal(String name) {
-            int slot = nextSlot++;
+        int allocateLocal(String name, String typeName) {
+            int slot = nextSlot;
             locals.put(name, slot);
+            localTypes.put(name, typeName);
+            if (typeName.equals("Long")) {
+                nextSlot += 2;
+            } else {
+                nextSlot++;
+            }
             return slot;
         }
         
         Integer getLocal(String name) {
             return locals.get(name);
+        }
+        
+        String getLocalType(String name) {
+            return localTypes.getOrDefault(name, "Object");
         }
     }
 }
