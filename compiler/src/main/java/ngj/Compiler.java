@@ -31,7 +31,7 @@ public final class Compiler {
             try {
                 String source = Files.readString(file);
                 var lexer = new Lexer(source, file.toString());
-                var parser = new Parser(lexer);
+                var parser = new Parser(lexer, file.toString());
                 var unit = parser.parse();
                 parsedUnits.put(file, unit);
                 units.add(unit);

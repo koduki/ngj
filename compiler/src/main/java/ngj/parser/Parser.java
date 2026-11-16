@@ -7,13 +7,19 @@ import java.util.*;
 
 public final class Parser {
     private final Lexer lexer;
+    private final String fileName;
     private final List<Diagnostic> diagnostics = new ArrayList<>();
     private Token current;
     private Token previous;
     
-    public Parser(Lexer lexer) {
+    public Parser(Lexer lexer, String fileName) {
         this.lexer = lexer;
+        this.fileName = fileName;
         this.current = lexer.nextToken();
+    }
+    
+    public Parser(Lexer lexer) {
+        this(lexer, "unknown");
     }
     
     public List<Diagnostic> getDiagnostics() {
@@ -41,7 +47,7 @@ public final class Parser {
         }
         
         int end = previous != null ? previous.span().endByte() : start;
-        return new CompilationUnit(moduleDecl, imports, declarations, new SourceSpan("", start, end));
+        return new CompilationUnit(moduleDecl, imports, declarations, span(start, end));
     }
     
     private ModuleDecl parseModuleDecl() throws ParseException {
@@ -51,7 +57,7 @@ public final class Parser {
         var path = parseModulePath();
         int end = previous.span().endByte();
         
-        return new ModuleDecl(path, new SourceSpan("", start, end));
+        return new ModuleDecl(path, span(start, end));
     }
     
     private String parseModulePath() throws ParseException {
@@ -108,13 +114,13 @@ public final class Parser {
                 
                 consume(TokenType.RBRACE, "Expected '}' after import names");
                 var modulePath = String.join(".", pathParts);
-                return new ImportDecl(modulePath, names, false, new SourceSpan("", start, previous.span().endByte()));
+                return new ImportDecl(modulePath, names, false, span(start, previous.span().endByte()));
             } else if (check(TokenType.STAR)) {
                 // Wildcard import (rejected)
                 advance(); // consume *
                 error("NGJ-PARSE-001", "Wildcard imports are not supported", previous.span());
                 var modulePath = String.join(".", pathParts);
-                return new ImportDecl(modulePath, List.of(), true, new SourceSpan("", start, previous.span().endByte()));
+                return new ImportDecl(modulePath, List.of(), true, span(start, previous.span().endByte()));
             } else {
                 // Continue building path
                 consumeIdentOrKeyword("Expected identifier after '.'");
@@ -127,11 +133,11 @@ public final class Parser {
         if (pathParts.size() > 1) {
             String name = pathParts.remove(pathParts.size() - 1);
             var modulePath = String.join(".", pathParts);
-            return new ImportDecl(modulePath, List.of(name), false, new SourceSpan("", start, previous.span().endByte()));
+            return new ImportDecl(modulePath, List.of(name), false, span(start, previous.span().endByte()));
         }
         
         // Just a single name
-        return new ImportDecl("", pathParts, false, new SourceSpan("", start, previous.span().endByte()));
+        return new ImportDecl("", pathParts, false, span(start, previous.span().endByte()));
     }
     
     private TopLevelDecl parseTopLevelDecl() throws ParseException {
@@ -176,7 +182,7 @@ public final class Parser {
         var body = parseBlock();
         
         return new FnDecl(name, isPublic, params, returnType, effects, body,
-            new SourceSpan("", start, previous.span().endByte()));
+            span(start, previous.span().endByte()));
     }
     
     private Param parseParam() throws ParseException {
@@ -187,7 +193,7 @@ public final class Parser {
         consume(TokenType.COLON, "Expected ':' after parameter name");
         var type = parseTypeExpr();
         
-        return new Param(name, type, new SourceSpan("", start, previous.span().endByte()));
+        return new Param(name, type, span(start, previous.span().endByte()));
     }
     
     private List<String> parseEffectBound() throws ParseException {
@@ -244,7 +250,7 @@ public final class Parser {
         
         consume(TokenType.RBRACE, "Expected '}' after data fields");
         
-        return new DataDecl(name, isPublic, fields, new SourceSpan("", start, previous.span().endByte()));
+        return new DataDecl(name, isPublic, fields, span(start, previous.span().endByte()));
     }
     
     private FieldDecl parseFieldDecl() throws ParseException {
@@ -255,7 +261,7 @@ public final class Parser {
         consume(TokenType.COLON, "Expected ':' after field name");
         var type = parseTypeExpr();
         
-        return new FieldDecl(name, type, new SourceSpan("", start, previous.span().endByte()));
+        return new FieldDecl(name, type, span(start, previous.span().endByte()));
     }
     
     private EnumDecl parseEnumDecl(boolean isPublic) throws ParseException {
@@ -287,7 +293,7 @@ public final class Parser {
         
         consume(TokenType.RBRACE, "Expected '}' after enum variants");
         
-        return new EnumDecl(name, isPublic, variants, new SourceSpan("", start, previous.span().endByte()));
+        return new EnumDecl(name, isPublic, variants, span(start, previous.span().endByte()));
     }
     
     private Variant parseVariant() throws ParseException {
@@ -305,14 +311,14 @@ public final class Parser {
             consume(TokenType.RPAREN, "Expected ')' after variant fields");
         }
         
-        return new Variant(name, fields, new SourceSpan("", start, previous.span().endByte()));
+        return new Variant(name, fields, span(start, previous.span().endByte()));
     }
     
     private TypeExpr parseTypeExpr() throws ParseException {
         int start = current.span().startByte();
         
         if (match(TokenType.UNIT)) {
-            return new UnitTypeExpr(new SourceSpan("", start, previous.span().endByte()));
+            return new UnitTypeExpr(span(start, previous.span().endByte()));
         }
         
         consume(TokenType.IDENT, "Expected type name");
@@ -331,13 +337,13 @@ public final class Parser {
             if (!name.equals("Result") && !name.equals("Option")) {
                 error("NGJ-PARSE-004", 
                     "Generic types other than Result<T,E> and Option<T> are not supported in MVP",
-                    new SourceSpan("", start, previous.span().endByte()));
+                    span(start, previous.span().endByte()));
             }
             
-            return new GenericTypeExpr(name, typeArgs, new SourceSpan("", start, previous.span().endByte()));
+            return new GenericTypeExpr(name, typeArgs, span(start, previous.span().endByte()));
         }
         
-        return new SimpleTypeExpr(name, new SourceSpan("", start, previous.span().endByte()));
+        return new SimpleTypeExpr(name, span(start, previous.span().endByte()));
     }
     
     private BlockExpr parseBlock() throws ParseException {
@@ -369,7 +375,7 @@ public final class Parser {
         
         consume(TokenType.RBRACE, "Expected '}'");
         
-        return new BlockExpr(statements, tailExpr, new SourceSpan("", start, previous.span().endByte()));
+        return new BlockExpr(statements, tailExpr, span(start, previous.span().endByte()));
     }
     
     private LetStmt parseLetStmt() throws ParseException {
@@ -387,7 +393,7 @@ public final class Parser {
         consume(TokenType.ASSIGN, "Expected '=' after variable name");
         var initializer = parseExpr();
         
-        return new LetStmt(name, explicitType, initializer, new SourceSpan("", start, previous.span().endByte()));
+        return new LetStmt(name, explicitType, initializer, span(start, previous.span().endByte()));
     }
     
     private ReturnStmt parseReturnStmt() throws ParseException {
@@ -399,7 +405,7 @@ public final class Parser {
             value = parseExpr();
         }
         
-        return new ReturnStmt(value, new SourceSpan("", start, previous.span().endByte()));
+        return new ReturnStmt(value, span(start, previous.span().endByte()));
     }
     
     private Expr parseExpr() throws ParseException {
@@ -413,7 +419,7 @@ public final class Parser {
             int start = expr.span().startByte();
             var right = parseAnd();
             expr = new BinaryExpr(expr, BinaryExpr.BinaryOp.OR, right, 
-                new SourceSpan("", start, right.span().endByte()));
+                span(start, right.span().endByte()));
         }
         
         return parsePropagateOpt(expr);
@@ -426,7 +432,7 @@ public final class Parser {
             int start = expr.span().startByte();
             var right = parseComparison();
             expr = new BinaryExpr(expr, BinaryExpr.BinaryOp.AND, right,
-                new SourceSpan("", start, right.span().endByte()));
+                span(start, right.span().endByte()));
         }
         
         return expr;
@@ -438,32 +444,32 @@ public final class Parser {
         if (match(TokenType.EQ)) {
             var right = parseAddition();
             return new BinaryExpr(expr, BinaryExpr.BinaryOp.EQ, right,
-                new SourceSpan("", expr.span().startByte(), right.span().endByte()));
+                span(expr.span().startByte(), right.span().endByte()));
         } else if (match(TokenType.NE)) {
             var right = parseAddition();
             return new BinaryExpr(expr, BinaryExpr.BinaryOp.NE, right,
-                new SourceSpan("", expr.span().startByte(), right.span().endByte()));
+                span(expr.span().startByte(), right.span().endByte()));
         } else if (match(TokenType.LANGLE)) {
             // Could be < or type argument start - check context
             if (!isTypeContext()) {
                 var right = parseAddition();
                 return new BinaryExpr(expr, BinaryExpr.BinaryOp.LT, right,
-                    new SourceSpan("", expr.span().startByte(), right.span().endByte()));
+                    span(expr.span().startByte(), right.span().endByte()));
             }
             // Backtrack if it was type context
             pos--;
         } else if (match(TokenType.LE)) {
             var right = parseAddition();
             return new BinaryExpr(expr, BinaryExpr.BinaryOp.LE, right,
-                new SourceSpan("", expr.span().startByte(), right.span().endByte()));
+                span(expr.span().startByte(), right.span().endByte()));
         } else if (match(TokenType.RANGLE)) {
             var right = parseAddition();
             return new BinaryExpr(expr, BinaryExpr.BinaryOp.GT, right,
-                new SourceSpan("", expr.span().startByte(), right.span().endByte()));
+                span(expr.span().startByte(), right.span().endByte()));
         } else if (match(TokenType.GE)) {
             var right = parseAddition();
             return new BinaryExpr(expr, BinaryExpr.BinaryOp.GE, right,
-                new SourceSpan("", expr.span().startByte(), right.span().endByte()));
+                span(expr.span().startByte(), right.span().endByte()));
         }
         
         return expr;
@@ -485,7 +491,7 @@ public final class Parser {
                 BinaryExpr.BinaryOp.ADD : BinaryExpr.BinaryOp.SUB;
             var right = parseMultiplication();
             expr = new BinaryExpr(expr, op, right,
-                new SourceSpan("", expr.span().startByte(), right.span().endByte()));
+                span(expr.span().startByte(), right.span().endByte()));
         }
         
         return expr;
@@ -503,7 +509,7 @@ public final class Parser {
             };
             var right = parseUnary();
             expr = new BinaryExpr(expr, op, right,
-                new SourceSpan("", expr.span().startByte(), right.span().endByte()));
+                span(expr.span().startByte(), right.span().endByte()));
         }
         
         return expr;
@@ -514,13 +520,13 @@ public final class Parser {
             int start = previous.span().startByte();
             var operand = parseUnary();
             return new UnaryExpr(UnaryExpr.UnaryOp.NEG, operand,
-                new SourceSpan("", start, operand.span().endByte()));
+                span(start, operand.span().endByte()));
         }
         if (match(TokenType.BANG)) {
             int start = previous.span().startByte();
             var operand = parseUnary();
             return new UnaryExpr(UnaryExpr.UnaryOp.NOT, operand,
-                new SourceSpan("", start, operand.span().endByte()));
+                span(start, operand.span().endByte()));
         }
         
         return parsePostfix();
@@ -533,7 +539,7 @@ public final class Parser {
             if (match(TokenType.DOT)) {
                 consume(TokenType.IDENT, "Expected field name after '.'");
                 expr = new FieldAccessExpr(expr, previous.text(),
-                    new SourceSpan("", expr.span().startByte(), previous.span().endByte()));
+                    span(expr.span().startByte(), previous.span().endByte()));
             } else if (match(TokenType.LPAREN)) {
                 // Function call
                 var args = new ArrayList<Expr>();
@@ -544,7 +550,7 @@ public final class Parser {
                 }
                 consume(TokenType.RPAREN, "Expected ')' after arguments");
                 expr = new CallExpr(expr, args,
-                    new SourceSpan("", expr.span().startByte(), previous.span().endByte()));
+                    span(expr.span().startByte(), previous.span().endByte()));
             } else {
                 break;
             }
@@ -556,7 +562,7 @@ public final class Parser {
     private Expr parsePropagateOpt(Expr expr) throws ParseException {
         if (match(TokenType.QUESTION)) {
             return new PropagateExpr(expr,
-                new SourceSpan("", expr.span().startByte(), previous.span().endByte()));
+                span(expr.span().startByte(), previous.span().endByte()));
         }
         return expr;
     }
@@ -567,33 +573,33 @@ public final class Parser {
         // Literals
         if (match(TokenType.INT_LITERAL)) {
             return new LiteralExpr(LiteralExpr.LiteralKind.INT, previous.value(),
-                new SourceSpan("", start, previous.span().endByte()));
+                span(start, previous.span().endByte()));
         }
         if (match(TokenType.LONG_LITERAL)) {
             return new LiteralExpr(LiteralExpr.LiteralKind.LONG, previous.value(),
-                new SourceSpan("", start, previous.span().endByte()));
+                span(start, previous.span().endByte()));
         }
         if (match(TokenType.STRING_LITERAL)) {
             return new LiteralExpr(LiteralExpr.LiteralKind.STRING, previous.value(),
-                new SourceSpan("", start, previous.span().endByte()));
+                span(start, previous.span().endByte()));
         }
         if (match(TokenType.TRUE)) {
             return new LiteralExpr(LiteralExpr.LiteralKind.BOOL, true,
-                new SourceSpan("", start, previous.span().endByte()));
+                span(start, previous.span().endByte()));
         }
         if (match(TokenType.FALSE)) {
             return new LiteralExpr(LiteralExpr.LiteralKind.BOOL, false,
-                new SourceSpan("", start, previous.span().endByte()));
+                span(start, previous.span().endByte()));
         }
         if (match(TokenType.UNIT)) {
             return new LiteralExpr(LiteralExpr.LiteralKind.UNIT, null,
-                new SourceSpan("", start, previous.span().endByte()));
+                span(start, previous.span().endByte()));
         }
         
         // Hole
         if (match(TokenType.HOLE)) {
             return new HoleExpr((String) previous.value(),
-                new SourceSpan("", start, previous.span().endByte()));
+                span(start, previous.span().endByte()));
         }
         
         // If expression
@@ -615,11 +621,11 @@ public final class Parser {
         if (match(TokenType.LPAREN)) {
             if (match(TokenType.RPAREN)) {
                 return new LiteralExpr(LiteralExpr.LiteralKind.UNIT, null,
-                    new SourceSpan("", start, previous.span().endByte()));
+                    span(start, previous.span().endByte()));
             }
             var expr = parseExpr();
             consume(TokenType.RPAREN, "Expected ')' after expression");
-            return new ParenExpr(expr, new SourceSpan("", start, previous.span().endByte()));
+            return new ParenExpr(expr, span(start, previous.span().endByte()));
         }
         
         // Identifier or constructor
@@ -631,7 +637,7 @@ public final class Parser {
                 return parseConstructorExpr(name, start);
             }
             
-            return new IdentExpr(name, new SourceSpan("", start, previous.span().endByte()));
+            return new IdentExpr(name, span(start, previous.span().endByte()));
         }
         
         throw error("NGJ-PARSE-005", "Unexpected token: " + current.type(), current.span());
@@ -652,7 +658,7 @@ public final class Parser {
         }
         
         return new IfExpr(condition, thenBranch, elseBranch,
-            new SourceSpan("", start, previous.span().endByte()));
+            span(start, previous.span().endByte()));
     }
     
     private Expr parseMatchExpr(int start) throws ParseException {
@@ -668,7 +674,7 @@ public final class Parser {
         
         consume(TokenType.RBRACE, "Expected '}' after match arms");
         
-        return new MatchExpr(scrutinee, arms, new SourceSpan("", start, previous.span().endByte()));
+        return new MatchExpr(scrutinee, arms, span(start, previous.span().endByte()));
     }
     
     private MatchExpr.MatchArm parseMatchArm() throws ParseException {
@@ -684,7 +690,7 @@ public final class Parser {
             body = parseExpr();
         }
         
-        return new MatchExpr.MatchArm(pattern, body, new SourceSpan("", start, previous.span().endByte()));
+        return new MatchExpr.MatchArm(pattern, body, span(start, previous.span().endByte()));
     }
     
     private Pattern parsePattern() throws ParseException {
@@ -693,7 +699,7 @@ public final class Parser {
         // Wildcard
         if (current.text().equals("_")) {
             advance();
-            return new WildcardPattern(new SourceSpan("", start, previous.span().endByte()));
+            return new WildcardPattern(span(start, previous.span().endByte()));
         }
         
         // Literal patterns
@@ -710,7 +716,7 @@ public final class Parser {
                         previous.type() == TokenType.FALSE ? false :
                         previous.value();
             var literal = new LiteralExpr(kind, value, previous.span());
-            return new LiteralPattern(literal, new SourceSpan("", start, previous.span().endByte()));
+            return new LiteralPattern(literal, span(start, previous.span().endByte()));
         }
         
         // Constructor pattern or binding
@@ -733,21 +739,21 @@ public final class Parser {
                         
                         fields.add(new ConstructorPattern.PatternField(
                             fieldName, fieldPattern, 
-                            new SourceSpan("", fieldStart, previous.span().endByte())));
+                            span(fieldStart, previous.span().endByte())));
                     } while (match(TokenType.COMMA));
                 }
                 consume(TokenType.RPAREN, "Expected ')' after constructor fields");
                 
-                return new ConstructorPattern(name, fields, new SourceSpan("", start, previous.span().endByte()));
+                return new ConstructorPattern(name, fields, span(start, previous.span().endByte()));
             }
             
             // Unit constructor (no parens)
             if (Character.isUpperCase(name.charAt(0))) {
-                return new ConstructorPattern(name, List.of(), new SourceSpan("", start, previous.span().endByte()));
+                return new ConstructorPattern(name, List.of(), span(start, previous.span().endByte()));
             }
             
             // Binding pattern
-            return new BindingPattern(name, new SourceSpan("", start, previous.span().endByte()));
+            return new BindingPattern(name, span(start, previous.span().endByte()));
         }
         
         throw error("NGJ-PARSE-006", "Expected pattern", current.span());
@@ -767,13 +773,13 @@ public final class Parser {
                 var value = parseExpr();
                 
                 fields.add(new ConstructorExpr.FieldInit(fieldName, value,
-                    new SourceSpan("", fieldStart, previous.span().endByte())));
+                    span(fieldStart, previous.span().endByte())));
             } while (match(TokenType.COMMA));
         }
         
         consume(TokenType.RBRACE, "Expected '}' after constructor fields");
         
-        return new ConstructorExpr(typePath, fields, new SourceSpan("", start, previous.span().endByte()));
+        return new ConstructorExpr(typePath, fields, span(start, previous.span().endByte()));
     }
     
     // Utility methods
@@ -814,5 +820,9 @@ public final class Parser {
         var diag = Diagnostic.error(id, message, span);
         diagnostics.add(diag);
         return new ParseException(diagnostics);
+    }
+    
+    private SourceSpan span(int start, int end) {
+        return new SourceSpan(fileName, start, end);
     }
 }
