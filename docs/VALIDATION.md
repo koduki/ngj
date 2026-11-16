@@ -1,6 +1,6 @@
 # Validation and implementation plan
 
-現時点ではコンパイラ・テストハーネスは存在しない。以下は実装の受入条件であり、試験済みの結果ではない。[仕様](SPECIFICATION.md)と[ツールAPI](AGENT_TOOLING.md)に対する適合性を測る。
+compilerとテストはリポジトリに存在する。以下は受入条件であり、各条件の達成状況は対応する試験結果で確認する。v0.3移行の追加条件は[SYNTAX_MIGRATION.md](SYNTAX_MIGRATION.md)を参照する。[仕様](SPECIFICATION.md)と[ツールAPI](AGENT_TOOLING.md)に対する適合性を測る。
 
 ## 1. 機能ごとの受入条件
 
@@ -76,4 +76,4 @@ Java25 JVMを基準としてValhalla/Native Imageを比較し、言語の意味�
 
 ## 5. この仕様改訂自体の検証
 
-改訂時にはMarkdownの相対リンク、JSONサンプルのparse、code fence、用語/サンプル整合性を確認する。これはNGJのコンパイルや意味論の証明ではない。compiler導入後には、この文書のfixtureを実際の適合性テストへ移す。
+改訂時にはMarkdownの相対リンク、JSONサンプルのparse、code fence、用語/サンプル整合性を確認する。これはNGJのコンパイルや意味論の証明ではない。既存compilerの適合性テストへ、この文書の未対応fixtureを順次追加する。

@@ -1,3 +1,4 @@
+// Legacy v0.2 architecture sketch. Canonical v0.3 syntax: syntax_v03.ngj.
 // Design example. Input is split at line boundaries, not arbitrary byte chunks.
 module cli.main
 

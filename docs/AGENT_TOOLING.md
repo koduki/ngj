@@ -1,10 +1,10 @@
-# Agent-facing compiler protocol — draft v0.2
+# Agent-facing compiler protocol — draft v0.3
 
-本仕様は[言語仕様](SPECIFICATION.md)の一部。以下のCLI、JSON、LSP拡張は設計契約であり、まだ実装されていない。MCPはこのAPI上の任意のadapterとし、コンパイラがネットワークサービスへ依存しないようにする。
+本仕様は[言語仕様](SPECIFICATION.md)の一部。以下は設計契約である。既存compilerにはCLI実装があるが、v0.3構文・全プロトコルの適合確認は移行試験で行う。MCPはこのAPI上の任意のadapterとし、コンパイラがネットワークサービスへ依存しないようにする。
 
 ## 1. 部分プログラムとTyped Holes
 
-`?name`は名前付きの未実装式。穴IDはmodule/symbol/source revision/局所IDに束縛する。周囲の署名から期待型、許可Effect、利用可能な値、所有権状態、契約を求める。
+`?name`は名前付きの未実装式。穴IDはpackage/symbol/source revision/局所IDに束縛する。周囲の署名から期待型、許可Effect、利用可能な値、所有権状態、契約を求める。
 
 穴を含む関数の検査結果は`incomplete`であり、`valid`ではない。未解決の型制約やEffectをpure/安全と仮定してはならない。穴がresourceを消費するか不明な場合、その後の使用は「証明待ち」として示す。すでに確定した矛盾と、補完すれば解消し得る未解決制約を区別する。
 
@@ -41,7 +41,7 @@ context/inspectは正常な情報取得をexit 0とする。buildのincomplete�
 ```json
 {
   "schema_version": "ngj.diagnostics/1",
-  "compiler_version": "design-v0.2",
+  "compiler_version": "design-v0.3",
   "source_revision": "sha256:example",
   "policy_digest": "sha256:policy-example",
   "target_profile": "java25/restricted",
@@ -74,10 +74,12 @@ ownership診断ではmove/borrow/freezeの発生位置と寿命境界を返す�
 
 ## 4. 型に基づくcontext取得
 
+以下のBytes/借用のJSON例は所有権機能を有効にした後続profileの契約である。最初のpure core profileで対応済みとは扱わない。
+
 ```json
 {
   "schema_version": "ngj.context/1",
-  "compiler_version": "design-v0.2",
+  "compiler_version": "design-v0.3",
   "source_revision": "sha256:example",
   "policy_digest": "sha256:policy-example",
   "target_profile": "java25/restricted",
@@ -87,7 +89,7 @@ ownership診断ではmove/borrow/freezeの発生位置と寿命境界を返す�
   "bindings": [{"name": "raw", "type": "Bytes<'a>", "ownership": "shared_borrow"}],
   "relevant_symbols": [{
     "id": "std.io.Bytes.slice",
-    "signature": "fn slice(self: &Bytes<'a>, offset: Long, length: Long) -> Result<Bytes<'a>, BoundsError> ! {}",
+    "signature": "fn slice(self: &Bytes<'a>, offset: Long, length: Long) -> Result<Bytes<'a>, BoundsError> effects()",
     "origin": "stdlib",
     "content_digest": "sha256:api-example"
   }],
@@ -112,3 +114,7 @@ ownership診断ではmove/borrow/freezeの発生位置と寿命境界を返す�
 通常LSPのdiagnostics、definition、referencesを提供し、context/inspect/check-patchを拡張メソッドで公開する。CLIとLSPは同じ検査エンジンを使う。特定のモデルやtoken-level APIを必須にしない。
 
 推奨ループ: 署名・契約の確定 → 穴のcontext取得 → 関数本体を生成 → 部分検査 → 反例/テスト → 全体検査。モデルが生成した契約と実装だけで合否を自己判定させない。制約付きデコーディングは後段の任意clientとして扱う。
+
+## 7. v0.3構文と診断境界
+
+[EBNF.md](EBNF.md)の正規構文だけをcontextの生成例に使用する。旧構文の混在は移行診断で示す。Result伝播先のfunction/lambda/fork境界IDを保持し、for callback内の?は明示的に拒否する。末尾セミコロンによる戻り値消失、Optionへの?、constructorの括弧不足は原因に即した診断を返す。全関数の型・Effectは明示署名から取得する。
