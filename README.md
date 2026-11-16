@@ -17,6 +17,7 @@
 
 - [Language specification](docs/SPECIFICATION.md): semantics, safety boundaries, JVM mapping and roadmap.
 - [Agent tooling protocol](docs/AGENT_TOOLING.md): proposed CLI, JSON diagnostics and context API.
+- [AOT design direction](docs/AOT.md): post-MVP strategy for Leyden AOT and native-image support.
 - [Validation plan](docs/VALIDATION.md): conformance cases, performance checks and controlled AI-generation experiments.
 - [Research basis](docs/RESEARCH.md): primary sources and the limits of transferring their findings to NGJ.
 - [Examples and adapter contracts](examples/README.md): illustrative REST, payment, binary parser, CLI and typed-hole examples.
