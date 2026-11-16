@@ -1,0 +1,16 @@
+// Multi-hole test for AI pilot evaluation
+// Tests consistency across related holes
+
+module pilot.multi_hole
+
+pub fn double(x: Int) -> Int ! {} {
+    ?doubleImpl
+}
+
+pub fn quadruple(x: Int) -> Int ! {} {
+    ?quadrupleImpl
+}
+
+pub fn isEven(x: Int) -> Bool ! {} {
+    ?isEvenImpl
+}

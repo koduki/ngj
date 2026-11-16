@@ -1,0 +1,21 @@
+// Result and Option usage
+module test.result
+
+pub data DivError {
+    message: String
+}
+
+pub fn safeDivide(a: Int, b: Int) -> Result<Int, DivError> ! {} {
+    if b == 0 {
+        Err(DivError { message: "Division by zero" })
+    } else {
+        Ok(a / b)
+    }
+}
+
+pub fn doubleOrZero(opt: Option<Int>) -> Int ! {} {
+    match opt {
+        Some(value) => value * 2,
+        None => 0
+    }
+}

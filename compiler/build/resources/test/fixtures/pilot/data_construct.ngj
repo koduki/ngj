@@ -1,0 +1,24 @@
+// Data construction test for AI pilot evaluation
+// Tests understanding of field types and construction
+
+module pilot.data_construct
+
+pub data Point {
+    x: Int,
+    y: Int
+}
+
+pub data Rectangle {
+    topLeft: Point,
+    bottomRight: Point
+}
+
+pub fn makeOrigin() -> Point ! {} {
+    ?originPoint
+}
+
+pub fn makeRect(width: Int, height: Int) -> Rectangle ! {} {
+    let origin: Point = makeOrigin()
+    let corner: Point = Point { x: width, y: height }
+    ?rectangle
+}

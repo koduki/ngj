@@ -1,0 +1,523 @@
+package ngj.codegen;
+
+import ngj.ast.*;
+
+import java.lang.classfile.*;
+import java.lang.classfile.attribute.*;
+import java.lang.classfile.instruction.*;
+import java.lang.constant.*;
+import java.lang.invoke.*;
+import java.nio.file.*;
+import java.util.*;
+
+import static java.lang.classfile.ClassFile.*;
+
+/**
+ * Code generator targeting Java 25 class files using the standard Class-File API.
+ */
+public final class Java25CodeGenerator {
+    
+    private static final int CLASS_FILE_VERSION = 69;
+    
+    private String currentModule;
+    private Path outputDir = Path.of("build/classes");
+    
+    public List<Path> generate(CompilationUnit unit) throws CodeGenException {
+        currentModule = unit.modulePath();
+        var outputs = new ArrayList<Path>();
+        
+        try {
+            var moduleDir = outputDir.resolve(currentModule.replace('.', '/'));
+            Files.createDirectories(moduleDir);
+            
+            for (var decl : unit.declarations()) {
+                var classFile = generateDecl(decl);
+                if (classFile != null) {
+                    var className = getDeclName(decl);
+                    var outputPath = moduleDir.resolve(className + ".class");
+                    Files.write(outputPath, classFile);
+                    outputs.add(outputPath);
+                }
+            }
+            
+            return outputs;
+        } catch (Exception e) {
+            throw new CodeGenException("Code generation failed: " + e.getMessage(), e);
+        }
+    }
+    
+    public void setOutputDir(Path outputDir) {
+        this.outputDir = outputDir;
+    }
+    
+    private byte[] generateDecl(TopLevelDecl decl) throws CodeGenException {
+        return switch (decl) {
+            case FnDecl fn -> generateFunction(fn);
+            case DataDecl data -> generateData(data);
+            case EnumDecl enumDecl -> generateEnum(enumDecl);
+        };
+    }
+    
+    private String getDeclName(TopLevelDecl decl) {
+        return switch (decl) {
+            case FnDecl fn -> fn.name() + "$Fn";
+            case DataDecl data -> data.name();
+            case EnumDecl enumDecl -> enumDecl.name();
+        };
+    }
+    
+    private byte[] generateFunction(FnDecl fn) {
+        var className = currentModule.replace('.', '/') + "/" + fn.name() + "$Fn";
+        var classDesc = ClassDesc.ofInternalName(className);
+        
+        return ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
+            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            var methodDesc = buildMethodDescriptor(fn);
+            classBuilder.withMethod("invoke", methodDesc, ACC_PUBLIC | ACC_STATIC, mb -> {
+                mb.withCode(codeBuilder -> {
+                    var ctx = new CodeGenContext(codeBuilder, fn);
+                    generateBlock(ctx, fn.body());
+                    
+                    if (!ctx.hasReturn) {
+                        var retType = getTypeName(fn.returnType());
+                        switch (retType) {
+                            case "Unit" -> codeBuilder.return_();
+                            case "Int", "Bool" -> codeBuilder.ireturn();
+                            case "Long" -> codeBuilder.lreturn();
+                            default -> codeBuilder.areturn();
+                        }
+                    }
+                });
+            });
+            
+            if (fn.params().isEmpty() && getTypeName(fn.returnType()).equals("Int")) {
+                var mainDesc = MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String.arrayType());
+                classBuilder.withMethod("main", mainDesc, ACC_PUBLIC | ACC_STATIC, mb -> {
+                    mb.withCode(codeBuilder -> {
+                        codeBuilder.invokestatic(classDesc, "invoke", methodDesc);
+                        codeBuilder.invokestatic(ClassDesc.of("java.lang.System"), "exit", 
+                            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_int));
+                        codeBuilder.return_();
+                    });
+                });
+            }
+        });
+    }
+    
+    private MethodTypeDesc buildMethodDescriptor(FnDecl fn) {
+        var paramTypes = fn.params().stream()
+            .map(p -> typeToClassDesc(p.type()))
+            .toArray(ClassDesc[]::new);
+        var returnType = typeToClassDesc(fn.returnType());
+        return MethodTypeDesc.of(returnType, paramTypes);
+    }
+    
+    private ClassDesc typeToClassDesc(TypeExpr type) {
+        return switch (type) {
+            case SimpleTypeExpr simple -> switch (simple.name()) {
+                case "Int" -> ConstantDescs.CD_int;
+                case "Long" -> ConstantDescs.CD_long;
+                case "Bool" -> ConstantDescs.CD_boolean;
+                case "String" -> ConstantDescs.CD_String;
+                default -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + simple.name());
+            };
+            case GenericTypeExpr generic -> switch (generic.name()) {
+                case "Result" -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Result");
+                case "Option" -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option");
+                default -> ConstantDescs.CD_Object;
+            };
+            case UnitTypeExpr _ -> ConstantDescs.CD_void;
+        };
+    }
+    
+    private void generateBlock(CodeGenContext ctx, BlockExpr block) {
+        for (var stmt : block.statements()) {
+            generateStmt(ctx, stmt);
+        }
+        
+        if (block.tailExpr() != null) {
+            generateExpr(ctx, block.tailExpr());
+        }
+    }
+    
+    private void generateStmt(CodeGenContext ctx, Statement stmt) {
+        switch (stmt) {
+            case LetStmt let -> {
+                generateExpr(ctx, let.initializer());
+                var type = let.explicitType();
+                var typeName = type != null ? getTypeName(type) : "Object";
+                int slot = ctx.allocateLocal(let.name(), typeName);
+                switch (typeName) {
+                    case "Long" -> ctx.code.lstore(slot);
+                    case "Int", "Bool" -> ctx.code.istore(slot);
+                    default -> ctx.code.astore(slot);
+                }
+            }
+            case ExprStmt expr -> {
+                generateExpr(ctx, expr.expr());
+            }
+            case ReturnStmt ret -> {
+                if (ret.value() != null) {
+                    generateExpr(ctx, ret.value());
+                }
+                var retType = getTypeName(ctx.fn.returnType());
+                switch (retType) {
+                    case "Unit" -> ctx.code.return_();
+                    case "Int", "Bool" -> ctx.code.ireturn();
+                    case "Long" -> ctx.code.lreturn();
+                    default -> ctx.code.areturn();
+                }
+                ctx.hasReturn = true;
+            }
+        }
+    }
+    
+    private void generateExpr(CodeGenContext ctx, Expr expr) {
+        switch (expr) {
+            case LiteralExpr lit -> generateLiteral(ctx, lit);
+            case IdentExpr ident -> generateIdent(ctx, ident);
+            case BinaryExpr binary -> generateBinary(ctx, binary);
+            case UnaryExpr unary -> generateUnary(ctx, unary);
+            case IfExpr ifExpr -> generateIf(ctx, ifExpr);
+            case BlockExpr block -> generateBlock(ctx, block);
+            case CallExpr call -> generateCall(ctx, call);
+            case ConstructorExpr ctor -> generateConstructor(ctx, ctor);
+            case MatchExpr matchExpr -> generateMatch(ctx, matchExpr);
+            case PropagateExpr prop -> generatePropagate(ctx, prop);
+            case FieldAccessExpr access -> generateFieldAccess(ctx, access);
+            case ParenExpr paren -> generateExpr(ctx, paren.inner());
+            case HoleExpr hole -> throw new IllegalStateException("Hole in codegen: ?" + hole.name());
+        }
+    }
+    
+    private void generateLiteral(CodeGenContext ctx, LiteralExpr lit) {
+        switch (lit.kind()) {
+            case INT -> ctx.code.ldc((Integer) lit.value());
+            case LONG -> ctx.code.ldc((Long) lit.value());
+            case BOOL -> ctx.code.ldc((Boolean) lit.value() ? 1 : 0);
+            case STRING -> ctx.code.ldc((String) lit.value());
+            case UNIT -> {}
+        }
+    }
+    
+    private void generateIdent(CodeGenContext ctx, IdentExpr ident) {
+        Integer slot = ctx.getLocal(ident.name());
+        if (slot != null) {
+            var typeName = ctx.getLocalType(ident.name());
+            switch (typeName) {
+                case "Int", "Bool" -> ctx.code.iload(slot);
+                case "Long" -> ctx.code.lload(slot);
+                default -> ctx.code.aload(slot);
+            }
+        } else {
+            ctx.code.aconst_null();
+        }
+    }
+    
+    private void generateBinary(CodeGenContext ctx, BinaryExpr binary) {
+        if (binary.op() == BinaryExpr.BinaryOp.AND) {
+            generateShortCircuitAnd(ctx, binary);
+            return;
+        }
+        if (binary.op() == BinaryExpr.BinaryOp.OR) {
+            generateShortCircuitOr(ctx, binary);
+            return;
+        }
+        
+        generateExpr(ctx, binary.left());
+        generateExpr(ctx, binary.right());
+        
+        switch (binary.op()) {
+            case ADD -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "addExact", 
+                MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_int, ConstantDescs.CD_int));
+            case SUB -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "subtractExact",
+                MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_int, ConstantDescs.CD_int));
+            case MUL -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "multiplyExact",
+                MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_int, ConstantDescs.CD_int));
+            case DIV -> ctx.code.idiv();
+            case MOD -> ctx.code.irem();
+            case EQ -> generateComparison(ctx, Opcode.IF_ICMPEQ);
+            case NE -> generateComparison(ctx, Opcode.IF_ICMPNE);
+            case LT -> generateComparison(ctx, Opcode.IF_ICMPLT);
+            case LE -> generateComparison(ctx, Opcode.IF_ICMPLE);
+            case GT -> generateComparison(ctx, Opcode.IF_ICMPGT);
+            case GE -> generateComparison(ctx, Opcode.IF_ICMPGE);
+            default -> {}
+        }
+    }
+    
+    private void generateComparison(CodeGenContext ctx, Opcode opcode) {
+        ctx.code.ifThenElse(opcode, 
+            tb -> tb.ldc(1),
+            fb -> fb.ldc(0));
+    }
+    
+    private void generateShortCircuitAnd(CodeGenContext ctx, BinaryExpr binary) {
+        var falseLabel = ctx.code.newLabel();
+        var endLabel = ctx.code.newLabel();
+        
+        generateExpr(ctx, binary.left());
+        ctx.code.ifeq(falseLabel);
+        
+        generateExpr(ctx, binary.right());
+        ctx.code.goto_(endLabel);
+        
+        ctx.code.labelBinding(falseLabel);
+        ctx.code.ldc(0);
+        
+        ctx.code.labelBinding(endLabel);
+    }
+    
+    private void generateShortCircuitOr(CodeGenContext ctx, BinaryExpr binary) {
+        var trueLabel = ctx.code.newLabel();
+        var endLabel = ctx.code.newLabel();
+        
+        generateExpr(ctx, binary.left());
+        ctx.code.ifne(trueLabel);
+        
+        generateExpr(ctx, binary.right());
+        ctx.code.goto_(endLabel);
+        
+        ctx.code.labelBinding(trueLabel);
+        ctx.code.ldc(1);
+        
+        ctx.code.labelBinding(endLabel);
+    }
+    
+    private void generateUnary(CodeGenContext ctx, UnaryExpr unary) {
+        generateExpr(ctx, unary.operand());
+        
+        switch (unary.op()) {
+            case NEG -> ctx.code.ineg();
+            case NOT -> {
+                ctx.code.ldc(1);
+                ctx.code.ixor();
+            }
+        }
+    }
+    
+    private void generateIf(CodeGenContext ctx, IfExpr ifExpr) {
+        generateExpr(ctx, ifExpr.condition());
+        ctx.code.ifThenElse(Opcode.IFNE,
+            tb -> generateBlock(ctx.withCode(tb), ifExpr.thenBranch()),
+            fb -> {
+                if (ifExpr.elseBranch() != null) {
+                    generateExpr(ctx.withCode(fb), ifExpr.elseBranch());
+                }
+            });
+    }
+    
+    private void generateCall(CodeGenContext ctx, CallExpr call) {
+        for (var arg : call.args()) {
+            generateExpr(ctx, arg);
+        }
+        
+        if (call.callee() instanceof IdentExpr ident) {
+            var methodName = ident.name();
+            
+            switch (methodName) {
+                case "Ok", "Err", "Some" -> {
+                    ctx.code.aconst_null();
+                    return;
+                }
+                case "None" -> {
+                    ctx.code.aconst_null();
+                    return;
+                }
+            }
+            
+            var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + methodName + "$Fn");
+            ctx.code.invokestatic(classDesc, "invoke", MethodTypeDesc.of(ConstantDescs.CD_Object));
+        }
+    }
+    
+    private void generateConstructor(CodeGenContext ctx, ConstructorExpr ctor) {
+        var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + ctor.typePath());
+        
+        ctx.code.new_(classDesc);
+        ctx.code.dup();
+        
+        for (var field : ctor.fields()) {
+            generateExpr(ctx, field.value());
+        }
+        
+        var paramTypes = new ClassDesc[ctor.fields().size()];
+        Arrays.fill(paramTypes, ConstantDescs.CD_Object);
+        var ctorDesc = MethodTypeDesc.of(ConstantDescs.CD_void, paramTypes);
+        
+        ctx.code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
+    }
+    
+    private void generateMatch(CodeGenContext ctx, MatchExpr matchExpr) {
+        generateExpr(ctx, matchExpr.scrutinee());
+        
+        if (!matchExpr.arms().isEmpty()) {
+            ctx.code.pop();
+            generateExpr(ctx, matchExpr.arms().get(0).body());
+        }
+    }
+    
+    private void generatePropagate(CodeGenContext ctx, PropagateExpr prop) {
+        generateExpr(ctx, prop.inner());
+    }
+    
+    private void generateFieldAccess(CodeGenContext ctx, FieldAccessExpr access) {
+        generateExpr(ctx, access.object());
+        ctx.code.getfield(ConstantDescs.CD_Object, access.fieldName(), ConstantDescs.CD_Object);
+    }
+    
+    private byte[] generateData(DataDecl data) {
+        var className = currentModule.replace('.', '/') + "/" + data.name();
+        var classDesc = ClassDesc.ofInternalName(className);
+        
+        return ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
+            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            for (var field : data.fields()) {
+                var fieldDesc = typeToClassDesc(field.type());
+                classBuilder.withField(field.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL);
+            }
+            
+            var ctorParamTypes = data.fields().stream()
+                .map(f -> typeToClassDesc(f.type()))
+                .toArray(ClassDesc[]::new);
+            var ctorDesc = MethodTypeDesc.of(ConstantDescs.CD_void, ctorParamTypes);
+            
+            classBuilder.withMethod(ConstantDescs.INIT_NAME, ctorDesc, ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME, 
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    
+                    int slot = 1;
+                    for (var field : data.fields()) {
+                        code.aload(0);
+                        var typeName = getTypeName(field.type());
+                        var fieldDesc = typeToClassDesc(field.type());
+                        if (typeName.equals("Int") || typeName.equals("Bool")) {
+                            code.iload(slot++);
+                        } else if (typeName.equals("Long")) {
+                            code.lload(slot);
+                            slot += 2;
+                        } else {
+                            code.aload(slot++);
+                        }
+                        code.putfield(classDesc, field.name(), fieldDesc);
+                    }
+                    
+                    code.return_();
+                });
+            });
+            
+            classBuilder.withMethod("equals", MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object),
+                ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.aload(1);
+                    code.ifThenElse(Opcode.IF_ACMPEQ,
+                        tb -> tb.ldc(1),
+                        fb -> fb.ldc(0));
+                    code.ireturn();
+                });
+            });
+            
+            classBuilder.withMethod("hashCode", MethodTypeDesc.of(ConstantDescs.CD_int), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, "hashCode", 
+                        MethodTypeDesc.of(ConstantDescs.CD_int));
+                    code.ireturn();
+                });
+            });
+        });
+    }
+    
+    private byte[] generateEnum(EnumDecl enumDecl) {
+        var className = currentModule.replace('.', '/') + "/" + enumDecl.name();
+        var classDesc = ClassDesc.ofInternalName(className);
+        
+        return ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
+            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            classBuilder.withMethod(ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void),
+                ACC_PRIVATE, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    code.return_();
+                });
+            });
+        });
+    }
+    
+    private String getTypeName(TypeExpr type) {
+        return switch (type) {
+            case SimpleTypeExpr simple -> simple.name();
+            case GenericTypeExpr generic -> generic.name();
+            case UnitTypeExpr _ -> "Unit";
+        };
+    }
+    
+    private class CodeGenContext {
+        final CodeBuilder code;
+        final FnDecl fn;
+        final Map<String, Integer> locals = new HashMap<>();
+        final Map<String, String> localTypes = new HashMap<>();
+        int nextSlot;
+        boolean hasReturn = false;
+        
+        CodeGenContext(CodeBuilder code, FnDecl fn) {
+            this.code = code;
+            this.fn = fn;
+            this.nextSlot = 0;
+            
+            for (var param : fn.params()) {
+                locals.put(param.name(), nextSlot);
+                var typeName = getTypeName(param.type());
+                localTypes.put(param.name(), typeName);
+                if (typeName.equals("Long")) {
+                    nextSlot += 2;
+                } else {
+                    nextSlot++;
+                }
+            }
+        }
+        
+        CodeGenContext withCode(CodeBuilder newCode) {
+            var ctx = new CodeGenContext(newCode, fn);
+            ctx.locals.putAll(this.locals);
+            ctx.localTypes.putAll(this.localTypes);
+            ctx.nextSlot = this.nextSlot;
+            ctx.hasReturn = this.hasReturn;
+            return ctx;
+        }
+        
+        int allocateLocal(String name, String typeName) {
+            int slot = nextSlot;
+            locals.put(name, slot);
+            localTypes.put(name, typeName);
+            if (typeName.equals("Long")) {
+                nextSlot += 2;
+            } else {
+                nextSlot++;
+            }
+            return slot;
+        }
+        
+        Integer getLocal(String name) {
+            return locals.get(name);
+        }
+        
+        String getLocalType(String name) {
+            return localTypes.getOrDefault(name, "Object");
+        }
+    }
+}

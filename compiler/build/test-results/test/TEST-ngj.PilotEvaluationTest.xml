@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="ngj.PilotEvaluationTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-11-16T16:39:12" hostname="cursor" time="0.011">
+  <properties/>
+  <testcase name="simpleFillContextHasParameters()" classname="ngj.PilotEvaluationTest" time="0.001"/>
+  <testcase name="multiHoleHasMultipleHoles()" classname="ngj.PilotEvaluationTest" time="0.001"/>
+  <testcase name="dataConstructReturnsExpectedType()" classname="ngj.PilotEvaluationTest" time="0.001"/>
+  <testcase name="matchCompleteDetectsNonExhaustive()" classname="ngj.PilotEvaluationTest" time="0.003"/>
+  <testcase name="rectangleHoleExpectsRectangle()" classname="ngj.PilotEvaluationTest" time="0.001"/>
+  <testcase name="simpleFillHasOneHole()" classname="ngj.PilotEvaluationTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -1,0 +1,36 @@
+services:
+  # Runtime compiler service
+  ngjc:
+    build:
+      context: .
+      target: runtime
+    image: ngj:latest
+    volumes:
+      - ./examples:/src:ro
+      - ./out:/out
+    working_dir: /src
+
+  # Development environment with full JDK
+  dev:
+    build:
+      context: .
+      target: development
+    image: ngj:dev
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command: ./gradlew build --no-daemon
+
+  # Run tests in container
+  test:
+    build:
+      context: .
+      target: development
+    volumes:
+      - .:/workspace
+      - gradle-cache:/root/.gradle
+    working_dir: /workspace
+    command: ./gradlew test --no-daemon
+
+volumes:
+  gradle-cache:

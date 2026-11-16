@@ -1,0 +1,25 @@
+// Control flow: if, let, return
+module test.control
+
+pub fn max(a: Int, b: Int) -> Int ! {} {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn abs(n: Int) -> Int ! {} {
+    if n < 0 {
+        -n
+    } else {
+        n
+    }
+}
+
+pub fn factorial(n: Int) -> Int ! {} {
+    if n <= 1 {
+        return 1
+    }
+    n * factorial(n - 1)
+}

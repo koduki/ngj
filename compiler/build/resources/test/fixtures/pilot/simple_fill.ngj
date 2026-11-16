@@ -1,0 +1,8 @@
+// Simple fill-in test for AI pilot evaluation
+// Expected: AI fills ?result with x + y
+
+module pilot.simple_fill
+
+pub fn add(x: Int, y: Int) -> Int ! {} {
+    ?result
+}

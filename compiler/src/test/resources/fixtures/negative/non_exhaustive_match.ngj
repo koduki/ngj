@@ -1,0 +1,16 @@
+// Non-exhaustive match must be rejected
+module test.invalid
+
+pub enum Status {
+    Active,
+    Pending,
+    Closed
+}
+
+pub fn describe(s: Status) -> Int ! {} {
+    match s {
+        Active => 1,
+        Pending => 2
+        // Missing: Closed
+    }
+}

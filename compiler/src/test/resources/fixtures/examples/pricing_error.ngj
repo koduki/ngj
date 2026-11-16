@@ -1,0 +1,24 @@
+// Pricing calculation - version with type errors
+// Demonstrates various type mismatches the type checker catches
+
+module example.pricing_error
+
+// Error: returning String when Int expected
+pub fn itemSubtotal(basePrice: Int, quantity: Int) -> Int ! {} {
+    "not a number"
+}
+
+// Error: wrong arithmetic types
+pub fn calculateTax(amount: Int, taxRate: Int) -> Int ! {} {
+    amount * "10" / 100
+}
+
+// Error: type mismatch in return
+pub fn applyDiscount(amount: Int, percentOff: Int) -> Int ! {} {
+    true
+}
+
+// Error: wrong argument types in function call
+pub fn calculateTotal(basePrice: Int, quantity: Int) -> Int ! {} {
+    itemSubtotal("hello", quantity)
+}
