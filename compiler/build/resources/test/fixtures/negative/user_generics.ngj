@@ -1,0 +1,10 @@
+// User-defined generics must be rejected in MVP
+module test.invalid
+
+pub data Box<T> {
+    value: T
+}
+
+pub fn wrap(x: Int) -> Box<Int> ! {} {
+    Box { value: x }
+}

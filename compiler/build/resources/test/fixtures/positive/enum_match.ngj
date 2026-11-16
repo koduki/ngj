@@ -1,0 +1,16 @@
+// Enum and match expression
+module test.enumeration
+
+pub enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+pub fn colorToInt(c: Color) -> Int ! {} {
+    match c {
+        Red => 0,
+        Green => 1,
+        Blue => 2
+    }
+}

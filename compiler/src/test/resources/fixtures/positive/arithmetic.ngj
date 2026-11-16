@@ -1,0 +1,22 @@
+// Arithmetic operations
+module test.arithmetic
+
+pub fn add(a: Int, b: Int) -> Int ! {} {
+    a + b
+}
+
+pub fn subtract(a: Int, b: Int) -> Int ! {} {
+    a - b
+}
+
+pub fn multiply(a: Int, b: Int) -> Int ! {} {
+    a * b
+}
+
+pub fn divide(a: Int, b: Int) -> Int ! {} {
+    a / b
+}
+
+pub fn modulo(a: Int, b: Int) -> Int ! {} {
+    a % b
+}

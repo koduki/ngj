@@ -1,0 +1,6 @@
+// Source with hole - should be incomplete
+module test.incomplete
+
+pub fn calculate(a: Int, b: Int) -> Int ! {} {
+    ?implementation
+}

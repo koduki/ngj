@@ -1,0 +1,15 @@
+// Data type declaration
+module test.data
+
+pub data Point {
+    x: Int,
+    y: Int
+}
+
+pub fn createPoint(x: Int, y: Int) -> Point ! {} {
+    Point { x: x, y: y }
+}
+
+pub fn getX(p: Point) -> Int ! {} {
+    p.x
+}

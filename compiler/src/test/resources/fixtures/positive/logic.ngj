@@ -1,0 +1,18 @@
+// Short-circuit logic
+module test.logic
+
+pub fn andTest(a: Bool, b: Bool) -> Bool ! {} {
+    a && b
+}
+
+pub fn orTest(a: Bool, b: Bool) -> Bool ! {} {
+    a || b
+}
+
+pub fn notTest(a: Bool) -> Bool ! {} {
+    !a
+}
+
+pub fn complex(a: Bool, b: Bool, c: Bool) -> Bool ! {} {
+    (a && b) || (!c)
+}

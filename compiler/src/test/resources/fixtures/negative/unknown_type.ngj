@@ -1,0 +1,6 @@
+// Unknown types must be rejected
+module test.invalid
+
+pub fn test() -> UnknownType ! {} {
+    42
+}
