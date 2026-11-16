@@ -233,6 +233,56 @@ public final class TypeChecker {
             case UnaryExpr unary -> checkUnaryExpr(unary);
             
             case CallExpr call -> {
+                // Check for built-in Result/Option constructors
+                if (call.callee() instanceof IdentExpr ident) {
+                    var name = ident.name();
+                    if (name.equals("Ok") || name.equals("Err")) {
+                        if (call.args().size() != 1) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                name + " requires exactly one argument",
+                                call.span()
+                            ));
+                        } else {
+                            var argType = checkExpr(call.args().get(0));
+                            // Return Result<T, ?> or Result<?, E>
+                            if (name.equals("Ok") && argType != null) {
+                                yield new GenericTypeExpr("Result", 
+                                    List.of(argType, new SimpleTypeExpr("_", call.span())),
+                                    call.span());
+                            } else if (name.equals("Err") && argType != null) {
+                                yield new GenericTypeExpr("Result",
+                                    List.of(new SimpleTypeExpr("_", call.span()), argType),
+                                    call.span());
+                            }
+                        }
+                        yield new GenericTypeExpr("Result", List.of(), call.span());
+                    } else if (name.equals("Some")) {
+                        if (call.args().size() != 1) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "Some requires exactly one argument",
+                                call.span()
+                            ));
+                        } else {
+                            var argType = checkExpr(call.args().get(0));
+                            if (argType != null) {
+                                yield new GenericTypeExpr("Option", List.of(argType), call.span());
+                            }
+                        }
+                        yield new GenericTypeExpr("Option", List.of(), call.span());
+                    } else if (name.equals("None")) {
+                        if (!call.args().isEmpty()) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "None takes no arguments",
+                                call.span()
+                            ));
+                        }
+                        yield new GenericTypeExpr("Option", List.of(), call.span());
+                    }
+                }
+                
                 checkExpr(call.callee());
                 for (var arg : call.args()) {
                     checkExpr(arg);
@@ -551,6 +601,11 @@ public final class TypeChecker {
         
         var targetName = getTypeName(target);
         var sourceName = getTypeName(source);
+        
+        // Wildcard type `_` matches anything
+        if (targetName.equals("_") || sourceName.equals("_")) {
+            return true;
+        }
         
         if (targetName.equals(sourceName)) {
             if (target instanceof GenericTypeExpr targetGen && source instanceof GenericTypeExpr sourceGen) {

@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="ngj.CliTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-11-16T16:29:30" hostname="cursor" time="0.054">
+<testsuite name="ngj.CliTest" tests="11" skipped="0" failures="0" errors="0" timestamp="2026-11-16T16:31:02" hostname="cursor" time="0.025">
   <properties/>
-  <testcase name="contextMissingHole()" classname="ngj.CliTest" time="0.014"/>
-  <testcase name="checkIncompleteFile()" classname="ngj.CliTest" time="0.022"/>
-  <testcase name="inspectMissingSymbol()" classname="ngj.CliTest" time="0.0"/>
+  <testcase name="contextMissingHole()" classname="ngj.CliTest" time="0.006"/>
+  <testcase name="checkIncompleteFile()" classname="ngj.CliTest" time="0.007"/>
+  <testcase name="inspectMissingSymbol()" classname="ngj.CliTest" time="0.001"/>
   <testcase name="unknownCommand()" classname="ngj.CliTest" time="0.001"/>
-  <testcase name="checkWithJsonFormat()" classname="ngj.CliTest" time="0.004"/>
-  <testcase name="checkValidFile()" classname="ngj.CliTest" time="0.002"/>
-  <testcase name="buildNoFiles()" classname="ngj.CliTest" time="0.001"/>
-  <testcase name="versionCommand()" classname="ngj.CliTest" time="0.001"/>
-  <testcase name="checkInvalidFile()" classname="ngj.CliTest" time="0.002"/>
-  <testcase name="checkNoFiles()" classname="ngj.CliTest" time="0.001"/>
-  <testcase name="helpCommand()" classname="ngj.CliTest" time="0.001"/>
+  <testcase name="checkWithJsonFormat()" classname="ngj.CliTest" time="0.002"/>
+  <testcase name="checkValidFile()" classname="ngj.CliTest" time="0.001"/>
+  <testcase name="buildNoFiles()" classname="ngj.CliTest" time="0.0"/>
+  <testcase name="versionCommand()" classname="ngj.CliTest" time="0.0"/>
+  <testcase name="checkInvalidFile()" classname="ngj.CliTest" time="0.001"/>
+  <testcase name="checkNoFiles()" classname="ngj.CliTest" time="0.0"/>
+  <testcase name="helpCommand()" classname="ngj.CliTest" time="0.0"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>
