@@ -1,0 +1,46 @@
+module payment.service
+
+import std.http.{Client, Request, Response}
+import std.time.Duration
+import std.telemetry.{span, event, Secret}
+
+data PaymentId(val: Long)
+data Money(amount: Long, currency: String)
+
+data PaymentRequest(
+    id: PaymentId,
+    userId: Long,
+    cardToken: Secret<String>,
+    amount: Money
+)
+
+enum PaymentError {
+    InsufficientFunds,
+    FraudDetected(reason: String),
+    GatewayTimeout,
+    UpstreamError(code: Int)
+}
+
+event PaymentCompleted(
+    paymentId: Long,
+    amount: Long,
+    durationMs: Long
+)
+
+@trace("payment.process")
+fn processPayment(http: Client, req: PaymentRequest) -> Result<PaymentId, PaymentError> {
+    span "payment.validate_and_charge" (payment_id = req.id.val, amount = req.amount.amount) {
+        let (fraudResult, balanceResult) = scope {
+            let f1 = fork { checkFraud(http, req) }
+            let f2 = fork { reserveBalance(http, req.userId, req.amount) }
+            (f1.join()?, f2.join()?)
+        }
+
+        if !fraudResult.isSafe {
+            return Err(PaymentError::FraudDetected(fraudResult.reason))
+        }
+
+        emit PaymentCompleted(req.id.val, req.amount.amount, span.elapsedMs())
+        Ok(req.id)
+    }
+}

@@ -1,0 +1,45 @@
+module net.protocol
+
+import std.io.{Bytes, ByteOrder}
+import std.concurrent.Channel
+
+data PacketFrame(
+    streamId: Int,
+    flags: Byte,
+    payload: Bytes
+)
+
+fn parseFrames(rawBuffer: Bytes) -> Result<List<PacketFrame>, String> {
+    let frames = build MutableList<PacketFrame> {
+        let mut cursor = 0
+        while cursor + 9 <= rawBuffer.len() {
+            let streamId = rawBuffer.readInt(cursor, ByteOrder::BigEndian)?
+            let flags    = rawBuffer.readByte(cursor + 4)?
+            let length   = rawBuffer.readInt(cursor + 5, ByteOrder::BigEndian)?
+
+            let payloadStart = cursor + 9
+            let payloadEnd   = payloadStart + length
+            if payloadEnd > rawBuffer.len() {
+                return Err("Incomplete frame payload")
+            }
+
+            let slice = rawBuffer.slice(payloadStart, length)
+            this.add(PacketFrame(streamId, flags, slice))
+
+            cursor = payloadEnd
+        }
+        this
+    }
+
+    Ok(frames)
+}
+
+fn dispatchWorker(rx: Channel<PacketFrame>) {
+    for frame in rx {
+        match frame.flags {
+            0x01 => handleData(frame.streamId, frame.payload),
+            0x02 => handlePing(frame.streamId),
+            _    => ()
+        }
+    }
+}

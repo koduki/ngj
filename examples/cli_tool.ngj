@@ -1,0 +1,49 @@
+module cli.main
+
+import std.cli.{Args, parseArgs}
+import std.json.{toJson, fromJson}
+import std.fs.readBytes
+
+@derive(CliArgs, JsonCodec)
+data CliConfig(
+    inputFile: String,
+    workers: Int = 8,
+    pretty: Bool = false
+)
+
+@derive(JsonCodec)
+data SummaryReport(
+    totalLines: Long,
+    errorCount: Long
+)
+
+fn main(rawArgs: List<String>) -> Int {
+    let config = match parseArgs<CliConfig>(rawArgs) {
+        Ok(cfg) => cfg,
+        Err(msg) => {
+            println("Usage error: ${msg}")
+            return 1
+        }
+    }
+
+    let content = match readBytes(config.inputFile) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            println("Failed to read file: ${e}")
+            return 2
+        }
+    }
+
+    let report = scope {
+        content.chunks(config.workers)
+            .map(|chunk| fork { countErrors(chunk) })
+            .map(|task| task.join())
+            .fold(SummaryReport(0, 0), |acc, r| SummaryReport(
+                totalLines = acc.totalLines + r.totalLines,
+                errorCount = acc.errorCount + r.errorCount
+            ))
+    }
+
+    println(report.toJson(pretty = config.pretty))
+    return 0
+}
