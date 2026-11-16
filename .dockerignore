@@ -1,0 +1,39 @@
+# Build outputs
+build/
+compiler/build/
+**/build/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Gradle caches
+.gradle/
+!gradle/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed for build)
+*.md
+!README.md
+
+# Test resources (optional - comment out if needed in container)
+# compiler/src/test/
+
+# Local configuration
+*.local
+.env
+.env.*
