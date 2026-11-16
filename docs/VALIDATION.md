@@ -32,7 +32,18 @@
 | CONTRACT-01 | seed付き反例再現 | solver unknownをproved扱いしない | 3/4 |
 | OBS-01 | forkへのcontext継承 | SecretのBaggage/attribute流出 | 3 |
 | REPLAY-01 | 記録I/Oの逐次再実行 | 不一致時のlive fallback禁止 | 3 |
+| VALUE-01 | data/record/enumがvalue classとして出力 | identity classへの誤出力 | 1 |
+| VALUE-02 | `==`がvalue型で値比較 | 参照比較への誤り | 1 |
+| VALUE-03 | Int/Long/Boolがvalue型として動作 | boxing/unboxingの露出 | 1 |
+| NULL-01 | NGJコードで`null`リテラル使用不可 | nullの受理 | 1 |
+| NULL-02 | Java境界nullがOption変換 | nullの透過 | 2 |
+| ENUM-01 | ペイロード付きenumバリアント | バリアントフィールドエラー | 1 |
+| ENUM-02 | match網羅性検査で欠落バリアント診断 | 欠落を検出しない、診断に名前なし | 1 |
+| ENUM-03 | ネストパターンマッチ | ネスト分解エラー | 1 |
+| ENUM-04 | Result/Optionが通常enumとして動作 | 特別扱いによる不整合 | 1 |
+| GENERIC-01 | `List<Int>`が型検査通過 | value型ジェネリクス拒否 | 1 |
 | TARGET-01 | backend間で意味論一致 | 未対応preview/ABIを黙ってfallbackしない | 4 |
+| TARGET-02 | Valhalla未対応時の明示エラー | 黙ってidentity fallback | 1 |
 
 fault/cancel/cleanup試験はfailure injectionで全退出経路を通す。プロセスクラッシュ時の業務復旧はadapter integration testで別に検証し、言語の静的保証と混ぜない。
 
