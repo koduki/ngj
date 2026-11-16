@@ -109,7 +109,28 @@ public final class Main {
             return ExitCode.BAD_INPUT;
         }
         
+        if (opts.files().isEmpty()) {
+            stderr.println("No input files specified");
+            return ExitCode.BAD_INPUT;
+        }
+        
+        // Validate revision if specified
+        if (opts.revision() != null) {
+            String actualRevision = computeRevision(opts.files());
+            if (!opts.revision().equals(actualRevision)) {
+                if (opts.formatJson()) {
+                    stdout.println(formatRevisionMismatchJson(opts.revision(), actualRevision));
+                } else {
+                    stderr.println("Revision mismatch: expected " + opts.revision() + ", got " + actualRevision);
+                }
+                return ExitCode.BAD_INPUT;
+            }
+        }
+        
         var compiler = new ngj.Compiler();
+        // First, check the files to populate parsedUnits
+        compiler.check(opts.files());
+        
         var result = compiler.context(opts.holeId(), opts.maxBytes());
         
         if (opts.formatJson()) {
@@ -129,7 +150,28 @@ public final class Main {
             return ExitCode.BAD_INPUT;
         }
         
+        if (opts.files().isEmpty()) {
+            stderr.println("No input files specified");
+            return ExitCode.BAD_INPUT;
+        }
+        
+        // Validate revision if specified
+        if (opts.revision() != null) {
+            String actualRevision = computeRevision(opts.files());
+            if (!opts.revision().equals(actualRevision)) {
+                if (opts.formatJson()) {
+                    stdout.println(formatRevisionMismatchJson(opts.revision(), actualRevision));
+                } else {
+                    stderr.println("Revision mismatch: expected " + opts.revision() + ", got " + actualRevision);
+                }
+                return ExitCode.BAD_INPUT;
+            }
+        }
+        
         var compiler = new ngj.Compiler();
+        // First, check the files to populate parsedUnits
+        compiler.check(opts.files());
+        
         var result = compiler.inspect(opts.symbolId());
         
         if (opts.formatJson()) {
