@@ -1,6 +1,6 @@
 # NGJ v0.3 grammar
 
-> Normative v0.3 grammar implemented by the compiler.
+> Normative v0.3 grammar. Core features are implemented; some constructs are staged or deferred (see notes).
 > The archived [v0.2 grammar](EBNF_V02.md) documents the pre-migration baseline.
 > Valhalla foundation and enum ADT semantics: Refs #7.
 
@@ -9,7 +9,7 @@
 Every construct has one source spelling. Package/import declarations and statements end with semicolons. Blocks use braces. Newlines are whitespace. Keywords cannot be used as identifiers, including path segments.
 
 - Declarations and statements use `package`, `public`, `fn`, `record`, `enum`, `val`, `var`, `return`.
-- Type names are `Int`, `Long`, `Bool`, `String`, `Unit`, `Result<T,E>`, `Option<T>`.
+- Type names are `Int`, `Long`, `Float`, `Double`, `Byte`, `Bool`, `String`, `Unit`, `Result<T,E>`, `Option<T>`, `List<T>`.
 - Functions require parameter types, result types and `effects(...)`, including private functions.
 - Arguments and constructor fields are positional, in declaration order. Named/default/variadic arguments are deferred.
 - Imports name one symbol per declaration. Grouped imports, aliases and wildcards are deferred.

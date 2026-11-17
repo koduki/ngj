@@ -121,7 +121,7 @@ their implementation status, and explicit exclusions.
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | JVM class output | Yes | ✅ | Class-File API (standard since Java 24) |
-| `final class` for record | Yes | ✅ | JVM representation with structural `equals`/`hashCode` |
+| Value class for record | Yes | ✅ | JEP 401 value class with structural `equals`/`hashCode` |
 | Sealed hierarchy for enum | Yes | ✅ | Interface + final variant classes |
 | Integer overflow fault | Yes | ✅ | Runtime check via `Math.xxxExact` |
 | Short-circuit evaluation | Yes | ✅ | Left-to-right |

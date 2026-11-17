@@ -40,7 +40,7 @@ context/inspectは正常な情報取得をexit 0とする。buildのincomplete�
 
 ```json
 {
-  "schema_version": "ngj.diagnostics/1",
+  "schema_version": "ngj.cli/1",
   "compiler_version": "0.3.0-valhalla",
   "source_revision": "sha256:example",
   "policy_digest": "sha256:policy-example",

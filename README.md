@@ -17,10 +17,12 @@
 
 - [Canonical v0.3 grammar](docs/EBNF.md): one spelling per construct and explicit evaluation boundaries.
 - [Syntax migration](docs/SYNTAX_MIGRATION.md): scope, compatibility and acceptance cases.
-
 - [Language specification](docs/SPECIFICATION.md): semantics, safety boundaries, JVM mapping and roadmap.
+- [Standard library](docs/STDLIB.md): core types (`Int`, `Long`, `Bool`, `String`, `Option`, `Result`, `List`) and their operations.
+- [MVP coverage matrix](docs/MVP_COVERAGE.md): feature-by-feature implementation status.
 - [Agent tooling protocol](docs/AGENT_TOOLING.md): proposed CLI, JSON diagnostics and context API.
 - [AOT design direction](docs/AOT.md): post-MVP strategy for Leyden AOT and native-image support.
+- [Container guide](docs/CONTAINER.md): building and running NGJ in Docker containers.
 - [Validation plan](docs/VALIDATION.md): conformance cases, performance checks and controlled AI-generation experiments.
 - [Research basis](docs/RESEARCH.md): primary sources and the limits of transferring their findings to NGJ.
 - [Examples and adapter contracts](examples/README.md): illustrative REST, payment, binary parser, CLI and typed-hole examples.
