@@ -37,6 +37,15 @@ compilerとテストはリポジトリに存在する。以下は受入条件で
 | VALUE-03 | Int/Long/Boolがvalue型として動作 | boxing/unboxingの露出 | 1 |
 | NULL-01 | NGJコードで`null`リテラル使用不可 | nullの受理 | 1 |
 | NULL-02 | Java境界nullがOption変換 | nullの透過 | 2 |
+| STDLIB-01 | Int/Long/BoolがVALUE_TYPE、構造的等価性 | 参照比較への誤り | 1 |
+| STDLIB-02 | Option<T>がペイロードなしNone()を持つ通常enum | None()引数受理、特別扱い | 1 |
+| STDLIB-03 | Result<T,E>が通常enum、?伝播 | 特別扱いによる不整合 | 1 |
+| STDLIB-04 | List<T>が値意味論（等価性、不変性） | 参照等価性、破壊的更新 | 1 |
+| STDLIB-05 | 標準ライブラリAPIがnullを返さない/受け取らない | null返却/受理 | 1 |
+| STDLIB-06 | 数値オーバーフロー検出（タスクfault） | オーバーフローの無視 | 1 |
+| STDLIB-07 | checkedAdd/Sub/MulがオーバーフローでResult返却 | 例外throw、null返却 | 1 |
+| STDLIB-08 | List.getがOption<T>返却（null/例外ではない） | null返却、例外throw | 1 |
+| STDLIB-09 | ジェネリックコレクションで値型要素が動作 | 値型ジェネリクス拒否 | 1 |
 | ENUM-01 | ペイロード付きenumバリアント | バリアントフィールドエラー | 1 |
 | ENUM-02 | match網羅性検査で欠落バリアント診断 | 欠落を検出しない、診断に名前なし | 1 |
 | ENUM-03 | ネストパターンマッチ | ネスト分解エラー | 1 |

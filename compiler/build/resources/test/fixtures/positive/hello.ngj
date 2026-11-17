@@ -1,6 +1,0 @@
-// Simple pure function returning an integer
-module test.hello
-
-pub fn main() -> Int ! {} {
-    42
-}

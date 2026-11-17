@@ -39,15 +39,89 @@ public final class TypeChecker {
     }
     
     private void registerBuiltins() {
-        typeEnv.put("Int", new TypeInfo(TypeInfo.Kind.PRIMITIVE, List.of()));
-        typeEnv.put("Long", new TypeInfo(TypeInfo.Kind.PRIMITIVE, List.of()));
-        typeEnv.put("Bool", new TypeInfo(TypeInfo.Kind.PRIMITIVE, List.of()));
-        typeEnv.put("String", new TypeInfo(TypeInfo.Kind.PRIMITIVE, List.of()));
-        typeEnv.put("Unit", new TypeInfo(TypeInfo.Kind.PRIMITIVE, List.of()));
-        typeEnv.put("Result", new TypeInfo(TypeInfo.Kind.GENERIC, List.of("T", "E")));
-        typeEnv.put("Option", new TypeInfo(TypeInfo.Kind.GENERIC, List.of("T")));
-        typeEnv.put("List", new TypeInfo(TypeInfo.Kind.GENERIC, List.of("T")));
+        // VALUE-03: All numeric types are value types with structural equality
+        // No primitive/boxed distinction - Int/Long/Bool behave as value types
+        typeEnv.put("Int", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+        typeEnv.put("Long", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+        typeEnv.put("Bool", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+        typeEnv.put("Byte", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+        typeEnv.put("Float", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+        typeEnv.put("Double", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+        typeEnv.put("String", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+        typeEnv.put("Unit", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+        
+        // STDLIB-02/03: Option and Result are ordinary enums (value types)
+        // with standard ADT variants
+        var optionVariants = List.of(
+            new VariantInfo("Some", List.of(new FieldInfo("value", null))),
+            new VariantInfo("None", List.of())
+        );
+        typeEnv.put("Option", new TypeInfo(TypeInfo.Kind.GENERIC_ENUM, optionVariants));
+        
+        var resultVariants = List.of(
+            new VariantInfo("Ok", List.of(new FieldInfo("value", null))),
+            new VariantInfo("Err", List.of(new FieldInfo("error", null)))
+        );
+        typeEnv.put("Result", new TypeInfo(TypeInfo.Kind.GENERIC_ENUM, resultVariants));
+        
+        // STDLIB-04: List is a value type generic collection
+        typeEnv.put("List", new TypeInfo(TypeInfo.Kind.GENERIC_VALUE, List.of("T")));
+        
+        // Standard error types
+        var overflowVariants = List.of(
+            new VariantInfo("IntOverflow", List.of()),
+            new VariantInfo("LongOverflow", List.of())
+        );
+        typeEnv.put("OverflowError", new TypeInfo(TypeInfo.Kind.ENUM, overflowVariants));
+        
+        var rangeVariants = List.of(
+            new VariantInfo("OutOfRange", List.of(new FieldInfo("message", new SimpleTypeExpr("String", null))))
+        );
+        typeEnv.put("RangeError", new TypeInfo(TypeInfo.Kind.ENUM, rangeVariants));
+        
+        var indexVariants = List.of(
+            new VariantInfo("IndexOutOfBounds", List.of(
+                new FieldInfo("index", new SimpleTypeExpr("Int", null)),
+                new FieldInfo("length", new SimpleTypeExpr("Int", null))
+            ))
+        );
+        typeEnv.put("IndexError", new TypeInfo(TypeInfo.Kind.ENUM, indexVariants));
+        
+        // Register standard library functions
+        registerStdlibFunctions();
     }
+    
+    private void registerStdlibFunctions() {
+        // STDLIB-07: Checked arithmetic operations that return Result
+        stdlibFunctions.put("checkedAdd", new StdlibFn(
+            List.of("Int", "Int"),
+            new GenericTypeExpr("Result", List.of(
+                new SimpleTypeExpr("Int", null),
+                new SimpleTypeExpr("OverflowError", null)
+            ), null)
+        ));
+        stdlibFunctions.put("checkedSub", new StdlibFn(
+            List.of("Int", "Int"),
+            new GenericTypeExpr("Result", List.of(
+                new SimpleTypeExpr("Int", null),
+                new SimpleTypeExpr("OverflowError", null)
+            ), null)
+        ));
+        stdlibFunctions.put("checkedMul", new StdlibFn(
+            List.of("Int", "Int"),
+            new GenericTypeExpr("Result", List.of(
+                new SimpleTypeExpr("Int", null),
+                new SimpleTypeExpr("OverflowError", null)
+            ), null)
+        ));
+        
+        // STDLIB-08: List.get returns Option (not null)
+        // Note: Method calls on List are handled specially in checkMethodCall
+    }
+    
+    private final Map<String, StdlibFn> stdlibFunctions = new HashMap<>();
+    
+    public record StdlibFn(List<String> paramTypes, TypeExpr returnType) {}
     
     private void registerDecl(TopLevelDecl decl) {
         switch (decl) {
@@ -352,6 +426,8 @@ public final class TypeChecker {
                 // Check for built-in Result/Option/List constructors
                 if (call.callee() instanceof IdentExpr ident) {
                     var name = ident.name();
+                    
+                    // STDLIB-03: Result constructors
                     if (name.equals("Ok") || name.equals("Err")) {
                         if (call.args().size() != 1) {
                             diagnostics.add(Diagnostic.error(
@@ -372,7 +448,10 @@ public final class TypeChecker {
                             }
                         }
                         yield new GenericTypeExpr("Result", List.of(), call.span());
-                    } else if (name.equals("Some")) {
+                    } 
+                    
+                    // STDLIB-02: Option constructors
+                    else if (name.equals("Some")) {
                         if (call.args().size() != 1) {
                             diagnostics.add(Diagnostic.error(
                                 "NGJ-TYPE-014",
@@ -387,6 +466,7 @@ public final class TypeChecker {
                         }
                         yield new GenericTypeExpr("Option", List.of(), call.span());
                     } else if (name.equals("None")) {
+                        // STDLIB-02: None() with no payload
                         if (!call.args().isEmpty()) {
                             diagnostics.add(Diagnostic.error(
                                 "NGJ-TYPE-014",
@@ -396,8 +476,10 @@ public final class TypeChecker {
                         }
                         yield new GenericTypeExpr("Option", 
                             List.of(new SimpleTypeExpr("_", call.span())), call.span());
-                    } else if (name.equals("Nil")) {
-                        // Empty list constructor: Nil() -> List<_>
+                    } 
+                    
+                    // STDLIB-04: List constructors
+                    else if (name.equals("Nil")) {
                         if (!call.args().isEmpty()) {
                             diagnostics.add(Diagnostic.error(
                                 "NGJ-TYPE-014",
@@ -408,7 +490,6 @@ public final class TypeChecker {
                         yield new GenericTypeExpr("List",
                             List.of(new SimpleTypeExpr("_", call.span())), call.span());
                     } else if (name.equals("listOf")) {
-                        // List constructor: listOf(a, b, c) -> List<T>
                         if (call.args().isEmpty()) {
                             yield new GenericTypeExpr("List",
                                 List.of(new SimpleTypeExpr("_", call.span())), call.span());
@@ -433,6 +514,199 @@ public final class TypeChecker {
                             }
                             yield new GenericTypeExpr("List", List.of(), call.span());
                         }
+                    } else if (name.equals("Cons")) {
+                        // STDLIB-04: Cons(head, tail) -> List<T>
+                        if (call.args().size() != 2) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "Cons requires exactly two arguments (head, tail)",
+                                call.span()
+                            ));
+                            yield new GenericTypeExpr("List", List.of(), call.span());
+                        }
+                        var headType = checkExpr(call.args().get(0));
+                        var tailType = checkExpr(call.args().get(1));
+                        if (tailType != null && tailType instanceof GenericTypeExpr tailGeneric) {
+                            if (!tailGeneric.name().equals("List")) {
+                                diagnostics.add(Diagnostic.error(
+                                    "NGJ-TYPE-024",
+                                    "Second argument to Cons must be a List",
+                                    call.args().get(1).span()
+                                ));
+                            }
+                        }
+                        if (headType != null) {
+                            yield new GenericTypeExpr("List", List.of(headType), call.span());
+                        }
+                        yield new GenericTypeExpr("List", List.of(), call.span());
+                    }
+                    
+                    // STDLIB-07: Checked arithmetic operations
+                    else if (stdlibFunctions.containsKey(name)) {
+                        var fn = stdlibFunctions.get(name);
+                        if (call.args().size() != fn.paramTypes().size()) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                name + " requires " + fn.paramTypes().size() + " arguments",
+                                call.span()
+                            ));
+                        } else {
+                            for (int i = 0; i < call.args().size(); i++) {
+                                var argType = checkExpr(call.args().get(i));
+                                var expectedType = fn.paramTypes().get(i);
+                                if (argType != null && !getTypeName(argType).equals(expectedType)) {
+                                    diagnostics.add(Diagnostic.error(
+                                        "NGJ-TYPE-002",
+                                        "Type mismatch in argument " + (i + 1),
+                                        call.args().get(i).span(),
+                                        new ExpectedActual(expectedType),
+                                        new ExpectedActual(argType.toString())
+                                    ));
+                                }
+                            }
+                        }
+                        yield fn.returnType();
+                    }
+                    
+                    // STDLIB-05: Ensure no null-returning functions
+                    // Standard library functions that return Option instead of null
+                    else if (name.equals("head")) {
+                        // STDLIB-08: head returns Option<T>
+                        if (call.args().size() != 1) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "head requires exactly one argument (a List)",
+                                call.span()
+                            ));
+                        } else {
+                            var listType = checkExpr(call.args().get(0));
+                            if (listType instanceof GenericTypeExpr listGeneric && 
+                                listGeneric.name().equals("List") && !listGeneric.typeArgs().isEmpty()) {
+                                yield new GenericTypeExpr("Option", 
+                                    List.of(listGeneric.typeArgs().get(0)), call.span());
+                            }
+                        }
+                        yield new GenericTypeExpr("Option", 
+                            List.of(new SimpleTypeExpr("_", call.span())), call.span());
+                    } else if (name.equals("get")) {
+                        // STDLIB-08: get returns Option<T>
+                        if (call.args().size() != 2) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "get requires two arguments (list, index)",
+                                call.span()
+                            ));
+                        } else {
+                            var listType = checkExpr(call.args().get(0));
+                            var indexType = checkExpr(call.args().get(1));
+                            if (indexType != null && !getTypeName(indexType).equals("Int")) {
+                                diagnostics.add(Diagnostic.error(
+                                    "NGJ-TYPE-002",
+                                    "Index must be Int",
+                                    call.args().get(1).span(),
+                                    new ExpectedActual("Int"),
+                                    new ExpectedActual(indexType.toString())
+                                ));
+                            }
+                            if (listType instanceof GenericTypeExpr listGeneric && 
+                                listGeneric.name().equals("List") && !listGeneric.typeArgs().isEmpty()) {
+                                yield new GenericTypeExpr("Option", 
+                                    List.of(listGeneric.typeArgs().get(0)), call.span());
+                            }
+                        }
+                        yield new GenericTypeExpr("Option", 
+                            List.of(new SimpleTypeExpr("_", call.span())), call.span());
+                    } else if (name.equals("getOrElse")) {
+                        // Option.getOrElse(opt, default) -> T
+                        if (call.args().size() != 2) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "getOrElse requires two arguments (option, default)",
+                                call.span()
+                            ));
+                        } else {
+                            var optType = checkExpr(call.args().get(0));
+                            var defaultType = checkExpr(call.args().get(1));
+                            if (optType instanceof GenericTypeExpr optGeneric && 
+                                optGeneric.name().equals("Option") && !optGeneric.typeArgs().isEmpty()) {
+                                var innerType = optGeneric.typeArgs().get(0);
+                                if (defaultType != null && !isAssignable(innerType, defaultType)) {
+                                    diagnostics.add(Diagnostic.error(
+                                        "NGJ-TYPE-002",
+                                        "Default value type must match Option inner type",
+                                        call.args().get(1).span(),
+                                        new ExpectedActual(innerType.toString()),
+                                        new ExpectedActual(defaultType.toString())
+                                    ));
+                                }
+                                yield innerType;
+                            }
+                        }
+                        yield null;
+                    } else if (name.equals("isSome") || name.equals("isNone") || 
+                               name.equals("isOk") || name.equals("isErr") || 
+                               name.equals("isEmpty")) {
+                        // Boolean predicates
+                        if (call.args().size() != 1) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                name + " requires exactly one argument",
+                                call.span()
+                            ));
+                        } else {
+                            checkExpr(call.args().get(0));
+                        }
+                        yield new SimpleTypeExpr("Bool", call.span());
+                    } else if (name.equals("length")) {
+                        // List.length -> Int
+                        if (call.args().size() != 1) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "length requires exactly one argument (a List)",
+                                call.span()
+                            ));
+                        } else {
+                            checkExpr(call.args().get(0));
+                        }
+                        yield new SimpleTypeExpr("Int", call.span());
+                    } else if (name.equals("toOption")) {
+                        // Result.toOption -> Option<T>
+                        if (call.args().size() != 1) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "toOption requires exactly one argument (a Result)",
+                                call.span()
+                            ));
+                        } else {
+                            var resType = checkExpr(call.args().get(0));
+                            if (resType instanceof GenericTypeExpr resGeneric && 
+                                resGeneric.name().equals("Result") && !resGeneric.typeArgs().isEmpty()) {
+                                yield new GenericTypeExpr("Option", 
+                                    List.of(resGeneric.typeArgs().get(0)), call.span());
+                            }
+                        }
+                        yield new GenericTypeExpr("Option", 
+                            List.of(new SimpleTypeExpr("_", call.span())), call.span());
+                    } else if (name.equals("toResult")) {
+                        // Option.toResult(opt, err) -> Result<T, E>
+                        if (call.args().size() != 2) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                "toResult requires two arguments (option, error)",
+                                call.span()
+                            ));
+                        } else {
+                            var optType = checkExpr(call.args().get(0));
+                            var errType = checkExpr(call.args().get(1));
+                            if (optType instanceof GenericTypeExpr optGeneric && 
+                                optGeneric.name().equals("Option") && !optGeneric.typeArgs().isEmpty()) {
+                                if (errType != null) {
+                                    yield new GenericTypeExpr("Result", 
+                                        List.of(optGeneric.typeArgs().get(0), errType), call.span());
+                                }
+                            }
+                        }
+                        yield new GenericTypeExpr("Result", List.of(), call.span());
                     }
                 }
                 
@@ -1104,7 +1378,15 @@ public final class TypeChecker {
     }
     
     public record TypeInfo(Kind kind, Object data) {
-        public enum Kind { PRIMITIVE, GENERIC, DATA, ENUM }
+        public enum Kind { 
+            PRIMITIVE,       // Legacy (unused)
+            VALUE_TYPE,      // Built-in value types: Int, Long, Bool, etc.
+            GENERIC,         // Legacy generic (unused)
+            GENERIC_VALUE,   // Generic value type: List<T>
+            GENERIC_ENUM,    // Generic enum: Option<T>, Result<T,E>
+            DATA,            // User-defined data/record (value type)
+            ENUM             // User-defined enum (value type)
+        }
         
         @SuppressWarnings("unchecked")
         public List<FieldInfo> fields() {

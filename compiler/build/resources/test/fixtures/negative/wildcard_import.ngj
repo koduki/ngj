@@ -1,8 +1,0 @@
-// Wildcard imports must be rejected
-module test.invalid
-
-import std.*
-
-pub fn test() -> Int ! {} {
-    42
-}
