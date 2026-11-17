@@ -60,10 +60,35 @@ public final class Java25CodeGenerator {
     
     private String currentModule;
     private Path outputDir = Path.of("build/classes");
+    private String target = "valhalla"; // Default target
     private final Map<String, RecordDecl> records = new HashMap<>();
     private final Map<String, DataDecl> datas = new HashMap<>();
     private final Map<String, EnumDecl> enums = new HashMap<>();
     private final Map<String, FnDecl> functions = new HashMap<>();
+    
+    public void setTarget(String target) {
+        this.target = target;
+    }
+    
+    private int getClassFileVersionForTarget() {
+        return switch (target) {
+            case "java25" -> 69; // JDK 25 class file version
+            case "valhalla-compat" -> 69; // JDK 25 with identity classes only
+            case "valhalla" -> CLASS_FILE_VERSION; // JDK 28 with value classes
+            default -> CLASS_FILE_VERSION;
+        };
+    }
+    
+    private int getMinorVersionForTarget() {
+        return switch (target) {
+            case "valhalla" -> PREVIEW_MINOR_VERSION; // Enable preview for value classes
+            default -> 0;
+        };
+    }
+    
+    private boolean isValueClassTarget() {
+        return target.equals("valhalla");
+    }
     
     public List<Path> generate(CompilationUnit unit) throws CodeGenException {
         currentModule = unit.modulePath();
@@ -133,7 +158,7 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         
         return ClassFile.of().build(classDesc, classBuilder -> {
-            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
@@ -1612,7 +1637,7 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         
         return ClassFile.of().build(classDesc, classBuilder -> {
-            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
+            classBuilder.withVersion(getClassFileVersionForTarget(), 0);
             classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
@@ -1689,17 +1714,26 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         
         return ClassFile.of().build(classDesc, classBuilder -> {
-            // VALUE-01: Use preview minor version for JEP 401
-            classBuilder.withVersion(CLASS_FILE_VERSION, PREVIEW_MINOR_VERSION);
-            // VALUE-01: NO ACC_IDENTITY flag - this is a value class
-            // ACC_FINAL is implicit for value classes, but we include it for clarity
-            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            if (isValueClassTarget()) {
+                // VALUE-01: Use preview minor version for JEP 401
+                classBuilder.withVersion(getClassFileVersionForTarget(), PREVIEW_MINOR_VERSION);
+                // VALUE-01: NO ACC_IDENTITY flag - this is a value class
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                // Identity class for non-valhalla targets
+                classBuilder.withVersion(getClassFileVersionForTarget(), 0);
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
             for (var param : record.params()) {
                 var fieldDesc = typeToClassDesc(param.type());
-                // JEP 401: Value class fields must be strict (initialized before use)
-                classBuilder.withField(param.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL | ACC_STRICT);
+                // JEP 401: Value class fields must be strict (only for valhalla target)
+                int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+                if (isValueClassTarget()) {
+                    fieldFlags |= ACC_STRICT;
+                }
+                classBuilder.withField(param.name(), fieldDesc, fieldFlags);
             }
             
             var ctorParamTypes = record.params().stream()
@@ -1848,11 +1882,15 @@ public final class Java25CodeGenerator {
             .toList();
         
         return ClassFile.of().build(classDesc, classBuilder -> {
-            // VALUE-01: Use preview minor version for JEP 401
-            classBuilder.withVersion(CLASS_FILE_VERSION, PREVIEW_MINOR_VERSION);
-            // VALUE-01: NO ACC_IDENTITY flag - this is a value class base
-            // ACC_ABSTRACT for the sealed base type
-            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            if (isValueClassTarget()) {
+                // VALUE-01: Use preview minor version for JEP 401
+                classBuilder.withVersion(getClassFileVersionForTarget(), PREVIEW_MINOR_VERSION);
+                // VALUE-01: NO ACC_IDENTITY flag - this is a value class base
+                classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            } else {
+                classBuilder.withVersion(getClassFileVersionForTarget(), 0);
+                classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT | ACC_IDENTITY);
+            }
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
             // Add PermittedSubclasses attribute for sealed hierarchy
@@ -1896,16 +1934,25 @@ public final class Java25CodeGenerator {
                 final var finalVariantClassDesc = variantClassDesc;
                 
                 var classFile = ClassFile.of().build(variantClassDesc, classBuilder -> {
-                    // VALUE-01: Use preview minor version, NO ACC_IDENTITY
-                    classBuilder.withVersion(CLASS_FILE_VERSION, PREVIEW_MINOR_VERSION);
-                    classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+                    if (isValueClassTarget()) {
+                        // VALUE-01: Use preview minor version, NO ACC_IDENTITY
+                        classBuilder.withVersion(getClassFileVersionForTarget(), PREVIEW_MINOR_VERSION);
+                        classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+                    } else {
+                        classBuilder.withVersion(getClassFileVersionForTarget(), 0);
+                        classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+                    }
                     classBuilder.withSuperclass(baseClassDesc);
                     
                     // Add fields for variant payload
-                    // JEP 401: Value class fields must be strict (initialized before use)
                     for (var field : variantFields) {
                         var fieldDesc = typeToClassDesc(field.type());
-                        classBuilder.withField(field.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL | ACC_STRICT);
+                        // JEP 401: Value class fields must be strict (only for valhalla target)
+                        int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+                        if (isValueClassTarget()) {
+                            fieldFlags |= ACC_STRICT;
+                        }
+                        classBuilder.withField(field.name(), fieldDesc, fieldFlags);
                     }
                     
                     // Constructor
