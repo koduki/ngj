@@ -19,12 +19,30 @@ class SyntaxMigrationTest {
             
             public fn answer() -> Int effects() {
                 val n = 1;
+                return n;
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "val + return at end of Int function should be valid: " + result.errors());
+    }
+    
+    @Test
+    void missingReturnOnTailExpr_invalid() throws Exception {
+        var source = """
+            package test.noreturn;
+            
+            public fn answer() -> Int effects() {
+                val n = 1;
                 n
             }
             """;
         
         var result = check(source);
-        assertTrue(result.isValid(), "val at end of Int function should be valid: " + result.errors());
+        assertFalse(result.isValid(), "Function without return should be invalid");
+        assertTrue(result.errors().stream()
+            .anyMatch(e -> e.id().equals("NGJ-RETURN-001")),
+            "Should produce NGJ-RETURN-001: " + result.errors());
     }
     
     @Test
@@ -38,7 +56,7 @@ class SyntaxMigrationTest {
             """;
         
         var result = check(source);
-        assertFalse(result.isValid(), "Block ending with semicolon should be invalid");
+        assertFalse(result.isValid(), "Block ending with semicolon without return should be invalid");
     }
     
     @Test
@@ -49,7 +67,7 @@ class SyntaxMigrationTest {
             public fn test() -> Int effects() {
                 val a = 1
                 val b = 2;
-                a + b
+                return a + b;
             }
             """;
         
@@ -69,7 +87,7 @@ class SyntaxMigrationTest {
             package test.mismatch;
             
             public fn test(x: Int) -> Int effects() {
-                if (x > 0) { 42 } else { "hello" }
+                return if (x > 0) { 42 } else { "hello" };
             }
             """;
         
@@ -100,7 +118,7 @@ class SyntaxMigrationTest {
             package test.none;
             
             public fn empty() -> Option<Int> effects() {
-                None()
+                return None();
             }
             """;
         
@@ -115,7 +133,7 @@ class SyntaxMigrationTest {
             
             public fn optProp(o: Option<Int>) -> Option<Int> effects() {
                 val x = o?;
-                Some(x + 1)
+                return Some(x + 1);
             }
             """;
         
@@ -143,9 +161,9 @@ class SyntaxMigrationTest {
     }
     
     @Test
-    void legacyReturnSpelling_diagnostic() throws Exception {
+    void returnWithoutSemicolon_diagnostic() throws Exception {
         var source = """
-            package test.legacy;
+            package test.retsemi;
             
             public fn test() -> Int effects() {
                 return 42
@@ -156,11 +174,28 @@ class SyntaxMigrationTest {
             parse(source);
         } catch (ParseException e) {
             assertTrue(e.getDiagnostics().stream()
-                .anyMatch(d -> d.id().startsWith("NGJ-MIGRATE") || 
+                .anyMatch(d -> d.id().equals("NGJ-PARSE-008") || 
                               d.message().toLowerCase().contains("return")));
             return;
         }
-        fail("Should produce migration diagnostic for 'return'");
+        fail("Should produce parse error for 'return' without semicolon");
+    }
+    
+    @Test
+    void earlyReturnInGuardClause_valid() throws Exception {
+        var source = """
+            package test.guard;
+            
+            public fn clampPositive(x: Int) -> Int effects() {
+                if (x < 0) {
+                    return 0;
+                }
+                return x;
+            }
+            """;
+        
+        var result = check(source);
+        assertTrue(result.isValid(), "Early return in guard clause should be valid: " + result.errors());
     }
     
     @Test
@@ -168,7 +203,7 @@ class SyntaxMigrationTest {
         var source = """
             module test.legacy;
             
-            public fn test() -> Int effects() { 42 }
+            public fn test() -> Int effects() { return 42; }
             """;
         
         try {
@@ -190,7 +225,7 @@ class SyntaxMigrationTest {
         var source = """
             package test.legacy;
             
-            pub fn test() -> Int effects() { 42 }
+            pub fn test() -> Int effects() { return 42; }
             """;
         
         var lexer = new Lexer(source, "test.ngj");
@@ -226,7 +261,7 @@ class SyntaxMigrationTest {
             
             public fn test() -> Int effects() {
                 let x = 42;
-                x
+                return x;
             }
             """;
         
@@ -244,7 +279,7 @@ class SyntaxMigrationTest {
         var source = """
             package test.legacy;
             
-            public fn test() -> Int ! {} { 42 }
+            public fn test() -> Int ! {} { return 42; }
             """;
         
         var lexer = new Lexer(source, "test.ngj");
@@ -263,7 +298,7 @@ class SyntaxMigrationTest {
             
             public fn test(n: Int) -> Int effects() {
                 for (x <- n) yield { x * 2 };
-                42
+                return 42;
             }
             """;
         
@@ -300,7 +335,7 @@ class SyntaxMigrationTest {
                     total = total + i;
                     i = i + 1;
                 };
-                total
+                return total;
             }
             """;
         
@@ -316,7 +351,7 @@ class SyntaxMigrationTest {
             package test.list;
             
             public fn empty() -> List<Int> effects() {
-                Nil()
+                return Nil();
             }
             """;
         
@@ -330,7 +365,7 @@ class SyntaxMigrationTest {
             package test.list;
             
             public fn nums() -> List<Int> effects() {
-                listOf(1, 2, 3)
+                return listOf(1, 2, 3);
             }
             """;
         
@@ -344,7 +379,7 @@ class SyntaxMigrationTest {
             package test.list;
             
             public fn empty() -> List<Int> effects() {
-                listOf()
+                return listOf();
             }
             """;
         
@@ -358,7 +393,7 @@ class SyntaxMigrationTest {
             package test.list;
             
             public fn mixed() -> List<Int> effects() {
-                listOf(1, "two", 3)
+                return listOf(1, "two", 3);
             }
             """;
         
@@ -391,7 +426,7 @@ class SyntaxMigrationTest {
             package test.foryield;
             
             public fn double(nums: List<Int>) -> List<Int> effects() {
-                for (x <- nums) yield { x * 2 }
+                return for (x <- nums) yield { x * 2 };
             }
             """;
         
@@ -468,7 +503,7 @@ class SyntaxMigrationTest {
                     val v = r?;
                     v;
                 };
-                Ok(())
+                return Ok(());
             }
             """;
         
@@ -485,10 +520,10 @@ class SyntaxMigrationTest {
             package test.listresult;
             
             public fn process(nums: List<Int>) -> List<Result<Int, String>> effects() {
-                for (x <- nums) yield {
+                return for (x <- nums) yield {
                     val r: Result<Int, String> = Ok(x * 2);
                     r
-                }
+                };
             }
             """;
         
@@ -509,11 +544,11 @@ class SyntaxMigrationTest {
             public enum Color { Red(), Green(), Blue() }
             
             public fn name(c: Color) -> Int effects() {
-                match (c) {
+                return match (c) {
                     case Red() => { 1 }
                     case Green() => { 2 }
                     case Blue() => { 3 }
-                }
+                };
             }
             """;
         
@@ -530,10 +565,10 @@ class SyntaxMigrationTest {
             public enum Color { Red(), Green(), Blue() }
             
             public fn name(c: Color) -> Int effects() {
-                match (c) {
+                return match (c) {
                     case Red() => { 1 }
                     case Green() => { 2 }
-                }
+                };
             }
             """;
         
@@ -553,10 +588,10 @@ class SyntaxMigrationTest {
             public enum Color { Red(), Green(), Blue() }
             
             public fn name(c: Color) -> Int effects() {
-                match (c) {
+                return match (c) {
                     case Red() => { 1 }
                     case _ => { 0 }
-                }
+                };
             }
             """;
         

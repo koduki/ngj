@@ -50,7 +50,7 @@ public class StdlibValidationTest {
             public fn testIntEquality() -> Bool effects() {
                 val a: Int = 42;
                 val b: Int = 42;
-                a == b
+                return a == b;
             }
             """;
         
@@ -66,7 +66,7 @@ public class StdlibValidationTest {
             public fn testLongEquality() -> Bool effects() {
                 val a: Long = 42L;
                 val b: Long = 42L;
-                a == b
+                return a == b;
             }
             """;
         
@@ -82,7 +82,7 @@ public class StdlibValidationTest {
             public fn testBoolEquality() -> Bool effects() {
                 val a: Bool = true;
                 val b: Bool = true;
-                a == b
+                return a == b;
             }
             """;
         
@@ -98,7 +98,7 @@ public class StdlibValidationTest {
             package test.stdlib02some;
             
             public fn makeOption(x: Int) -> Option<Int> effects() {
-                Some(x)
+                return Some(x);
             }
             """;
         
@@ -112,7 +112,7 @@ public class StdlibValidationTest {
             package test.stdlib02none;
             
             public fn makeNone() -> Option<Int> effects() {
-                None()
+                return None();
             }
             """;
         
@@ -126,7 +126,7 @@ public class StdlibValidationTest {
             package test.stdlib02noneerr;
             
             public fn makeNone() -> Option<Int> effects() {
-                None(42)
+                return None(42);
             }
             """;
         
@@ -148,10 +148,10 @@ public class StdlibValidationTest {
             }
             
             public fn unwrap(opt: Option<Int>) -> Int effects() {
-                match (opt) {
+                return match (opt) {
                     case Some(v) => { v }
                     case None() => { 0 }
-                }
+                };
             }
             """;
         
@@ -167,7 +167,7 @@ public class StdlibValidationTest {
             package test.stdlib03ok;
             
             public fn makeOk(x: Int) -> Result<Int, String> effects() {
-                Ok(x)
+                return Ok(x);
             }
             """;
         
@@ -181,7 +181,7 @@ public class StdlibValidationTest {
             package test.stdlib03err;
             
             public fn makeErr(msg: String) -> Result<Int, String> effects() {
-                Err(msg)
+                return Err(msg);
             }
             """;
         
@@ -197,7 +197,7 @@ public class StdlibValidationTest {
             
             public fn safeCompute(a: Int, b: Int) -> Result<Int, OverflowError> effects() {
                 val sum = checkedAdd(a, b)?;
-                checkedMul(sum, 2)
+                return checkedMul(sum, 2);
             }
             """;
         
@@ -213,7 +213,7 @@ public class StdlibValidationTest {
             package test.stdlib04;
             
             public fn makeList() -> List<Int> effects() {
-                listOf(1, 2, 3)
+                return listOf(1, 2, 3);
             }
             """;
         
@@ -227,7 +227,7 @@ public class StdlibValidationTest {
             package test.stdlib04nil;
             
             public fn emptyList() -> List<Int> effects() {
-                Nil()
+                return Nil();
             }
             """;
         
@@ -242,7 +242,7 @@ public class StdlibValidationTest {
             
             public fn prependList() -> List<Int> effects() {
                 val tail = listOf(2, 3);
-                Cons(1, tail)
+                return Cons(1, tail);
             }
             """;
         
@@ -259,7 +259,7 @@ public class StdlibValidationTest {
             
             public fn test() -> Int effects() {
                 val x = null;
-                1
+                return 1;
             }
             """;
         
@@ -278,7 +278,7 @@ public class StdlibValidationTest {
             package test.stdlib07;
             
             public fn safeAdd(a: Int, b: Int) -> Result<Int, OverflowError> effects() {
-                checkedAdd(a, b)
+                return checkedAdd(a, b);
             }
             """;
         
@@ -292,7 +292,7 @@ public class StdlibValidationTest {
             package test.stdlib07sub;
             
             public fn safeSub(a: Int, b: Int) -> Result<Int, OverflowError> effects() {
-                checkedSub(a, b)
+                return checkedSub(a, b);
             }
             """;
         
@@ -306,7 +306,7 @@ public class StdlibValidationTest {
             package test.stdlib07mul;
             
             public fn safeMul(a: Int, b: Int) -> Result<Int, OverflowError> effects() {
-                checkedMul(a, b)
+                return checkedMul(a, b);
             }
             """;
         
@@ -322,7 +322,7 @@ public class StdlibValidationTest {
             package test.stdlib08head;
             
             public fn firstElement(nums: List<Int>) -> Option<Int> effects() {
-                head(nums)
+                return head(nums);
             }
             """;
         
@@ -336,7 +336,7 @@ public class StdlibValidationTest {
             package test.stdlib08get;
             
             public fn getElement(nums: List<Int>, idx: Int) -> Option<Int> effects() {
-                get(nums, idx)
+                return get(nums, idx);
             }
             """;
         
@@ -350,7 +350,7 @@ public class StdlibValidationTest {
             package test.stdlib08len;
             
             public fn listLength(nums: List<Int>) -> Int effects() {
-                length(nums)
+                return length(nums);
             }
             """;
         
@@ -364,7 +364,7 @@ public class StdlibValidationTest {
             package test.stdlib08empty;
             
             public fn checkEmpty(nums: List<Int>) -> Bool effects() {
-                isEmpty(nums)
+                return isEmpty(nums);
             }
             """;
         
@@ -380,7 +380,7 @@ public class StdlibValidationTest {
             package test.stdlib09int;
             
             public fn sum(nums: List<Int>) -> Int effects() {
-                0
+                return 0;
             }
             """;
         
@@ -394,7 +394,7 @@ public class StdlibValidationTest {
             package test.stdlib09opt;
             
             public fn process(opts: List<Option<Int>>) -> Int effects() {
-                0
+                return 0;
             }
             """;
         
@@ -408,7 +408,7 @@ public class StdlibValidationTest {
             package test.stdlib09optlist;
             
             public fn process(maybeList: Option<List<Int>>) -> Int effects() {
-                0
+                return 0;
             }
             """;
         
@@ -424,7 +424,7 @@ public class StdlibValidationTest {
             package test.issome;
             
             public fn checkPresent(opt: Option<Int>) -> Bool effects() {
-                isSome(opt)
+                return isSome(opt);
             }
             """;
         
@@ -438,7 +438,7 @@ public class StdlibValidationTest {
             package test.isnone;
             
             public fn checkAbsent(opt: Option<Int>) -> Bool effects() {
-                isNone(opt)
+                return isNone(opt);
             }
             """;
         
@@ -452,7 +452,7 @@ public class StdlibValidationTest {
             package test.isok;
             
             public fn checkSuccess(res: Result<Int, String>) -> Bool effects() {
-                isOk(res)
+                return isOk(res);
             }
             """;
         
@@ -466,7 +466,7 @@ public class StdlibValidationTest {
             package test.iserr;
             
             public fn checkFailure(res: Result<Int, String>) -> Bool effects() {
-                isErr(res)
+                return isErr(res);
             }
             """;
         
@@ -480,7 +480,7 @@ public class StdlibValidationTest {
             package test.getorelse;
             
             public fn withDefault(opt: Option<Int>) -> Int effects() {
-                getOrElse(opt, 0)
+                return getOrElse(opt, 0);
             }
             """;
         
@@ -494,7 +494,7 @@ public class StdlibValidationTest {
             package test.toopt;
             
             public fn discardError(res: Result<Int, String>) -> Option<Int> effects() {
-                toOption(res)
+                return toOption(res);
             }
             """;
         
@@ -510,7 +510,7 @@ public class StdlibValidationTest {
             package test.codegen;
             
             public fn makeList() -> List<Int> effects() {
-                listOf(1, 2, 3)
+                return listOf(1, 2, 3);
             }
             """;
         

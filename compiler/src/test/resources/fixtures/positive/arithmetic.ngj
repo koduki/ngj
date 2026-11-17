@@ -2,21 +2,21 @@
 package test.arithmetic;
 
 public fn add(a: Int, b: Int) -> Int effects() {
-    a + b
+    return a + b;
 }
 
 public fn subtract(a: Int, b: Int) -> Int effects() {
-    a - b
+    return a - b;
 }
 
 public fn multiply(a: Int, b: Int) -> Int effects() {
-    a * b
+    return a * b;
 }
 
 public fn divide(a: Int, b: Int) -> Int effects() {
-    a / b
+    return a / b;
 }
 
 public fn modulo(a: Int, b: Int) -> Int effects() {
-    a % b
+    return a % b;
 }

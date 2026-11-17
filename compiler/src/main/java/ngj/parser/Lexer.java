@@ -23,6 +23,7 @@ public final class Lexer {
         Map.entry("fn", TokenType.FN),
         Map.entry("val", TokenType.VAL),
         Map.entry("var", TokenType.VAR),
+        Map.entry("return", TokenType.RETURN),
         Map.entry("if", TokenType.IF),
         Map.entry("else", TokenType.ELSE),
         Map.entry("match", TokenType.MATCH),
@@ -45,7 +46,6 @@ public final class Lexer {
         Map.entry("pub", TokenType.PUB),
         Map.entry("data", TokenType.DATA),
         Map.entry("let", TokenType.LET),
-        Map.entry("return", TokenType.RETURN),
         Map.entry("mut", TokenType.MUT)
     );
     

@@ -2,5 +2,5 @@
 package test.hello;
 
 public fn main() -> Int effects() {
-    42
+    return 42;
 }

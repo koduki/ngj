@@ -2,7 +2,7 @@
 
 > Issue #2 tracking document
 > Status: v0.3 implementation tracking
-> The v0.3 syntax uses package/public/record/val/var, effects(), mandatory semicolons and tail expressions. See [migration requirements](SYNTAX_MIGRATION.md).
+> The v0.3 syntax uses `package`/`public`/`record`/`val`/`var`/`return`, `effects()`, mandatory `return` in functions, expression-block tail expressions, and mandatory semicolons. See [migration requirements](SYNTAX_MIGRATION.md).
 
 This document tracks which language and tooling features are included in the MVP,
 their implementation status, and explicit exclusions.
@@ -14,11 +14,11 @@ their implementation status, and explicit exclusions.
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | `package` declaration | Yes | ✅ | Single module per file, v0.3 canonical syntax |
-| Explicit `import` | Yes | 🔲 | Named imports only |
-| Wildcard import `*` | **No - Reject** | 🔲 | Must produce error |
+| Explicit `import` | Yes | ✅ | Named imports only |
+| Wildcard import `*` | **No - Reject** | ✅ | Produces `NGJ-PARSE-001` |
 | `public` visibility | Yes | ✅ | Public vs module-private |
-| Multi-file name resolution | Yes | 🔲 | Cross-module references |
-| Legacy `module`/`pub` | **No - Reject** | ✅ | Migration diagnostic NGJ-MIGRATE-001/003 |
+| Multi-file name resolution | Yes | ✅ | Cross-module references via `NameResolver.resolveAll` |
+| Legacy `module`/`pub` | **No - Reject** | ✅ | Migration diagnostic `NGJ-MIGRATE-001`/`003` |
 
 ### Basic Types
 
@@ -35,57 +35,57 @@ their implementation status, and explicit exclusions.
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | `record` (immutable struct) | Yes | ✅ | v0.3 syntax: `record Name(field: Type);` |
-| `enum` (closed sum type) | Yes | 🔲 | Exhaustive match required |
+| `enum` (closed sum type) | Yes | ✅ | Exhaustive match required (`NGJ-MATCH-001`) |
 | Constructor call | Yes | ✅ | v0.3 syntax: `TypeName(value)` |
 | Field access | Yes | ✅ | `value.field` |
-| Legacy `data` keyword | **No - Reject** | ✅ | Migration diagnostic NGJ-MIGRATE-005 |
+| Legacy `data` keyword | **No - Reject** | ✅ | Migration diagnostic `NGJ-MIGRATE-005` |
 
 ### Functions and Expressions
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | Typed function declaration | Yes | ✅ | Explicit param/return types |
+| Mandatory `return` in functions | Yes | ✅ | `return <expr>;` required on all paths (`NGJ-RETURN-001`) |
 | `val` binding | Yes | ✅ | Immutable local variables |
 | `var` binding | Yes | ✅ | Mutable local variables |
 | Assignment statement | Yes | ✅ | `var = value;` |
 | Function call | Yes | ✅ | Named function invocation |
 | `if`/`else` expression | Yes | ✅ | Expression form with parenthesized condition |
-| Block expression | Yes | ✅ | Last expr is value (tail expression) |
-| Tail expression | Yes | ✅ | No `return` keyword; last expr is result |
+| Expression block tail | Yes | ✅ | Last expr in `if`/`match`/`for-yield` block is value |
 | Integer arithmetic | Yes | ✅ | `+` `-` `*` `/` `%` |
 | Comparison operators | Yes | ✅ | `==` `!=` `<` `<=` `>` `>=` |
 | Short-circuit logic | Yes | ✅ | `&&` `||` |
 | Exhaustive `match` | Yes | ✅ | v0.3 syntax: `match (value) { case Pattern => { ... } }` |
-| Mandatory semicolons | Yes | ✅ | Required after statements; not after block tail |
-| Legacy `let`/`return` | **No - Reject** | ✅ | Migration diagnostic NGJ-MIGRATE-002/004 |
+| Mandatory semicolons | Yes | ✅ | Required after statements; not after expression-block tail |
+| Legacy `let` keyword | **No - Reject** | ✅ | Migration diagnostic `NGJ-MIGRATE-006` |
 
 ### Error Handling
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
-| `Result<T, E>` | Yes | ✅ | Built-in type |
-| `Option<T>` | Yes | ✅ | Built-in type |
+| `Result<T, E>` | Yes | ✅ | Built-in / standard library enum |
+| `Option<T>` | Yes | ✅ | Built-in / standard library enum |
 | `Ok(v)` / `Err(e)` | Yes | ✅ | Result constructors |
 | `Some(v)` / `None()` | Yes | ✅ | Option constructors, `None()` with parentheses |
 | Postfix `?` on Result | Yes | ✅ | Same-E propagation only |
-| Postfix `?` on Option | **No - Reject** | ✅ | v0.3 rejects, use match instead (NGJ-TYPE-020) |
-| Different-E `?` | **No - Reject** | 🔲 | Must use explicit match |
+| Postfix `?` on Option | **No - Reject** | ✅ | v0.3 rejects, use `match` instead (`NGJ-PROP-001`) |
+| Different-E `?` | **No - Reject** | ✅ | Rejected (`NGJ-TYPE-019`), must use explicit conversion |
 
 ### Type Inference
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | Local `val`/`var` inference | Yes | ✅ | From initializer |
-| Constructor expected type | Yes | 🔲 | Type context flows down |
+| Constructor expected type | Yes | ✅ | Type context flows down to holes and arguments |
 | Public signature explicit | Yes | ✅ | No inference for public API |
-| Unknown type as `Any` | **No - Reject** | ✅ | Must be error |
+| Unknown type as `Any` | **No - Reject** | ✅ | Must be error (`NGJ-NAME-001`) |
 
 ### Partial Programs
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | Explicit `?name` hole | Yes | ✅ | Named placeholder |
-| Hole expected type | Yes | ✅ | Type context preserved |
+| Hole expected type | Yes | ✅ | Local and return type context preserved |
 | Hole local bindings | Yes | ✅ | Available names reported |
 | Hole in release build | **Reject** | ✅ | Exit code 2 (incomplete) |
 
@@ -94,14 +94,14 @@ their implementation status, and explicit exclusions.
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | Pure `effects()` | Yes | ✅ | v0.3 syntax, no external effects |
-| Named effects `effects(Effect1)` | **No - Reject** | 🔲 | Unsupported feature error |
-| Legacy `! {}` syntax | **No - Reject** | ✅ | Migration diagnostic NGJ-MIGRATE-006 |
+| Named effects `effects(Effect1)` | **No - Reject** | ✅ | Unsupported feature error (`NGJ-EFFECT-001`) |
+| Legacy `! {}` syntax | **No - Reject** | ✅ | Migration diagnostic `NGJ-MIGRATE-004` |
 
 ### Collections
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
-| `List<T>` | Yes | ✅ | Eager list backed by java.util.List |
+| `List<T>` | Yes | ✅ | Eager list backed by `java.util.List` |
 | `Nil()` | Yes | ✅ | Empty list constructor |
 | `listOf(...)` | Yes | ✅ | List literal constructor |
 
@@ -109,21 +109,21 @@ their implementation status, and explicit exclusions.
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
-| `for (x <- list) { ... }` | Yes | ✅ | Iteration over List<T>, single generator |
-| `for (x <- list) yield { ... }` | Yes | ✅ | List comprehension producing List<U> |
+| `for (x <- list) { ... }` | Yes | ✅ | Iteration over `List<T>`, single generator |
+| `for (x <- list) yield { ... }` | Yes | ✅ | List comprehension producing `List<U>` |
 | `while (condition) { ... }` | Yes | ✅ | Loop with parenthesized condition |
-| `?` in for body | **No - Reject** | ✅ | Propagation boundary diagnostic NGJ-PROP-002 |
-| Outer `var` capture in for | **No - Reject** | ✅ | Capture diagnostic NGJ-CAPTURE-001 |
-| for-yield over non-? Result | Yes | ✅ | Produces List<Result<T,E>>, not Result<List<T>,E> |
+| `?` or `return` in `for` body | **No - Reject** | ✅ | Propagation boundary diagnostic `NGJ-PROP-002` |
+| Outer `var` capture in `for` | **No - Reject** | ✅ | Capture diagnostic `NGJ-CAPTURE-001` |
+| `for-yield` over non-`?` `Result` | Yes | ✅ | Produces `List<Result<T,E>>`, not `Result<List<T>,E>` |
 
 ### Execution
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
-| Java 25 class output | Yes | ✅ | Class-File API (standard since Java 24) |
-| `final class` for record | Yes | ✅ | JVM representation |
-| Sealed hierarchy for enum | Yes | 🔲 | JVM representation |
-| Integer overflow fault | Yes | ✅ | Runtime check via Math.xxxExact |
+| JVM class output | Yes | ✅ | Class-File API (standard since Java 24) |
+| `final class` for record | Yes | ✅ | JVM representation with structural `equals`/`hashCode` |
+| Sealed hierarchy for enum | Yes | ✅ | Interface + final variant classes |
+| Integer overflow fault | Yes | ✅ | Runtime check via `Math.xxxExact` |
 | Short-circuit evaluation | Yes | ✅ | Left-to-right |
 
 ## CLI Coverage
@@ -197,69 +197,47 @@ The following features are explicitly excluded and must be rejected with
 
 ## Valhalla Foundation Migration Notes
 
-> **Important:** The current MVP compiler targets Java 25 baseline. The language specification v0.3 defines Valhalla value classes as the foundation. This section tracks what must change in the compiler to align with the spec.
-
-### Current State (Java 25 Baseline)
-
-The existing MVP compiler:
-- Outputs `final class` for `data` types
-- Uses reference semantics for all user types
-- Does not enforce value type restrictions
-- `==` behaves as reference comparison at JVM level
-
-### Required Changes for Valhalla Foundation
-
-| Component | Current | Target | Priority |
-|-----------|---------|--------|----------|
-| **JDK Version** | Java 25 | JDK 28 EA + `--enable-preview` | P0 |
-| **data/record output** | `final class` | `value class` | P0 |
-| **enum output** | sealed identity hierarchy | sealed value hierarchy | P0 |
-| **Type checker** | No value/identity distinction | Enforce value type constraints | P0 |
-| **`==` semantics** | Reference comparison | Value comparison for value types | P0 |
-| **Match exhaustiveness** | Basic | Precise diagnostics with variant names | P0 |
-| **CI pipeline** | Java 25 | JDK 28 EA with preview flags | P0 |
-| **Test suite** | Reference semantics | Value semantics verification | P1 |
+> **Important:** The language specification v0.3 defines Valhalla value classes as the foundation. The compiler enforces value semantics (immutability, structural `==` via `Objects.equals`, no `null`, sealed enum hierarchies) and supports `--target=valhalla` (default) as well as `--target=valhalla-compat` / `java25`.
 
 ### Compiler Migration Checklist
 
-- [ ] Update Gradle/build to use JDK 28 EA toolchain
-- [ ] Add `--enable-preview` to compile and runtime flags
-- [ ] Modify code generator to emit `value` modifier for data/record/enum
-- [ ] Implement sealed value hierarchy for enum variants
-- [ ] Update type checker to distinguish value vs identity types
-- [ ] Add `identity class` syntax support
-- [ ] Implement value-based `==` comparison semantics
-- [ ] Enhance match exhaustiveness diagnostics (include missing variant names)
-- [ ] Add negative tests for identity operations on value types
-- [ ] Verify `Int`/`Long`/`Bool` behave as value types
-- [ ] Add Java interop tests for null → Option conversion
+- [ ] Update Gradle/build to use JDK 28 EA toolchain when available
+- [ ] Add `--enable-preview` to compile and runtime flags for `ACC_VALUE` classfile bits
+- [x] Implement structural `equals`/`hashCode` for `record` and `enum` variants
+- [x] Implement sealed hierarchy for enum variants
+- [x] Enforce no-`null` rule (`NGJ-TYPE-020`)
+- [x] Implement value-based `==` comparison semantics (`Objects.equals` for composite value types)
+- [x] Enhance match exhaustiveness diagnostics (include missing variant names in `NGJ-MATCH-001`)
+- [x] Verify `Int`/`Long`/`Bool` behave as value types
+- [ ] Add `identity class` syntax support (staged feature)
+- [ ] Add Java interop tests for null → Option conversion (staged feature)
 
 ### Enum Algebraic Data Type Support
 
 The v0.3 spec defines enums as sealed algebraic data types:
 
-```
-// Must be supported
-enum Shape {
-    Circle { radius: Float },
-    Rectangle { width: Float, height: Float },
-    Point
+```scala
+// Supported in v0.3
+public enum Shape {
+    Circle(radius: Int),
+    Rectangle(width: Int, height: Int),
+    Point()
 }
 
 // Result and Option are ordinary enums
-enum Option<T> {
-    Some { value: T },
-    None
+public enum Option<T> {
+    Some(value: T),
+    None()
 }
 ```
 
 Required compiler changes:
-- [ ] Parse payload-carrying enum variants
-- [ ] Generate sealed value hierarchy (interface + value classes)
-- [ ] Support nested/destructuring patterns in match
-- [ ] Implement exhaustiveness checking with precise diagnostics
-- [ ] Support generic enums
-- [ ] Ensure `?` operator works with library-defined Result/Option
+- [x] Parse payload-carrying enum variants
+- [x] Generate sealed hierarchy (interface + variant classes)
+- [x] Support nested/destructuring patterns in `match`
+- [x] Implement exhaustiveness checking with precise diagnostics (`NGJ-MATCH-001`)
+- [x] Support built-in generic enums (`Option<T>`, `Result<T, E>`)
+- [x] Ensure `?` operator works with `Result<T, E>`
 
 ### Risk: JDK 28 Preview Changes
 

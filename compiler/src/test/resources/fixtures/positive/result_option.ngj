@@ -5,15 +5,15 @@ public record DivError(message: String);
 
 public fn safeDivide(a: Int, b: Int) -> Result<Int, DivError> effects() {
     if (b == 0) {
-        Err(DivError("Division by zero"))
+        return Err(DivError("Division by zero"));
     } else {
-        Ok(a / b)
+        return Ok(a / b);
     }
 }
 
 public fn doubleOrZero(opt: Option<Int>) -> Int effects() {
-    match (opt) {
+    return match (opt) {
         case Some(value) => { value * 2 },
         case None() => { 0 }
-    }
+    };
 }

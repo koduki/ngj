@@ -92,7 +92,7 @@ class CliTest {
             package test.valid;
             
             public fn main() -> Int effects() {
-                42
+                return 42;
             }
             """;
         var file = tempDir.resolve("valid.ngj");
@@ -116,7 +116,7 @@ class CliTest {
         var source = """
             package test.json;
             
-            public fn main() -> Int effects() { 42 }
+            public fn main() -> Int effects() { return 42; }
             """;
         var file = tempDir.resolve("json.ngj");
         Files.writeString(file, source);
@@ -143,7 +143,7 @@ class CliTest {
             package test.invalid;
             
             public fn test() -> UnknownType effects() {
-                42
+                return 42;
             }
             """;
         var file = tempDir.resolve("invalid.ngj");

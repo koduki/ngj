@@ -1,8 +1,8 @@
 # Design examples
 
-[syntax_v03.ngj](syntax_v03.ngj)をv0.3正規構文の基準例とする。現在のcompilerはv0.2構文からの移行が必要であり、この例は実行確認前である。incomplete関数には意図的なholeがあり、移行後もrelease buildは拒否する。
+[syntax_v03.ngj](syntax_v03.ngj)をv0.3正規構文の基準例とする。`incomplete`関数には意図的なholeがあり、`ngjc check`では`incomplete`（exit 2）として検査され、release buildでは拒否される。
 
-以下の既存例はv0.2のアーキテクチャ設計例として保存する。app.* adapterを省略した例であり、実行可能なテストfixtureはcompiler/src/test/resourcesにある。旧例のmodule/pub/data/let/returnはv0.3で受理する別名ではない。変更規則は[SYNTAX_MIGRATION.md](../docs/SYNTAX_MIGRATION.md)を参照する。
+以下の既存例はv0.2のアーキテクチャ設計例として保存する。`app.*` adapterを省略した例であり、実行可能なテストfixtureは`compiler/src/test/resources`にある。旧例の`module`/`pub`/`data`/`let`/`! {}`はv0.3で受理する別名ではない（関数の戻り値には`return <expr>;`が必須）。変更規則は[SYNTAX_MIGRATION.md](../docs/SYNTAX_MIGRATION.md)を参照する。
 
 | ファイル | 示すもの | 特に必要な試験 |
 |---|---|---|

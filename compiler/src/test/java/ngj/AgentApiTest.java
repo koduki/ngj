@@ -35,7 +35,7 @@ class AgentApiTest {
             package test.valid;
             
             public fn answer() -> Int effects() {
-                42
+                return 42;
             }
             """;
         var file = tempDir.resolve("valid.ngj");
@@ -65,7 +65,7 @@ class AgentApiTest {
             package test.invalid;
             
             public fn test() -> UnknownType effects() {
-                42
+                return 42;
             }
             """;
         var file = tempDir.resolve("invalid.ngj");
@@ -117,7 +117,7 @@ class AgentApiTest {
         var source = """
             package test.valid;
             
-            public fn answer() -> Int effects() { 42 }
+            public fn answer() -> Int effects() { return 42; }
             """;
         var file = tempDir.resolve("valid.ngj");
         Files.writeString(file, source);
@@ -169,7 +169,7 @@ class AgentApiTest {
         var source = """
             package test.noctx;
             
-            public fn answer() -> Int effects() { 42 }
+            public fn answer() -> Int effects() { return 42; }
             """;
         var file = tempDir.resolve("noctx.ngj");
         Files.writeString(file, source);
@@ -194,7 +194,7 @@ class AgentApiTest {
             package test.sym;
             
             public fn myFunction(x: Int) -> Int effects() {
-                x + 1
+                return x + 1;
             }
             """;
         var file = tempDir.resolve("sym.ngj");
@@ -246,7 +246,7 @@ class AgentApiTest {
             package test.buildok;
             
             public fn answer() -> Int effects() {
-                42
+                return 42;
             }
             """;
         var file = tempDir.resolve("buildok.ngj");
@@ -272,7 +272,7 @@ class AgentApiTest {
         var source = """
             package test.exitcode;
             
-            public fn main() -> Int effects() { 0 }
+            public fn main() -> Int effects() { return 0; }
             """;
         var file = tempDir.resolve("exitcode.ngj");
         Files.writeString(file, source);
@@ -294,7 +294,7 @@ class AgentApiTest {
         var source = """
             package test.exitcode;
             
-            public fn test() -> BadType effects() { 42 }
+            public fn test() -> BadType effects() { return 42; }
             """;
         var file = tempDir.resolve("exitcode.ngj");
         Files.writeString(file, source);
