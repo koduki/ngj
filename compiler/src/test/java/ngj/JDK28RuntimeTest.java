@@ -464,9 +464,9 @@ class JDK28RuntimeTest {
     }
     
     @Test
-    void expectedFailure_bareNone_returnsNull() throws Exception {
-        // Test that bare `return None;` passes type check but returns null at runtime
-        // This violates the null-free guarantee and should be fixed in PR 3
+    void bareNone_isRejectedByTypeChecker() throws Exception {
+        // Test that bare `return None;` is rejected by the type checker
+        // NGJ-TYPE-022: 'None' must be called with parentheses: None()
         
         String source = """
             package test.none;
@@ -494,47 +494,19 @@ class JDK28RuntimeTest {
             .filter(d -> d.severity() == Severity.ERROR)
             .toList();
         
-        // Document current behavior: bare None passes type check (should be rejected in PR 3)
-        if (parseErrors.isEmpty() && typeErrors.isEmpty()) {
-            System.out.println("EXPECTED FAILURE: bare 'return None;' passes type check (should require None())");
-            
-            assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
-                "Runtime verification requires JDK " + REQUIRED_JDK_FOR_RUNTIME);
-            
-            var codeGen = new Java25CodeGenerator();
-            codeGen.setOutputDir(tempDir);
-            var outputs = codeGen.generate(unit);
-            
-            URL[] urls = { tempDir.toUri().toURL() };
-            try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
-                for (Path classFile : outputs) {
-                    String className = getClassName(classFile, tempDir);
-                    if (className.contains("getNone")) {
-                        try {
-                            Class<?> clazz = loader.loadClass(className);
-                            Method invoke = clazz.getMethod("invoke");
-                            Object result = invoke.invoke(null);
-                            
-                            if (result == null) {
-                                System.out.println("EXPECTED FAILURE: getNone() returned null (violates null-free guarantee)");
-                                assertTrue(true, "bare None returns null - PR 3 will fix by requiring None()");
-                            } else {
-                                fail("UNEXPECTED PASS: getNone() returned " + result + " instead of null");
-                            }
-                            return;
-                        } catch (ClassFormatError | VerifyError e) {
-                            System.out.println("EXPECTED FAILURE: bare_none.ngj - " + e.getClass().getSimpleName());
-                            assertTrue(true);
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            System.out.println("UNEXPECTED PASS: bare None correctly rejected with errors: " + 
-                (parseErrors.isEmpty() ? typeErrors : parseErrors));
-            fail("If this passes, remove from expected failures - bare None is now correctly rejected");
-        }
+        // Bare None should be rejected with NGJ-TYPE-022
+        assertFalse(typeErrors.isEmpty(), "bare 'return None;' should produce type error");
+        
+        var noneError = typeErrors.stream()
+            .filter(d -> d.id().equals("NGJ-TYPE-022"))
+            .findFirst();
+        
+        assertTrue(noneError.isPresent(), 
+            "Expected NGJ-TYPE-022 error for bare None, got: " + typeErrors);
+        assertTrue(noneError.get().message().contains("None"),
+            "Error message should mention None");
+        
+        System.out.println("SUCCESS: bare 'return None;' correctly rejected with " + noneError.get().id());
     }
     
     @Test

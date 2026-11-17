@@ -1316,11 +1316,221 @@ public final class Java25CodeGenerator {
     }
     
     private void generateMatch(CodeGenContext ctx, MatchExpr matchExpr) {
+        // Evaluate scrutinee and store in local variable
         generateExpr(ctx, matchExpr.scrutinee());
+        var scrutineeSlot = ctx.allocateLocal("$match$scrutinee", "Object");
+        ctx.code.astore(scrutineeSlot);
         
-        if (!matchExpr.arms().isEmpty()) {
-            ctx.code.pop();
-            generateExpr(ctx, matchExpr.arms().get(0).body());
+        // Infer scrutinee type for Option/Result field type resolution
+        String scrutineeType = inferTypeName(ctx, matchExpr.scrutinee());
+        String innerType = inferGenericInnerType(ctx, matchExpr.scrutinee());
+        
+        var endLabel = ctx.code.newLabel();
+        var arms = matchExpr.arms();
+        
+        // Track next arm labels for conditional patterns
+        Label nextArmLabel = null;
+        
+        for (int i = 0; i < arms.size(); i++) {
+            var arm = arms.get(i);
+            var pattern = arm.pattern();
+            var isLastArm = (i == arms.size() - 1);
+            
+            // Bind previous arm's fallthrough label if any
+            if (nextArmLabel != null) {
+                ctx.code.labelBinding(nextArmLabel);
+                nextArmLabel = null;
+            }
+            
+            switch (pattern) {
+                case WildcardPattern _ -> {
+                    // Wildcard matches everything - just evaluate body
+                    generateExpr(ctx, arm.body());
+                    if (!isLastArm) {
+                        ctx.code.goto_(endLabel);
+                    }
+                }
+                
+                case BindingPattern binding -> {
+                    // Bind scrutinee to variable and evaluate body
+                    ctx.code.aload(scrutineeSlot);
+                    var bindSlot = ctx.allocateLocal(binding.name(), scrutineeType);
+                    ctx.code.astore(bindSlot);
+                    generateExpr(ctx, arm.body());
+                    if (!isLastArm) {
+                        ctx.code.goto_(endLabel);
+                    }
+                }
+                
+                case LiteralPattern literal -> {
+                    // Compare with literal value
+                    if (!isLastArm) {
+                        nextArmLabel = ctx.code.newLabel();
+                    }
+                    ctx.code.aload(scrutineeSlot);
+                    generateExpr(ctx, literal.literal());
+                    // Box primitive if needed for equals comparison
+                    boxIfNeeded(ctx, literal.literal());
+                    ctx.code.invokevirtual(
+                        ConstantDescs.CD_Object,
+                        "equals",
+                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+                    );
+                    if (!isLastArm) {
+                        ctx.code.ifeq(nextArmLabel);
+                    } else {
+                        // Last arm - pop the boolean and proceed (exhaustive match assumed)
+                        ctx.code.pop();
+                    }
+                    generateExpr(ctx, arm.body());
+                    if (!isLastArm) {
+                        ctx.code.goto_(endLabel);
+                    }
+                }
+                
+                case ConstructorPattern ctor -> {
+                    // Check instanceof variant class and extract fields
+                    var typePath = ctor.typePath();
+                    
+                    // Resolve variant class - could be EnumName.Variant or just Variant
+                    ClassDesc variantClass = resolveVariantClass(ctx, typePath);
+                    
+                    if (!isLastArm) {
+                        nextArmLabel = ctx.code.newLabel();
+                        ctx.code.aload(scrutineeSlot);
+                        ctx.code.instanceOf(variantClass);
+                        ctx.code.ifeq(nextArmLabel);
+                    }
+                    // For last arm, we assume exhaustive match and don't need to check
+                    
+                    // Extract fields from variant - use innerType for Option/Result
+                    if (!ctor.fields().isEmpty()) {
+                        ctx.code.aload(scrutineeSlot);
+                        ctx.code.checkcast(variantClass);
+                        var castedSlot = ctx.allocateLocal("$match$casted", typePath);
+                        ctx.code.astore(castedSlot);
+                        
+                        for (var field : ctor.fields()) {
+                            if (field.pattern() instanceof BindingPattern bindPat) {
+                                ctx.code.aload(castedSlot);
+                                ctx.code.getfield(variantClass, field.name(), ConstantDescs.CD_Object);
+                                
+                                // For Option/Result, use the inner type for field bindings
+                                String fieldType = (scrutineeType.equals("Option") || scrutineeType.equals("Result")) 
+                                    ? innerType : "Object";
+                                
+                                // Unbox if needed
+                                if (fieldType.equals("Int")) {
+                                    ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
+                                    ctx.code.invokevirtual(
+                                        ClassDesc.of("java.lang.Integer"),
+                                        "intValue",
+                                        MethodTypeDesc.of(ConstantDescs.CD_int)
+                                    );
+                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), "Int");
+                                    ctx.code.istore(fieldSlot);
+                                } else if (fieldType.equals("Long")) {
+                                    ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
+                                    ctx.code.invokevirtual(
+                                        ClassDesc.of("java.lang.Long"),
+                                        "longValue",
+                                        MethodTypeDesc.of(ConstantDescs.CD_long)
+                                    );
+                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), "Long");
+                                    ctx.code.lstore(fieldSlot);
+                                } else if (fieldType.equals("Bool")) {
+                                    ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
+                                    ctx.code.invokevirtual(
+                                        ClassDesc.of("java.lang.Boolean"),
+                                        "booleanValue",
+                                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
+                                    );
+                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), "Bool");
+                                    ctx.code.istore(fieldSlot);
+                                } else {
+                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
+                                    ctx.code.astore(fieldSlot);
+                                }
+                            }
+                        }
+                    }
+                    
+                    generateExpr(ctx, arm.body());
+                    if (!isLastArm) {
+                        ctx.code.goto_(endLabel);
+                    }
+                }
+            }
+        }
+        
+        ctx.code.labelBinding(endLabel);
+    }
+    
+    private String inferGenericInnerType(CodeGenContext ctx, Expr expr) {
+        // For Option<T> or Result<T, E>, return T
+        if (expr instanceof IdentExpr ident) {
+            // Look up in function parameters
+            for (var param : ctx.fn.params()) {
+                if (param.name().equals(ident.name())) {
+                    if (param.type() instanceof GenericTypeExpr gen) {
+                        if (!gen.typeArgs().isEmpty()) {
+                            return getTypeName(gen.typeArgs().get(0));
+                        }
+                    }
+                }
+            }
+        }
+        return "Object";
+    }
+    
+    private ClassDesc resolveVariantClass(CodeGenContext ctx, String typePath) {
+        // Handle Option/Result builtins
+        if (typePath.equals("Some") || typePath.equals("None")) {
+            return ClassDesc.ofInternalName("ngj/runtime/Option$" + typePath);
+        }
+        if (typePath.equals("Ok") || typePath.equals("Err")) {
+            return ClassDesc.ofInternalName("ngj/runtime/Result$" + typePath);
+        }
+        
+        // Handle qualified paths like "Color.Red" or simple names like "Red"
+        if (typePath.contains(".")) {
+            var parts = typePath.split("\\.");
+            var enumName = parts[0];
+            var variantName = parts[1];
+            return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + enumName + "$" + variantName);
+        }
+        
+        // Try to find in known enums
+        for (var entry : enums.entrySet()) {
+            for (var variant : entry.getValue().variants()) {
+                if (variant.name().equals(typePath)) {
+                    return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + entry.getKey() + "$" + typePath);
+                }
+            }
+        }
+        
+        // Fallback: assume it's a qualified variant in current module
+        return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + typePath);
+    }
+    
+    private void boxIfNeeded(CodeGenContext ctx, LiteralExpr literal) {
+        switch (literal.kind()) {
+            case INT -> ctx.code.invokestatic(
+                ClassDesc.of("java.lang.Integer"),
+                "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Integer"), ConstantDescs.CD_int)
+            );
+            case LONG -> ctx.code.invokestatic(
+                ClassDesc.of("java.lang.Long"),
+                "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Long"), ConstantDescs.CD_long)
+            );
+            case BOOL -> ctx.code.invokestatic(
+                ClassDesc.of("java.lang.Boolean"),
+                "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Boolean"), ConstantDescs.CD_boolean)
+            );
+            default -> {} // String and Unit don't need boxing
         }
     }
     
