@@ -53,22 +53,14 @@ class JDK28RuntimeTest {
     /**
      * Expected failures with reasons (to be fixed in PR 3).
      * 
-     * | Fixture               | Failure Type           | Root Cause                                        |
-     * |-----------------------|------------------------|---------------------------------------------------|
-     * | data_type.ngj         | ClassFormatError       | Record fields missing strict flag (JEP 401)       |
-     * | enum_match.ngj        | Wrong result           | match codegen returns first arm (:1315-1321)      |
-     * | result_option.ngj     | ClassFormatError       | DivError record missing strict flag               |
-     * | option_match.ngj      | VerifyError            | Option match codegen issue                        |
-     * | listof_call.ngj       | IncompatibleClassChange| listOf InterfaceMethodref issue                   |
-     * | for_yield.ngj         | VerifyError            | for-yield codegen issue                           |
+     * All fixtures should now pass on JDK 28 runtime after PR #16 fixes:
+     * - ACC_STRICT flag added to value class fields (JEP 401)
+     * - match codegen fixed for enum and Option patterns
+     * - for-yield codegen fixed
+     * - Option/Result pattern matching fixed
      */
     private static final List<String> EXPECTED_RUNTIME_FAILURES = List.of(
-        "data_type.ngj",      // ClassFormatError: missing strict flag
-        "enum_match.ngj",     // Wrong result: match returns first arm
-        "result_option.ngj",  // ClassFormatError: DivError record
-        "option_match.ngj",   // VerifyError: Option match codegen
-        "listof_call.ngj",    // IncompatibleClassChangeError: listOf
-        "for_yield.ngj"       // VerifyError: for-yield codegen
+        // All expected failures have been fixed in PR #16
     );
     
     @TempDir
@@ -345,10 +337,10 @@ class JDK28RuntimeTest {
         }
     }
     
-    // ========== Expected Failure Tests ==========
+    // ========== Runtime Verification Tests ==========
     
     @Test
-    void expectedFailure_dataType_classFormatError() throws Exception {
+    void runtimeVerify_dataType_loadsSuccessfully() throws Exception {
         assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
             "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
         
@@ -372,21 +364,15 @@ class JDK28RuntimeTest {
         try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
             for (Path classFile : outputs) {
                 String className = getClassName(classFile, tempDir);
-                try {
-                    loader.loadClass(className);
-                    fail("UNEXPECTED PASS: data_type.ngj should fail with ClassFormatError " +
-                         "(record fields missing strict flag). PR 3 will fix this.");
-                } catch (ClassFormatError e) {
-                    System.out.println("EXPECTED FAILURE: data_type.ngj - " + e.getMessage());
-                    assertTrue(true, "ClassFormatError is expected until PR 3 fixes strict fields");
-                    return;
-                }
+                Class<?> clazz = loader.loadClass(className);
+                assertNotNull(clazz, "Class should load successfully: " + className);
             }
         }
+        System.out.println("SUCCESS: data_type.ngj loads successfully on JDK " + jdkVersion);
     }
     
     @Test
-    void expectedFailure_enumMatch_wrongResult() throws Exception {
+    void runtimeVerify_enumMatch_returnsCorrectResults() throws Exception {
         assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
             "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
         
@@ -412,55 +398,46 @@ class JDK28RuntimeTest {
             
             for (Path classFile : outputs) {
                 String className = getClassName(classFile, tempDir);
-                try {
-                    Class<?> clazz = loader.loadClass(className);
-                    if (className.contains("colorToInt")) {
-                        colorToIntFn = clazz;
-                    }
-                } catch (ClassFormatError | VerifyError e) {
-                    System.out.println("EXPECTED FAILURE: enum_match.ngj - " + e.getClass().getSimpleName() + ": " + e.getMessage());
-                    assertTrue(true, "Class loading error is expected until PR 3 fixes enum codegen");
-                    return;
+                Class<?> clazz = loader.loadClass(className);
+                if (className.contains("colorToInt")) {
+                    colorToIntFn = clazz;
                 }
             }
             
-            if (colorToIntFn != null) {
-                Method invoke = null;
-                for (Method m : colorToIntFn.getDeclaredMethods()) {
-                    if (m.getName().equals("invoke")) {
-                        invoke = m;
-                        break;
-                    }
-                }
-                
-                if (invoke != null) {
-                    Object red = getEnumVariant(loader, "test.enumeration.Red");
-                    Object green = getEnumVariant(loader, "test.enumeration.Green");
-                    Object blue = getEnumVariant(loader, "test.enumeration.Blue");
-                    
-                    if (red != null && green != null && blue != null) {
-                        Object redResult = invoke.invoke(null, red);
-                        Object greenResult = invoke.invoke(null, green);
-                        Object blueResult = invoke.invoke(null, blue);
-                        
-                        System.out.println("enum_match.ngj results:");
-                        System.out.println("  colorToInt(Red) = " + redResult + " (expected 0)");
-                        System.out.println("  colorToInt(Green) = " + greenResult + " (expected 1)");
-                        System.out.println("  colorToInt(Blue) = " + blueResult + " (expected 2)");
-                        
-                        if (redResult.equals(0) && greenResult.equals(1) && blueResult.equals(2)) {
-                            fail("UNEXPECTED PASS: enum_match.ngj now works correctly. Remove from EXPECTED_RUNTIME_FAILURES.");
-                        } else {
-                            System.out.println("EXPECTED FAILURE: match returns wrong results (PR 3 will fix)");
-                            assertTrue(true);
-                        }
-                        return;
-                    }
+            assertNotNull(colorToIntFn, "colorToInt function class should be loaded");
+            
+            Method invoke = null;
+            for (Method m : colorToIntFn.getDeclaredMethods()) {
+                if (m.getName().equals("invoke")) {
+                    invoke = m;
+                    break;
                 }
             }
             
-            System.out.println("EXPECTED FAILURE: enum_match.ngj - could not fully verify");
+            assertNotNull(invoke, "invoke method should exist");
+            
+            Object red = getEnumVariant(loader, "test.enumeration.Red");
+            Object green = getEnumVariant(loader, "test.enumeration.Green");
+            Object blue = getEnumVariant(loader, "test.enumeration.Blue");
+            
+            assertNotNull(red, "Red variant should be instantiable");
+            assertNotNull(green, "Green variant should be instantiable");
+            assertNotNull(blue, "Blue variant should be instantiable");
+            
+            Object redResult = invoke.invoke(null, red);
+            Object greenResult = invoke.invoke(null, green);
+            Object blueResult = invoke.invoke(null, blue);
+            
+            System.out.println("enum_match.ngj results:");
+            System.out.println("  colorToInt(Red) = " + redResult + " (expected 0)");
+            System.out.println("  colorToInt(Green) = " + greenResult + " (expected 1)");
+            System.out.println("  colorToInt(Blue) = " + blueResult + " (expected 2)");
+            
+            assertEquals(0, redResult, "colorToInt(Red) should return 0");
+            assertEquals(1, greenResult, "colorToInt(Green) should return 1");
+            assertEquals(2, blueResult, "colorToInt(Blue) should return 2");
         }
+        System.out.println("SUCCESS: enum_match.ngj works correctly on JDK " + jdkVersion);
     }
     
     @Test
@@ -510,9 +487,8 @@ class JDK28RuntimeTest {
     }
     
     @Test
-    void expectedFailure_targetOutputIdentical() throws Exception {
-        // Test that --target option does not affect output (all targets produce identical bytes)
-        // This should be fixed in PR 3 to produce different outputs for different targets
+    void targetOption_producesDifferentOutput() throws Exception {
+        // Test that --target option produces different outputs for different targets
         
         String source = """
             package test.target;
@@ -532,39 +508,38 @@ class JDK28RuntimeTest {
         var typeChecker = new TypeChecker();
         typeChecker.check(unit);
         
-        // Generate with default (valhalla) target
+        // Generate with valhalla target
         var codeGen1 = new Java25CodeGenerator();
+        codeGen1.setTarget("valhalla");
         Path dir1 = tempDir.resolve("valhalla");
         Files.createDirectories(dir1);
         codeGen1.setOutputDir(dir1);
         var outputs1 = codeGen1.generate(unit);
         
-        // Generate again (simulating different target - currently no API to set target)
+        // Generate with java25 target
         var codeGen2 = new Java25CodeGenerator();
+        codeGen2.setTarget("java25");
         Path dir2 = tempDir.resolve("java25");
         Files.createDirectories(dir2);
         codeGen2.setOutputDir(dir2);
         var outputs2 = codeGen2.generate(unit);
         
-        // Compare outputs - they should be identical (expected failure)
-        boolean identical = true;
+        // Compare outputs - they should be different
+        boolean different = false;
         for (int i = 0; i < outputs1.size() && i < outputs2.size(); i++) {
             byte[] bytes1 = Files.readAllBytes(outputs1.get(i));
             byte[] bytes2 = Files.readAllBytes(outputs2.get(i));
             if (!Arrays.equals(bytes1, bytes2)) {
-                identical = false;
+                different = true;
+                System.out.println("Target differentiation confirmed:");
+                System.out.println("  valhalla: " + bytes1.length + " bytes");
+                System.out.println("  java25: " + bytes2.length + " bytes");
                 break;
             }
         }
         
-        if (identical) {
-            System.out.println("EXPECTED FAILURE: --target produces identical output for all targets");
-            System.out.println("  Both valhalla and java25 targets produce class version " + targetClassVersion);
-            System.out.println("  PR 3 will fix by implementing target-specific codegen");
-            assertTrue(true, "Identical output is expected until PR 3 implements target differentiation");
-        } else {
-            fail("UNEXPECTED PASS: Different targets produce different output. Remove from expected failures.");
-        }
+        assertTrue(different, "Different targets should produce different output");
+        System.out.println("SUCCESS: --target option produces different output for different targets");
     }
     
     private Object getEnumVariant(URLClassLoader loader, String className) {
