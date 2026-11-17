@@ -12,7 +12,7 @@ import java.util.*;
  *   ngjc check [--format=json] [--revision=<hash>] <files...>
  *   ngjc context [--format=json] --hole=<id> [--revision=<hash>] [--max-bytes=N]
  *   ngjc inspect [--format=json] --symbol=<id> [--revision=<hash>]
- *   ngjc build [--target=java25] <files...>
+ *   ngjc build [--target=valhalla] <files...>
  * 
  * Exit codes:
  *   0 - Success (valid for check)
@@ -20,12 +20,23 @@ import java.util.*;
  *   2 - Incomplete (holes present, no errors)
  *   3 - Revision mismatch or bad input
  *   4 - Internal compiler error
+ * 
+ * Valhalla Foundation:
+ *   NGJ targets JDK 28 Early-Access with JEP 401 (Value Objects) preview feature.
+ *   Pinned build: JDK 28 EA Build 24 (2026-11-12)
+ *   Download: https://jdk.java.net/28/
+ *   
+ *   Running on a non-Valhalla JDK will produce an explicit error (TARGET-02).
  */
 public final class Main {
     
     public static final String SCHEMA_VERSION = "ngj.cli/1";
     public static final String COMPILER_VERSION = "0.1.0-mvp";
-    public static final String TARGET_PROFILE = "java25/mvp-pure";
+    public static final String TARGET_PROFILE = "valhalla/jdk28-ea-b24";
+    
+    public static final int REQUIRED_JDK_VERSION = 28;
+    public static final String REQUIRED_JDK_BUILD = "24";
+    public static final String VALHALLA_JDK_URL = "https://jdk.java.net/28/";
     
     public static void main(String[] args) {
         int exitCode = run(args, System.out, System.err);
@@ -34,6 +45,13 @@ public final class Main {
     
     public static int run(String[] args, PrintStream stdout, PrintStream stderr) {
         try {
+            // TARGET-02: Verify Valhalla-capable JDK before any operation
+            var jdkCheck = checkValhallaJdk();
+            if (!jdkCheck.isValid()) {
+                stderr.println(jdkCheck.errorMessage());
+                return ExitCode.BAD_INPUT;
+            }
+            
             if (args.length == 0) {
                 printUsage(stderr);
                 return ExitCode.BAD_INPUT;
@@ -204,15 +222,73 @@ public final class Main {
         return result.exitCode();
     }
     
+    /**
+     * TARGET-02: Check that we're running on a Valhalla-capable JDK.
+     * NGJ requires JDK 28+ with preview features enabled for JEP 401 Value Objects.
+     * 
+     * Can be skipped for testing by setting environment variable NGJ_SKIP_JDK_CHECK=true
+     */
+    private static JdkCheckResult checkValhallaJdk() {
+        // Allow skipping for tests (CI uses JDK 28)
+        if ("true".equals(System.getenv("NGJ_SKIP_JDK_CHECK"))) {
+            return new JdkCheckResult(true, null);
+        }
+        
+        int jdkVersion = Runtime.version().feature();
+        
+        if (jdkVersion < REQUIRED_JDK_VERSION) {
+            return new JdkCheckResult(false, """
+                NGJ-TARGET-002: Valhalla-capable JDK required
+                
+                NGJ requires JDK %d or later with JEP 401 Value Objects (Preview).
+                Current JDK: %s
+                
+                Download JDK 28 EA from: %s
+                
+                Run with: java --enable-preview -jar ngjc.jar <command>
+                """.formatted(REQUIRED_JDK_VERSION, Runtime.version(), VALHALLA_JDK_URL));
+        }
+        
+        // Check if preview features are enabled by testing for a preview API
+        // We can detect this by checking if we can use value class features
+        if (!isPreviewEnabled()) {
+            return new JdkCheckResult(false, """
+                NGJ-TARGET-002: Preview features required
+                
+                NGJ requires JDK %d with --enable-preview for JEP 401 Value Objects.
+                Current JDK: %s (preview features not enabled)
+                
+                Run with: java --enable-preview -jar ngjc.jar <command>
+                """.formatted(REQUIRED_JDK_VERSION, Runtime.version()));
+        }
+        
+        return new JdkCheckResult(true, null);
+    }
+    
+    private static boolean isPreviewEnabled() {
+        // Check if preview features are enabled by looking for preview-specific behavior
+        // The simplest check is to see if Objects.hasIdentity exists (JEP 401 addition)
+        try {
+            java.util.Objects.class.getMethod("hasIdentity", Object.class);
+            return true;
+        } catch (NoSuchMethodException e) {
+            // Method doesn't exist - preview may not be enabled or not JDK 28+
+            // For older JDKs with NGJ_SKIP_JDK_CHECK, return true
+            return "true".equals(System.getenv("NGJ_SKIP_JDK_CHECK"));
+        }
+    }
+    
+    private record JdkCheckResult(boolean isValid, String errorMessage) {}
+    
     private static void printUsage(PrintStream out) {
         out.println("""
-            NGJ Compiler %s
+            NGJ Compiler %s (Valhalla foundation: %s)
             
             Usage:
               ngjc check [--format=json] [--revision=<hash>] <files...>
               ngjc context [--format=json] --hole=<id> [--revision=<hash>] [--max-bytes=N]
               ngjc inspect [--format=json] --symbol=<id> [--revision=<hash>]
-              ngjc build [--target=java25] <files...>
+              ngjc build [--target=valhalla] <files...>
             
             Exit codes:
               0 - Success (valid for check)
@@ -220,7 +296,12 @@ public final class Main {
               2 - Incomplete (holes present, no errors)
               3 - Revision mismatch or bad input
               4 - Internal compiler error
-            """.formatted(COMPILER_VERSION));
+              
+            Valhalla Foundation:
+              NGJ targets JDK 28 EA with JEP 401 Value Objects (Preview).
+              All types are value types by default (identity-free).
+              Download: %s
+            """.formatted(COMPILER_VERSION, TARGET_PROFILE, VALHALLA_JDK_URL));
     }
     
     private static CliOptions parseOptions(String[] args) {

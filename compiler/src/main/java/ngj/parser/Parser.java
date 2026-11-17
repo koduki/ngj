@@ -345,19 +345,14 @@ public final class Parser {
         consume(TokenType.IDENT, "Expected type name");
         String name = previous.text();
         
-        if (check(TokenType.LANGLE)) {
-            diagnostics.add(Diagnostic.error(
-                "NGJ-PARSE-003",
-                "Generic type parameters on enum types are not supported in MVP",
-                current.span()
-            ));
-            match(TokenType.LANGLE);
-            int depth = 1;
-            while (depth > 0 && !isAtEnd()) {
-                if (match(TokenType.LANGLE)) depth++;
-                else if (match(TokenType.RANGLE)) depth--;
-                else advance();
-            }
+        // GENERIC-01: Support generic enum type parameters (e.g., enum Option<T>)
+        var typeParams = new ArrayList<String>();
+        if (match(TokenType.LANGLE)) {
+            do {
+                consume(TokenType.IDENT, "Expected type parameter name");
+                typeParams.add(previous.text());
+            } while (match(TokenType.COMMA));
+            consume(TokenType.RANGLE, "Expected '>' after type parameters");
         }
         
         consume(TokenType.LBRACE, "Expected '{' after enum name");
@@ -370,16 +365,28 @@ public final class Parser {
         
         consume(TokenType.RBRACE, "Expected '}' after enum variants");
         
-        return new EnumDecl(name, isPublic, variants, span(start, previous.span().endByte()));
+        return new EnumDecl(name, isPublic, typeParams, variants, span(start, previous.span().endByte()));
     }
     
+    /**
+     * Parse enum variant with optional payload fields (ADT syntax).
+     * 
+     * EBNF (per spec): variant = IDENT "(" [ parameters ] ")" ;
+     * 
+     * Examples:
+     *   None()                      // payload-less variant
+     *   Some(value: T)              // variant with payload
+     *   Circle(radius: Float)       // variant with named field
+     */
     private Variant parseVariant() throws ParseException {
         int start = current.span().startByte();
         consume(TokenType.IDENT, "Expected variant name");
         String name = previous.text();
         
         var fields = new ArrayList<FieldDecl>();
-        consume(TokenType.LPAREN, "Expected '(' after variant name. v0.3 requires 'Variant()' even for empty variants.");
+        
+        // ENUM-01: Variants always have parentheses per EBNF spec
+        consume(TokenType.LPAREN, "Expected '(' after variant name - variants are written '" + name + "()'");
         if (!check(TokenType.RPAREN)) {
             do {
                 fields.add(parseFieldDecl());
@@ -765,6 +772,16 @@ public final class Parser {
     
     private Expr parsePrimary() throws ParseException {
         int start = current.span().startByte();
+        
+        // NULL-01: Reject null literal - NGJ has no null in core language
+        if (match(TokenType.NULL)) {
+            diagnostics.add(Diagnostic.error(
+                "NGJ-NULL-001",
+                "null literal is not allowed in NGJ. Use Option<T> with None for absence.",
+                previous.span()
+            ));
+            return new IdentExpr("__null_error__", span(start, previous.span().endByte()));
+        }
         
         if (match(TokenType.INT_LITERAL)) {
             return new LiteralExpr(LiteralExpr.LiteralKind.INT, previous.value(),

@@ -898,6 +898,11 @@ public final class TypeChecker {
         return resultType;
     }
     
+    /**
+     * ENUM-02: Exhaustiveness checking with stable JSON diagnostics naming each missing variant.
+     * This is critical for the AI fix loop - the diagnostic must clearly identify
+     * which variants are missing so the AI can add the appropriate match arms.
+     */
     private void checkMatchExhaustiveness(MatchExpr matchExpr, TypeInfo typeInfo, String typeName) {
         var variants = typeInfo.variants();
         var coveredVariants = new HashSet<String>();
@@ -907,7 +912,7 @@ public final class TypeChecker {
             switch (arm.pattern()) {
                 case WildcardPattern _ -> hasWildcard = true;
                 case ConstructorPattern ctor -> coveredVariants.add(ctor.typePath());
-                case BindingPattern _ -> hasWildcard = true; // Binding captures all
+                case BindingPattern _ -> hasWildcard = true;
                 default -> {}
             }
         }
@@ -919,10 +924,13 @@ public final class TypeChecker {
                 .toList();
             
             if (!missing.isEmpty()) {
-                diagnostics.add(Diagnostic.error(
+                // Use specialized exhaustiveness error with structured missing variant info
+                diagnostics.add(Diagnostic.exhaustivenessError(
                     "NGJ-MATCH-001",
-                    "Non-exhaustive match on " + typeName + ". Missing: " + String.join(", ", missing),
-                    matchExpr.span()
+                    "Non-exhaustive match on " + typeName + ". Missing variants: " + String.join(", ", missing),
+                    matchExpr.span(),
+                    typeName,
+                    missing
                 ));
             }
         }
