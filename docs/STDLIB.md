@@ -36,13 +36,18 @@ When calling Java APIs or receiving values from Java:
 
 All numeric types are **value types**. There is no primitive/boxed distinction visible to users.
 
+> **Note on function signatures:** The function signatures below (e.g., `add`, `eq`) are **conceptual definitions** showing the operations available for each type. NGJ does not support function overloading (see SPECIFICATION.md section 2.1). In practice, these are:
+> - Intrinsic operators (`+`, `-`, `*`, `/`, `%`, `==`, etc.) that the compiler handles specially
+> - Type-specific module functions (e.g., `Int.checkedAdd`, `Long.checkedAdd`) in future versions
+> 
+> The signatures shown here describe the semantic behavior, not actual callable functions with these exact names.
+
 ### 2.1 Int (32-bit signed integer)
 
 ```
-// Conceptual definition (built-in)
-value data Int {
-    // Internal: wraps JVM int
-}
+// Conceptual definition (built-in, not user-definable syntax)
+// All numeric types are value types by default
+record Int();  // Internal: wraps JVM int
 
 // Operations
 fn add(a: Int, b: Int) -> Int effects() { ... }      // Overflow: task fault
@@ -72,9 +77,8 @@ fn toString(x: Int) -> String effects() { ... }
 ### 2.2 Long (64-bit signed integer)
 
 ```
-value data Long {
-    // Internal: wraps JVM long
-}
+// Conceptual definition (built-in)
+record Long();  // Internal: wraps JVM long
 
 // Same operations as Int, with Long types
 fn add(a: Long, b: Long) -> Long effects() { ... }
@@ -89,9 +93,8 @@ fn toLong(x: Long) -> Long effects() { x }
 ### 2.3 Bool (Boolean)
 
 ```
-value data Bool {
-    // Internal: wraps JVM boolean
-}
+// Conceptual definition (built-in)
+record Bool();  // Internal: wraps JVM boolean
 
 // Operations
 fn and(a: Bool, b: Bool) -> Bool effects() { ... }   // a && b (short-circuit in syntax)
@@ -105,9 +108,8 @@ fn eq(a: Bool, b: Bool) -> Bool effects() { ... }
 ### 2.4 Byte (8-bit unsigned)
 
 ```
-value data Byte {
-    // Internal: wraps JVM byte (interpreted as unsigned 0..255)
-}
+// Conceptual definition (built-in, not yet implemented in MVP)
+record Byte();  // Internal: wraps JVM byte (interpreted as unsigned 0..255)
 
 // Operations for binary data processing
 fn toInt(x: Byte) -> Int effects() { ... }           // Always succeeds (0..255)
@@ -116,14 +118,13 @@ fn fromInt(x: Int) -> Result<Byte, RangeError> effects() { ... }
 
 ### 2.5 Float / Double (IEEE 754)
 
-```
-value data Float {
-    // Internal: wraps JVM float
-}
+> **Note:** Float and Double are defined in SPECIFICATION.md 2.3.1 but not yet listed in EBNF.md type productions. MVP implementation status: **not yet implemented**.
 
-value data Double {
-    // Internal: wraps JVM double
-}
+```
+// Conceptual definition (built-in, not yet implemented in MVP)
+record Float();  // Internal: wraps JVM float
+
+record Double();  // Internal: wraps JVM double
 
 // Note: NaN == NaN is false (IEEE 754 semantics)
 // Use isNaN(x) for NaN checks
@@ -163,8 +164,10 @@ Some(1) == Some(2)    // false
 
 ### 3.2 Standard Operations
 
+> **Note:** The generic functions below with lambda parameters (`(T) -> U`) are **conceptual definitions** describing the semantic behavior. User-defined generic functions and higher-order functions with lambda parameters are not yet implemented in the MVP. These operations will be provided as built-in library functions in future versions.
+
 ```
-// Map: transform the inner value if present
+// Map: transform the inner value if present (conceptual)
 fn map<T, U>(opt: Option<T>, f: (T) -> U) -> Option<U> effects() {
     match (opt) {
         case Some(v) => { Some(f(v)) }
@@ -306,10 +309,9 @@ fn toOption<T, E>(res: Result<T, E>) -> Option<T> effects() {
 `List<T>` is an **immutable** collection. All operations return new lists without modifying the original.
 
 ```
-// Conceptual definition
-public value data List<T> {
-    // Internal: backed by persistent data structure or copy-on-write
-}
+// Conceptual definition (not actual NGJ syntax)
+// List<T> is a built-in generic type backed by java.util.List
+// All collections are value types (immutable semantics)
 ```
 
 ### 5.1 Construction
@@ -395,7 +397,9 @@ public enum IndexError {
 
 ### 7.1 Null-to-Option Conversion (NULL-02)
 
-When receiving values from Java that may be null:
+> **Status:** NULL-02 is **not yet implemented** in the MVP. The code generator (`Java25CodeGenerator.java`) has a `generateNullToOption` method but it has no callers. This feature is planned for Stage 2 implementation.
+
+When receiving values from Java that may be null (future behavior):
 
 ```
 // Java method: @Nullable User findUser(String id)

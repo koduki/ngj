@@ -92,11 +92,16 @@ NGJ標準ライブラリは以下を保証する：
 
 ```text
 候補A: --aot=jit|leyden|native
-候補B: --target=jvm|leyden|native
+候補B: --target=jvm|leyden|native  
 候補C: --profile=dev|optimized|native
 ```
 
-フラグ名は既存の`--target`（バックエンド選択）との関係を明確にする必要がある。`valhalla`バックエンドとの組み合わせも考慮する。
+**現状（MVP実装）:** 
+- `--target=valhalla` がMVPのデフォルト（`Main.java:35` の `TARGET_PROFILE`）
+- `--target=java25` は `Compiler.java:124-127` で `NGJ-BUILD-002` エラーとなる
+- `--aot` オプションは将来実装予定
+
+フラグ名は既存の`--target`（バックエンド選択）との関係を明確にする必要がある。将来的に `--target=valhalla --aot=leyden` のような組み合わせを想定する。
 
 ### 4.2 Valhalla + AOT互換性（実装状況・リスク）
 
@@ -136,16 +141,22 @@ AOTレベル × バックエンド × OS/archの組み合わせでCI行列が爆
 {
   "schema_version": "ngj.build/1",
   "aot_level": "leyden",
-  "valhalla_mode": "native",
+  "target_profile": "valhalla/jdk28-ea-b24",
   "aot_details": {
     "cache_path": "build/leyden-cache",
     "jdk_version": "28",
     "preview_enabled": true,
     "leyden_features": ["class-loading", "method-profiling"],
+    "value_class_output": true,
     "valhalla_compat_fallback": false
   }
 }
 ```
+
+**フィールドの説明:**
+- `aot_level`: AOTレベル（jit/leyden/native）
+- `target_profile`: バックエンドプロファイル（valhalla/jdk28-ea-b24）
+- `value_class_output`: true = Valhalla value class出力、false = identity class互換出力
 
 ### 4.6 Leyden機能の段階的採用
 

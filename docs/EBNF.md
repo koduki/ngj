@@ -204,10 +204,11 @@ Records and enum variants compile to Valhalla value classes in a sealed hierarch
 enum Shape { Circle(r: Float), Rectangle(w: Float, h: Float), Point() }
 
 // JVM output (conceptual)
-sealed value interface Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {}
-final value class Shape.Circle implements Shape { float r; }
-final value class Shape.Rectangle implements Shape { float w; float h; }
-final value class Shape.Point implements Shape {}
+// JEP 401 has no value interface, so we use sealed abstract value class
+abstract sealed value class Shape permits Shape$Circle, Shape$Rectangle, Shape$Point {}
+final value class Shape$Circle extends Shape { float r; }
+final value class Shape$Rectangle extends Shape { float w; float h; }
+final value class Shape$Point extends Shape {}
 ```
 
 ### 8.5 Identity types (staged feature)

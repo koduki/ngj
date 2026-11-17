@@ -19,7 +19,7 @@ ngjc check --format=json --profile=restricted --revision=<hash> <files>
 ngjc context --format=json --hole=<id> --revision=<hash> --max-bytes=16000
 ngjc inspect --format=json --symbol=<id> --revision=<hash>
 ngjc check-patch --format=json --base-revision=<hash> --patch=<file>
-ngjc build --target=java25 --profile=restricted
+ngjc build --target=valhalla --profile=restricted
 ```
 
 全応答に`schema_version`, `compiler_version`, `source_revision`, `policy_digest`, `target_profile`を含む。revisionはソースと依存lockの内容digestから生成する。診断の再利用時はpolicy digestも一致させる。JSONはstdout、進捗はstderr。通常診断でstack traceや環境変数を漏らさない。
@@ -40,11 +40,11 @@ context/inspectは正常な情報取得をexit 0とする。buildのincomplete�
 
 ```json
 {
-  "schema_version": "ngj.diagnostics/1",
+  "schema_version": "ngj.cli/1",
   "compiler_version": "design-v0.3",
   "source_revision": "sha256:example",
   "policy_digest": "sha256:policy-example",
-  "target_profile": "java25/restricted",
+  "target_profile": "valhalla/jdk28-ea-b24",
   "status": "invalid",
   "diagnostics": [{
     "id": "NGJ-EFFECT-001",
@@ -82,7 +82,7 @@ ownership診断ではmove/borrow/freezeの発生位置と寿命境界を返す�
   "compiler_version": "design-v0.3",
   "source_revision": "sha256:example",
   "policy_digest": "sha256:policy-example",
-  "target_profile": "java25/restricted",
+  "target_profile": "valhalla/jdk28-ea-b24",
   "hole_id": "net.protocol.parseFrames:body",
   "expected_type": "Result<List<PacketFrame<'a>>, ParseError>",
   "allowed_effects": [],

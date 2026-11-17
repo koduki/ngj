@@ -120,9 +120,9 @@ their implementation status, and explicit exclusions.
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
-| Java 25 class output | Yes | ✅ | Class-File API (standard since Java 24) |
-| `final class` for record | Yes | ✅ | JVM representation |
-| Sealed hierarchy for enum | Yes | 🔲 | JVM representation |
+| JDK 28 class output | Yes | ✅ | Class-File API, version 72 with preview minor version |
+| `final class` for record | Yes | ✅ | JVM representation (value class flags pending JDK 28 validation) |
+| Sealed hierarchy for enum | Yes | 🔲 | JVM representation (sealed abstract value class) |
 | Integer overflow fault | Yes | ✅ | Runtime check via Math.xxxExact |
 | Short-circuit evaluation | Yes | ✅ | Left-to-right |
 
@@ -197,69 +197,68 @@ The following features are explicitly excluded and must be rejected with
 
 ## Valhalla Foundation Migration Notes
 
-> **Important:** The current MVP compiler targets Java 25 baseline. The language specification v0.3 defines Valhalla value classes as the foundation. This section tracks what must change in the compiler to align with the spec.
+> **Important:** The MVP compiler builds on JDK 25 (toolchain) and targets JDK 28 EA + `--enable-preview` for runtime. The language specification v0.3 defines Valhalla value classes as the foundation. This section tracks what must change in the compiler to align with the spec.
 
-### Current State (Java 25 Baseline)
+### Current State (2026-11-17)
 
 The existing MVP compiler:
-- Outputs `final class` for `data` types
-- Uses reference semantics for all user types
-- Does not enforce value type restrictions
-- `==` behaves as reference comparison at JVM level
+- Builds with JDK 25 toolchain (java.lang.classfile API)
+- Outputs class files with version 72 (JDK 28) and preview minor version
+- Tests run on JDK 28 EA with `--enable-preview` in CI
+- Outputs `final class` without ACC_IDENTITY (value class structure)
+- Match expression codegen is incomplete (PR 3 will fix)
 
 ### Required Changes for Valhalla Foundation
 
-| Component | Current | Target | Priority |
-|-----------|---------|--------|----------|
-| **JDK Version** | Java 25 | JDK 28 EA + `--enable-preview` | P0 |
-| **data/record output** | `final class` | `value class` | P0 |
-| **enum output** | sealed identity hierarchy | sealed value hierarchy | P0 |
-| **Type checker** | No value/identity distinction | Enforce value type constraints | P0 |
-| **`==` semantics** | Reference comparison | Value comparison for value types | P0 |
-| **Match exhaustiveness** | Basic | Precise diagnostics with variant names | P0 |
-| **CI pipeline** | Java 25 | JDK 28 EA with preview flags | P0 |
-| **Test suite** | Reference semantics | Value semantics verification | P1 |
+| Component | Current | Target | Status |
+|-----------|---------|--------|--------|
+| **Build JDK** | JDK 25 toolchain | JDK 25 (class-file API) | ✅ |
+| **Runtime JDK** | JDK 25 | JDK 28 EA + `--enable-preview` | ✅ CI configured |
+| **Class file version** | 69 (JDK 25) | 72 (JDK 28) + preview | ✅ |
+| **data/record output** | `final class` | `value class` (no ACC_IDENTITY) | ✅ Code present |
+| **enum output** | sealed identity hierarchy | sealed abstract value class | 🔲 Needs PR 3 |
+| **Type checker** | Basic | value/identity distinction | 🔲 Partial |
+| **`==` semantics** | Generated equals() | Value comparison | ✅ Code present |
+| **Match exhaustiveness** | Basic check | Precise variant names | ✅ Diagnostic present |
+| **JDK 28 CI validation** | None | Full fixture tests | ✅ PR 1 |
 
 ### Compiler Migration Checklist
 
-- [ ] Update Gradle/build to use JDK 28 EA toolchain
-- [ ] Add `--enable-preview` to compile and runtime flags
-- [ ] Modify code generator to emit `value` modifier for data/record/enum
-- [ ] Implement sealed value hierarchy for enum variants
-- [ ] Update type checker to distinguish value vs identity types
-- [ ] Add `identity class` syntax support
-- [ ] Implement value-based `==` comparison semantics
-- [ ] Enhance match exhaustiveness diagnostics (include missing variant names)
-- [ ] Add negative tests for identity operations on value types
-- [ ] Verify `Int`/`Long`/`Bool` behave as value types
-- [ ] Add Java interop tests for null → Option conversion
+- [x] Update build.gradle.kts for JDK 28 class file version
+- [x] Add `--enable-preview` to test flags
+- [x] Configure CI to download and use JDK 28 EA
+- [x] Add JDK 28 runtime test harness (JDK28RuntimeTest.java)
+- [ ] Fix record constructor for JEP 401 strict fields (PR 3)
+- [ ] Fix match expression codegen (PR 3)
+- [ ] Fix Result/Option to use sealed value class hierarchy (PR 3)
+- [ ] Add `identity class` syntax support (future)
+- [ ] Add Java interop null → Option conversion (NULL-02, future)
 
 ### Enum Algebraic Data Type Support
 
 The v0.3 spec defines enums as sealed algebraic data types:
 
 ```
-// Must be supported
+// v0.3 syntax (must be supported)
 enum Shape {
-    Circle { radius: Float },
-    Rectangle { width: Float, height: Float },
-    Point
+    Circle(radius: Float),
+    Rectangle(width: Float, height: Float),
+    Point()
 }
 
 // Result and Option are ordinary enums
 enum Option<T> {
-    Some { value: T },
-    None
+    Some(value: T),
+    None()
 }
 ```
 
 Required compiler changes:
-- [ ] Parse payload-carrying enum variants
-- [ ] Generate sealed value hierarchy (interface + value classes)
-- [ ] Support nested/destructuring patterns in match
-- [ ] Implement exhaustiveness checking with precise diagnostics
-- [ ] Support generic enums
-- [ ] Ensure `?` operator works with library-defined Result/Option
+- [x] Parse payload-carrying enum variants
+- [ ] Generate sealed abstract value class hierarchy (PR 3)
+- [ ] Support nested/destructuring patterns in match (PR 3)
+- [x] Implement exhaustiveness checking with diagnostics
+- [ ] Full generic enum support (future profile)
 
 ### Risk: JDK 28 Preview Changes
 

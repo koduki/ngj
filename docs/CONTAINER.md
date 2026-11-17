@@ -29,22 +29,25 @@ docker run --rm ngj:latest --help
 docker run --rm ngj:latest --version
 
 # ソースファイルのチェック
-docker run --rm -v $(pwd)/examples:/src ngj:latest check /src/pricing.ngj
+docker run --rm -v $(pwd)/examples:/src ngj:latest check /src/syntax_v03.ngj
 
 # JSON形式で出力
-docker run --rm -v $(pwd)/examples:/src ngj:latest check --format=json /src/pricing.ngj
+docker run --rm -v $(pwd)/examples:/src ngj:latest check --format=json /src/syntax_v03.ngj
 
 # ビルド（クラスファイル生成）
-docker run --rm -v $(pwd)/examples:/src -v $(pwd)/out:/out ngj:latest build -o /out /src/pricing.ngj
+# Note: -o オプションは未実装。出力先は build/classes 固定
+docker run --rm -v $(pwd)/examples:/src ngj:latest build /src/syntax_v03.ngj
 ```
 
 ## イメージ構成
 
 | ターゲット | ベースイメージ | 用途 | サイズ目安 |
 |-----------|---------------|------|-----------|
-| `builder` | temurin:25-jdk | 内部ビルド用 | - |
-| `runtime` | temurin:25-jre | 本番実行用 | ~200MB |
+| `builder` | temurin:25-jdk | コンパイル用（JDK 25 toolchain） | - |
+| `runtime` | JDK 28 EA | 本番実行用（Valhalla preview必須） | ~300MB |
 | `development` | temurin:25-jdk | 開発・テスト用 | ~500MB |
+
+> **Note:** ランタイムは JDK 28 EA + `--enable-preview` が必要です。JDK 25 はビルドツールチェーン用です。
 
 ## 開発環境
 
@@ -130,6 +133,7 @@ docker run --rm -u $(id -u):$(id -g) -v $(pwd):/src ngj:latest check /src/file.n
 
 ## 技術仕様
 
-- **Java バージョン**: 25 (Eclipse Temurin)
+- **ビルド用 Java バージョン**: 25 (Eclipse Temurin) - java.lang.classfile API 使用
+- **ランタイム Java バージョン**: 28 EA + `--enable-preview` - JEP 401 Value Objects
 - **バイトコード生成**: Class-File API（標準ライブラリ、外部依存なし）
 - **ビルドツール**: Gradle 9.9.1
