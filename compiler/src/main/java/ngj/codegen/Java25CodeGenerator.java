@@ -852,26 +852,32 @@ public final class Java25CodeGenerator {
                 }
                 case "listOf" -> {
                     if (call.args().isEmpty()) {
+                        // Empty list via List.of()
                         ctx.code.invokestatic(
                             ClassDesc.of("java.util.List"),
                             "of",
                             MethodTypeDesc.of(ClassDesc.of("java.util.List"))
                         );
                     } else {
-                        ctx.code.ldc(call.args().size());
-                        ctx.code.anewarray(ConstantDescs.CD_Object);
+                        // Use ArrayList constructor to avoid interface static method issues on JDK 28
+                        ctx.code.new_(ClassDesc.of("java.util.ArrayList"));
+                        ctx.code.dup();
+                        ctx.code.invokespecial(
+                            ClassDesc.of("java.util.ArrayList"),
+                            ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void)
+                        );
                         for (int i = 0; i < call.args().size(); i++) {
                             ctx.code.dup();
-                            ctx.code.ldc(i);
                             generateExpr(ctx, call.args().get(i));
                             boxIfPrimitive(ctx, call.args().get(i));
-                            ctx.code.aastore();
+                            ctx.code.invokeinterface(
+                                ClassDesc.of("java.util.List"),
+                                "add",
+                                MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+                            );
+                            ctx.code.pop(); // discard boolean
                         }
-                        ctx.code.invokestatic(
-                            ClassDesc.of("java.util.List"),
-                            "of",
-                            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ConstantDescs.CD_Object.arrayType())
-                        );
                     }
                     return;
                 }
