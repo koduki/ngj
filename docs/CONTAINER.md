@@ -28,23 +28,30 @@ docker run --rm ngj:latest --help
 # バージョン確認
 docker run --rm ngj:latest --version
 
-# ソースファイルのチェック
-docker run --rm -v $(pwd)/examples:/src ngj:latest check /src/pricing.ngj
+# ソースファイルのチェック（syntax_v03.ngjは意図的なholeを含むv0.3正規構文例のためcheckはincomplete / exit 2）
+docker run --rm -v $(pwd)/examples:/src ngj:latest check /src/syntax_v03.ngj
+
+# 完全なv0.3ソースのチェック（exit 0 / valid）
+docker run --rm -v $(pwd)/compiler/src/test/resources/fixtures:/fixtures ngj:latest check /fixtures/examples/pricing_complete.ngj
 
 # JSON形式で出力
-docker run --rm -v $(pwd)/examples:/src ngj:latest check --format=json /src/pricing.ngj
+docker run --rm -v $(pwd)/compiler/src/test/resources/fixtures:/fixtures ngj:latest check --format=json /fixtures/examples/pricing_complete.ngj
 
-# ビルド（クラスファイル生成）
-docker run --rm -v $(pwd)/examples:/src -v $(pwd)/out:/out ngj:latest build -o /out /src/pricing.ngj
+# ビルド（クラスファイル生成、build/classesに出力；holeのない完全なソースが必要）
+docker run --rm -v $(pwd)/compiler/src/test/resources/fixtures:/fixtures -v $(pwd)/build:/app/build ngj:latest build /fixtures/examples/pricing_complete.ngj
+
+# Note: examples/syntax_v03.ngjはholeを含むためngjc buildではexit 2（NGJ-BUILD-001）で拒否される。
+# examples/の他の5ファイル（payment_service.ngj等）はv0.2設計スケッチでありcheckでinvalid（exit 1）となる。
+# 詳細はexamples/README.mdを参照。
 ```
 
 ## イメージ構成
 
 | ターゲット | ベースイメージ | 用途 | サイズ目安 |
 |-----------|---------------|------|-----------|
-| `builder` | temurin:25-jdk | 内部ビルド用 | - |
-| `runtime` | temurin:25-jre | 本番実行用 | ~200MB |
-| `development` | temurin:25-jdk | 開発・テスト用 | ~500MB |
+| `builder` | eclipse-temurin:25-jdk-jammy | 内部ビルド用（Gradleコンパイル） | - |
+| `runtime` | JDK 28 EA Build 24 + debian:bookworm-slim | 本番実行用（`--enable-preview`でJEP 401対応） | ~200MB |
+| `development` | eclipse-temurin:25-jdk-jammy | 開発・テスト用 | ~500MB |
 
 ## 開発環境
 
@@ -69,7 +76,7 @@ docker run --rm -it ngj:dev bash
 docker run --rm \
   -v $(pwd):/workspace \
   -w /workspace \
-  eclipse-temurin:25-jdk \
+  eclipse-temurin:25-jdk-jammy \
   ./gradlew build --no-daemon
 ```
 
@@ -130,6 +137,6 @@ docker run --rm -u $(id -u):$(id -g) -v $(pwd):/src ngj:latest check /src/file.n
 
 ## 技術仕様
 
-- **Java バージョン**: 25 (Eclipse Temurin)
+- **Java バージョン**: 25+ (Eclipse Temurin) for `valhalla-compat`; JDK 28 EA + `--enable-preview` for full Valhalla value classes
 - **バイトコード生成**: Class-File API（標準ライブラリ、外部依存なし）
 - **ビルドツール**: Gradle 9.9.1

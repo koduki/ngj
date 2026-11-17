@@ -32,7 +32,7 @@ compilerとテストはリポジトリに存在する。以下は受入条件で
 | CONTRACT-01 | seed付き反例再現 | solver unknownをproved扱いしない | 3/4 |
 | OBS-01 | forkへのcontext継承 | SecretのBaggage/attribute流出 | 3 |
 | REPLAY-01 | 記録I/Oの逐次再実行 | 不一致時のlive fallback禁止 | 3 |
-| VALUE-01 | data/record/enumがvalue classとして出力 | identity classへの誤出力 | 1 |
+| VALUE-01 | `record`/`enum`がvalue classとして出力 | identity classへの誤出力 | 1 |
 | VALUE-02 | `==`がvalue型で値比較 | 参照比較への誤り | 1 |
 | VALUE-03 | Int/Long/Boolがvalue型として動作 | boxing/unboxingの露出 | 1 |
 | NULL-01 | NGJコードで`null`リテラル使用不可 | nullの受理 | 1 |
@@ -79,7 +79,7 @@ Python/Rust/Kotlinとの言語間比較は後段。ライブラリ成熟度と�
 
 測定はJDK/GraalVM build、OS/arch、CPU、heap、GC、flags、依存hash、warmup、反復数を記録する。
 
-- `data`/Result/Option/特殊化: allocation bytes/op、throughput、p50/p95/p99、code size。
+- `record`/Result/Option/特殊化: allocation bytes/op、throughput、p50/p95/p99、code size。
 - build/freeze/slice: payloadコピー量とwrapper割当を分離。永続コレクション更新の割当も測る。
 - concurrency: 同時接続、CPU/メモリ、queue待ち、pinning、cancel/cleanup latency。
 - instrumentation: 無効/有効/sampling/exporter停止時の差を測る。監査とtelemetryを区別。

@@ -1,6 +1,6 @@
 # NGJ v0.3 grammar
 
-> Normative v0.3 grammar implemented by the compiler.
+> Normative v0.3 grammar. Core features are implemented; some constructs are staged or deferred (see notes).
 > The archived [v0.2 grammar](EBNF_V02.md) documents the pre-migration baseline.
 > Valhalla foundation and enum ADT semantics: Refs #7.
 
@@ -9,7 +9,7 @@
 Every construct has one source spelling. Package/import declarations and statements end with semicolons. Blocks use braces. Newlines are whitespace. Keywords cannot be used as identifiers, including path segments.
 
 - Declarations and statements use `package`, `public`, `fn`, `record`, `enum`, `val`, `var`, `return`.
-- Type names are `Int`, `Long`, `Bool`, `String`, `Unit`, `Result<T,E>`, `Option<T>`.
+- Core implemented types in v0.3 MVP are `Int`, `Long`, `Bool`, `String`, `Unit`, `Result<T,E>`, `Option<T>`, `List<T>`. (`Byte`, `Float`, `Double` are staged for a future release: recognized as type names by name resolution, while floating-point literals such as `3.14159` are not lexed and yield `NGJ-PARSE-007`, arithmetic on them yields `NGJ-TYPE-006`, and code generation is unimplemented.)
 - Functions require parameter types, result types and `effects(...)`, including private functions.
 - Arguments and constructor fields are positional, in declaration order. Named/default/variadic arguments are deferred.
 - Imports name one symbol per declaration. Grouped imports, aliases and wildcards are deferred.
@@ -85,15 +85,15 @@ The core recognizes type application syntactically, then checks the supported ty
 
 The block notation above has a shared expression prefix. A recursive-descent parser handles it as follows.
 
-1. On `val`/`var`, parse a binding (`binding`).
+1. On `val`/`var`, parse a binding (`binding`), requiring a trailing `;` (`NGJ-PARSE-007`).
 2. On `return`, parse a return statement (`returnStmt`), requiring a trailing `;` (`NGJ-PARSE-008`).
-3. On `IDENT` followed by a single equals token, parse assignment (`assignment`).
+3. On `IDENT` followed by a single equals token, parse assignment (`assignment`), requiring a trailing `;` (`NGJ-PARSE-007`).
 4. Otherwise parse one expression. A following semicolon ends a statement. If the expression is a block-structured `if` or `match` not at the end of the block, it may stand as a statement without a trailing semicolon (supporting guard clauses such as `if (x < 0) { return 0; }`). A following closing brace makes the expression the tail of the block. Any other token produces a missing-semicolon diagnostic (`NGJ-PARSE-008`).
 
 Declarations cannot appear inside blocks.
 - **Function bodies (`fn`)**: A function with a non-`Unit` return type must exit via `return <expr>;` along every execution path (for example, ending with `return <expr>;` or returning in all branches of an `if`/`else` or `match`). A bare tail expression at the top level of a non-`Unit` function body (or a path without `return`) produces `NGJ-RETURN-001` (except when the body is a bare typed hole `{ ?hole }`, which remains `INCOMPLETE` with `NGJ-HOLE-001`). A `Unit` function may omit `return`, use `return;`, or use `return ();`.
 - **Expression blocks (`if`, `match`, `for-yield`)**: When used as value expressions, branches evaluate to their tail expression (or may exit the enclosing function early via `return <expr>;`).
-- **Expression statements**: Non-`return` expression statements must have `Unit` type (`NGJ-TYPE-016`), preventing silently discarding a value or `Result`.
+- **Expression statements**: Non-`return` expression statements must have `Unit` type (`NGJ-TYPE-017`), preventing silently discarding a value or `Result`.
 
 An if with else requires both branch types to agree under the expected type (unless a branch diverges via `return`). An if without else requires a Unit or returning then-branch and produces Unit. Braces are mandatory even for nested else-if. Match checks all variants and compatible arm result types. There are no implicit numeric widenings.
 
@@ -165,8 +165,8 @@ The core grammar's `enum` and `variant` rules support payload-carrying variants:
 
 ```
 enum Shape {
-    Circle(radius: Float),
-    Rectangle(width: Float, height: Float),
+    Circle(radius: Int),
+    Rectangle(width: Int, height: Int),
     Point()
 }
 ```
@@ -190,29 +190,31 @@ enum Result<T, E> {
 Match expressions **must** cover all enum variants. Missing variants produce a compile error with **precise diagnostics** naming the missing variants. This is critical for the AI fix loop.
 
 ```
-// Error: missing variant 'Point' in match expression
-fn area(shape: Shape) -> Float effects() {
+// Error: NGJ-MATCH-001 (missing variant 'Point' in match expression)
+fn area(shape: Shape) -> Int effects() {
     return match (shape) {
-        case Circle(r) => { 3.14159 * r * r },
+        case Circle(r) => { 3 * r * r },
         case Rectangle(w, h) => { w * h }
-        // Point is missing → compile error with diagnostic
+        // Point() is missing → NGJ-MATCH-001
     };
 }
 ```
 
+> **Note (v0.3 MVP numeric scope):** Because floating-point literals and arithmetic are staged rather than implemented in v0.3 MVP, writing `3.14159 * r * r` with `Float` produces `NGJ-PARSE-007` (lexed as `3`, `.`, `14159`) and `NGJ-TYPE-006` in the current compiler.
+
 ### 8.4 JVM representation
 
-Records and enum variants compile to Valhalla value classes in a sealed hierarchy:
+Records and enum variants compile to sealed hierarchies with JEP 401 value class semantics (`--target=valhalla`, default). Value classes have no object identity (no `ACC_IDENTITY` flag) and use `ACC_STRICT_INIT` (`ACC_STRICT`) fields initialized before `super()`:
 
 ```
 // NGJ
-enum Shape { Circle(r: Float), Rectangle(w: Float, h: Float), Point() }
+enum Shape { Circle(r: Int), Rectangle(w: Int, h: Int), Point() }
 
-// JVM output (conceptual)
-sealed value interface Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {}
-final value class Shape.Circle implements Shape { float r; }
-final value class Shape.Rectangle implements Shape { float w; float h; }
-final value class Shape.Point implements Shape {}
+// JVM output overview (JEP 401 value classes, no ACC_IDENTITY flag)
+sealed abstract value class Shape permits Shape$Circle, Shape$Rectangle, Shape$Point {}
+final value class Shape$Circle extends Shape { public final strict int r; }
+final value class Shape$Rectangle extends Shape { public final strict int w; public final strict int h; }
+final value class Shape$Point extends Shape {}
 ```
 
 ### 8.5 Identity types (staged feature)
@@ -221,4 +223,4 @@ Identity types (`identity class`, `resource`, `actor`) require explicit declarat
 
 ## 9. Migration acceptance
 
-See [SYNTAX_MIGRATION.md](SYNTAX_MIGRATION.md) for change mapping, implementation work and positive/negative cases. This EBNF has undergone document review only. Parser conformance and AI-generation measurements are required before declaring v0.3 supported.
+See [SYNTAX_MIGRATION.md](SYNTAX_MIGRATION.md) for change mapping, implementation work and positive/negative cases. Core grammar conformance, type checking, `--target=valhalla` / `java25` codegen, and JDK 28 EA runtime verification are implemented and tested in CI; staged post-core constructs and AI-generation ablation experiments are tracked in [MVP_COVERAGE.md](MVP_COVERAGE.md) and [VALIDATION.md](VALIDATION.md).

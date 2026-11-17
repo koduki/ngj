@@ -29,7 +29,7 @@ The mapping is semantic where return/propagation/callback boundaries change.
 3. Resource/concurrency extension adds lexical borrowing, `build`, `scope`/`fork` and cleanup.
 4. Richer collection protocols, effects polymorphism, contracts and information-flow rules follow their own acceptance tests.
 
-An unavailable feature produces `unsupported_feature`. All function signatures specify `effects`, including private functions. The initial core accepts `effects()` only.
+An unavailable feature produces an unsupported-feature error diagnostic (`NGJ-UNSUPPORTED-001`, `NGJ-EFFECT-001`, `NGJ-PARSE-001`, etc.). All function signatures specify `effects`, including private functions. The initial core accepts `effects()` only.
 
 ## Control-flow boundaries
 
@@ -88,28 +88,31 @@ while (index < limit) { index = index + 1; };
 |---|---|
 | `val n = 1; return n;` at end of `Int` function | valid |
 | `Int` function with bare tail `42` (missing `return`) | invalid, `NGJ-RETURN-001` diagnostic |
-| `Int` function ending in `1;` | invalid, lost-result diagnostic (`NGJ-TYPE-016` / `NGJ-RETURN-001`) |
+| `Int` function ending in `1;` | invalid, lost-result diagnostic (`NGJ-TYPE-017` / `NGJ-RETURN-001`) |
 | `return 42` without semicolon | missing-semicolon diagnostic (`NGJ-PARSE-008`) |
 | early return in guard clause (`if (x < 0) { return 0; } return x;`) | valid |
-| adjacent bindings separated only by newline | missing-semicolon diagnostic (`NGJ-PARSE-008`) |
-| `if` with mismatched branch types | type error (`NGJ-TYPE-003`) |
-| `if` without `else` and non-`Unit` body | type error (`NGJ-TYPE-004`) |
+| adjacent `val`/`var` bindings separated only by newline | missing-semicolon diagnostic (`NGJ-PARSE-007`) |
+| `if` with mismatched branch types | type error (`NGJ-TYPE-011`) |
+| `if` without `else` and non-`Unit` body | type error (`NGJ-TYPE-021`) |
 | incomplete `enum` `match` | exhaustiveness error (`NGJ-MATCH-001`) |
 | `None()` and `case None()` | valid `Option` construction/pattern |
-| bare `None` in expression | rejected constructor-without-call |
+| bare `None`/`Some`/`Ok`/`Err` in expression | rejected (`NGJ-TYPE-022`), must use parentheses e.g. `None()` |
 | bare `x` pattern | binding, never guessed to be a constant |
 | `f()?.field` | same AST meaning as `(f()?).field` |
 | `a + f()?` | `a + (f()?)` |
 | `?body` | incomplete, hole position/type preserved (`NGJ-HOLE-001`) |
-| postfixed `?` on `Option` | type error (`NGJ-PROP-001`) |
+| postfixed `?` on `Option` | type error (`NGJ-TYPE-020`) |
 | malformed/unclosed angle arguments | bounded diagnostic recovery |
-| `f::<T>(x)` | syntactically recognized, unsupported if profile lacks generic calls |
+| `f::<T>(x)` | syntactically recognized, rejected in MVP (`NGJ-UNSUPPORTED-001`) |
 | `List` generator, with/without `yield` | `List<U>`/`Unit` respectively |
+| `for` over non-`List` expression | type error (`NGJ-TYPE-026`) |
 | `for` body containing `?` or `return` | propagation-boundary diagnostic (`NGJ-PROP-002`) |
 | callback capturing outer `var` | capture diagnostic (`NGJ-CAPTURE-001`) |
 | `while` updating local `var` | valid in sequential profile |
 | obsolete `module`/`pub`/`data`/`let`/`! {}` spellings | migration diagnostic (`NGJ-MIGRATE-*`) |
-| wildcard/grouped import, named/default args | unsupported syntax (`NGJ-PARSE-001`) |
+| wildcard import (`import pkg.*;`) | unsupported syntax (`NGJ-PARSE-001`) |
+| grouped import (`import pkg.{A, B};`) | migration diagnostic (`NGJ-MIGRATE-002`) |
+| named/default args | unsupported syntax (`NGJ-PARSE-007`) |
 
 ## Work items
 
