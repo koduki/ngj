@@ -491,7 +491,19 @@ public final class TypeChecker {
                 case UNIT -> new UnitTypeExpr(lit.span());
             };
             
-            case IdentExpr ident -> lookupLocal(ident.name());
+            case IdentExpr ident -> {
+                var name = ident.name();
+                // Reject bare Option/Result variant names without parentheses
+                if (name.equals("None") || name.equals("Some") || name.equals("Ok") || name.equals("Err")) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-TYPE-022",
+                        "'" + name + "' must be called with parentheses: " + name + "()",
+                        ident.span()
+                    ));
+                    yield null;
+                }
+                yield lookupLocal(name);
+            }
             
             case HoleExpr hole -> {
                 // Record hole context for context retrieval

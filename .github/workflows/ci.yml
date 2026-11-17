@@ -33,35 +33,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Setup JDK 21 for Gradle
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '21'
-    
     - name: Setup JDK 25 for compilation (toolchain)
       uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
         java-version: '25'
-    
-    - name: Download JDK 28 EA Build 24 (Valhalla runtime)
-      run: |
-        echo "Downloading JDK 28 EA Build 24 with JEP 401 Value Objects..."
-        curl -sSL -o /tmp/jdk28.tar.gz "$VALHALLA_JDK_URL"
-        sudo mkdir -p /opt/jdk-28
-        sudo tar -xzf /tmp/jdk28.tar.gz -C /opt/jdk-28 --strip-components=1
-        echo "JAVA_HOME_28=/opt/jdk-28" >> $GITHUB_ENV
-        
-    - name: Verify JDK installations
-      run: |
-        echo "=== Gradle JDK (21) ==="
-        java --version
-        echo ""
-        echo "=== Valhalla JDK 28 ==="
-        /opt/jdk-28/bin/java --version
-        /opt/jdk-28/bin/java --enable-preview -version
-        echo "Preview features enabled successfully"
     
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
@@ -74,7 +50,7 @@ jobs:
       env:
         NGJ_BUILD_JDK_VERSION: "25"
     
-    - name: Run tests
+    - name: Run tests (JDK 25)
       run: ./gradlew test
       env:
         NGJ_BUILD_JDK_VERSION: "25"
@@ -83,7 +59,107 @@ jobs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: test-results
+        name: test-results-jdk25
+        path: compiler/build/reports/tests/
+
+  test-jdk28:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup JDK 25 for Gradle
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '25'
+    
+    - name: Download JDK 28 EA Build 24 (Valhalla)
+      run: |
+        echo "Downloading JDK 28 EA Build 24 with JEP 401 Value Objects..."
+        curl -sSL -o /tmp/jdk28.tar.gz "$VALHALLA_JDK_URL"
+        sudo mkdir -p /opt/jdk-28
+        sudo tar -xzf /tmp/jdk28.tar.gz -C /opt/jdk-28 --strip-components=1
+        
+    - name: Verify JDK installations
+      run: |
+        echo "=== Gradle JDK (25) ==="
+        java --version
+        echo ""
+        echo "=== Valhalla JDK 28 ==="
+        /opt/jdk-28/bin/java --version
+        /opt/jdk-28/bin/java --enable-preview -version
+    
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+    
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+    
+    - name: Run JDK28RuntimeTest with JDK 28 test JVM
+      run: |
+        echo "=== Running JDK28RuntimeTest on JDK 28 EA ==="
+        echo "Gradle runs on JDK 25, tests execute on JDK 28"
+        ./gradlew test --tests "ngj.JDK28RuntimeTest" \
+          -Dorg.gradle.java.installations.paths=/opt/jdk-28 \
+          -Dtest.jvm.args="--enable-preview" \
+          -PtestJavaVersion=28
+      env:
+        NGJ_BUILD_JDK_VERSION: "25"
+        NGJ_RUNTIME_CLASS_VERSION: "72"
+        JAVA_HOME_28: /opt/jdk-28
+    
+    - name: Run CodeGenTest on JDK 28 (verify classfile generation)
+      run: |
+        echo "=== Running CodeGenTest on JDK 28 EA ==="
+        ./gradlew test --tests "ngj.CodeGenTest" \
+          -Dorg.gradle.java.installations.paths=/opt/jdk-28 \
+          -Dtest.jvm.args="--enable-preview" \
+          -PtestJavaVersion=28
+      env:
+        NGJ_BUILD_JDK_VERSION: "25"
+        NGJ_RUNTIME_CLASS_VERSION: "72"
+        JAVA_HOME_28: /opt/jdk-28
+    
+    - name: Verify runtime tests actually ran (not skipped)
+      run: |
+        echo "=== Verifying JDK 28 Runtime Tests Executed ==="
+        if [ ! -f compiler/build/reports/tests/test/index.html ]; then
+          echo "ERROR: Test report not found"
+          exit 1
+        fi
+        
+        # Count passed and skipped tests
+        PASSED=$(grep -o 'passed"' compiler/build/reports/tests/test/index.html 2>/dev/null | wc -l || echo 0)
+        SKIPPED=$(grep -o 'skipped"' compiler/build/reports/tests/test/index.html 2>/dev/null | wc -l || echo 0)
+        FAILED=$(grep -o 'failed"' compiler/build/reports/tests/test/index.html 2>/dev/null | wc -l || echo 0)
+        
+        echo "Test results:"
+        echo "  Passed: $PASSED"
+        echo "  Skipped: $SKIPPED"
+        echo "  Failed: $FAILED"
+        
+        # Fail if no tests passed (they were all skipped)
+        if [ "$PASSED" -eq 0 ]; then
+          echo "ERROR: No tests passed! All tests may have been skipped."
+          echo "This likely means JDK 28 was not properly configured for test execution."
+          exit 1
+        fi
+        
+        # Fail if any tests failed
+        if [ "$FAILED" -gt 0 ]; then
+          echo "ERROR: $FAILED test(s) failed"
+          exit 1
+        fi
+        
+        echo "✓ $PASSED tests passed on JDK 28"
+    
+    - name: Upload JDK 28 test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-jdk28
         path: compiler/build/reports/tests/
 
   integration-test:
@@ -92,12 +168,6 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Setup JDK 21 for Gradle
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '21'
     
     - name: Setup JDK 25 for compilation (toolchain)
       uses: actions/setup-java@v4
@@ -123,14 +193,194 @@ jobs:
       env:
         NGJ_BUILD_JDK_VERSION: "25"
     
-    - name: Run fixture tests with Valhalla JDK
+    - name: Verify compiler on JDK 28
       run: |
-        /opt/jdk-28/bin/java --enable-preview -jar compiler/build/libs/compiler-*-all.jar --version || true
+        echo "=== Verifying NGJ Compiler on JDK 28 EA ==="
+        /opt/jdk-28/bin/java --enable-preview -jar compiler/build/libs/compiler-*-all.jar --version
+        /opt/jdk-28/bin/java --enable-preview -jar compiler/build/libs/compiler-*-all.jar --help
+      env:
+        NGJ_SKIP_JDK_CHECK: "false"
         
-    - name: Verify Valhalla value class output
+    - name: Check positive fixtures
       run: |
-        echo "Testing value class generation..."
-        /opt/jdk-28/bin/java --enable-preview -jar compiler/build/libs/compiler-*-all.jar check fixtures/positive/simple_function.ngj || true
+        echo "=== Checking Positive Fixtures ==="
+        COMPILER_JAR=$(ls compiler/build/libs/compiler-*-all.jar)
+        
+        PASS=0
+        FAIL=0
+        
+        for fixture in compiler/src/test/resources/fixtures/positive/*.ngj; do
+          name=$(basename "$fixture")
+          echo "--- Checking: $name ---"
+          
+          if /opt/jdk-28/bin/java --enable-preview -jar "$COMPILER_JAR" check "$fixture" 2>&1; then
+            echo "  [PASS] Type check passed"
+            PASS=$((PASS + 1))
+          else
+            echo "  [FAIL] Type check failed"
+            FAIL=$((FAIL + 1))
+          fi
+        done
+        
+        echo ""
+        echo "=== Positive Fixture Results ==="
+        echo "Passed: $PASS"
+        echo "Failed: $FAIL"
+        
+        if [ $FAIL -gt 0 ]; then
+          echo "ERROR: $FAIL unexpected type check failures"
+          exit 1
+        fi
+      env:
+        NGJ_SKIP_JDK_CHECK: "false"
+        
+    - name: Verify negative fixtures produce errors
+      run: |
+        echo "=== Checking Negative Fixtures ==="
+        COMPILER_JAR=$(ls compiler/build/libs/compiler-*-all.jar)
+        
+        PASS=0
+        FAIL=0
+        
+        for fixture in compiler/src/test/resources/fixtures/negative/*.ngj; do
+          name=$(basename "$fixture")
+          echo "--- Checking: $name (should fail) ---"
+          
+          if /opt/jdk-28/bin/java --enable-preview -jar "$COMPILER_JAR" check "$fixture" 2>&1; then
+            echo "  [FAIL] $name should have failed but passed"
+            FAIL=$((FAIL + 1))
+          else
+            echo "  [PASS] $name failed as expected"
+            PASS=$((PASS + 1))
+          fi
+        done
+        
+        echo ""
+        echo "=== Negative Fixture Results ==="
+        echo "Correctly rejected: $PASS"
+        echo "Incorrectly accepted: $FAIL"
+        
+        if [ $FAIL -gt 0 ]; then
+          echo "ERROR: $FAIL negative fixtures were incorrectly accepted"
+          exit 1
+        fi
+      env:
+        NGJ_SKIP_JDK_CHECK: "false"
+        
+    - name: Build and verify classes on JDK 28
+      run: |
+        echo "=== Building and Loading Classes on JDK 28 ==="
+        COMPILER_JAR=$(ls compiler/build/libs/compiler-*-all.jar)
+        mkdir -p build/jdk28-runtime
+        
+        # Expected failures (to be fixed in PR 3)
+        # | Fixture            | Issue                                    |
+        # |--------------------|------------------------------------------|
+        # | data_type.ngj      | ClassFormatError (missing strict flag)   |
+        # | enum_match.ngj     | match returns first arm for all variants |
+        # | result_option.ngj  | ClassFormatError (DivError record)       |
+        # | option_match.ngj   | VerifyError (Option match codegen)       |
+        # | for_yield.ngj      | VerifyError (for-yield codegen)          |
+        # | listof_call.ngj    | IncompatibleClassChangeError             |
+        EXPECTED_RUNTIME_FAILURES="data_type.ngj enum_match.ngj result_option.ngj option_match.ngj for_yield.ngj listof_call.ngj"
+        
+        PASS=0
+        FAIL=0
+        EXPECTED_FAIL=0
+        
+        for fixture in compiler/src/test/resources/fixtures/positive/*.ngj; do
+          name=$(basename "$fixture")
+          echo "--- Building and Loading: $name ---"
+          
+          # Build the fixture
+          rm -rf build/classes
+          if ! /opt/jdk-28/bin/java --enable-preview -jar "$COMPILER_JAR" build "$fixture" 2>&1; then
+            echo "  Build: FAILED"
+            FAIL=$((FAIL + 1))
+            continue
+          fi
+          echo "  Build: OK"
+          
+          # Find generated class files
+          CLASSES=$(find build/classes -name "*.class" 2>/dev/null)
+          if [ -z "$CLASSES" ]; then
+            echo "  No class files generated"
+            FAIL=$((FAIL + 1))
+            continue
+          fi
+          
+          # Verify magic number and version
+          CLASS_OK=true
+          for classfile in $CLASSES; do
+            echo "  Generated: $classfile"
+            
+            # Check CAFEBABE magic
+            MAGIC=$(head -c 4 "$classfile" | od -An -tx1 | tr -d ' ')
+            if [ "$MAGIC" != "cafebabe" ]; then
+              echo "    Magic: INVALID ($MAGIC)"
+              CLASS_OK=false
+              continue
+            fi
+            echo "    Magic: OK (CAFEBABE)"
+            
+            # Check class file version (should be 72 for JDK 28)
+            VERSION=$(head -c 8 "$classfile" | tail -c 2 | od -An -tu2 --endian=big | tr -d ' ')
+            echo "    Version: $VERSION (expected 72)"
+          done
+          
+          # Try to load the class on JDK 28
+          if echo "$EXPECTED_RUNTIME_FAILURES" | grep -q "$name"; then
+            echo "  [EXPECTED FAILURE] $name - known runtime issue (PR 3)"
+            EXPECTED_FAIL=$((EXPECTED_FAIL + 1))
+          elif $CLASS_OK; then
+            # Create a simple loader test
+            cat > /tmp/LoadTest.java << 'LOADER'
+        import java.net.URL;
+        import java.net.URLClassLoader;
+        import java.nio.file.Path;
+        public class LoadTest {
+            public static void main(String[] args) throws Exception {
+                URL[] urls = { Path.of(args[0]).toUri().toURL() };
+                try (URLClassLoader loader = new URLClassLoader(urls)) {
+                    for (int i = 1; i < args.length; i++) {
+                        Class<?> c = loader.loadClass(args[i]);
+                        System.out.println("Loaded: " + c.getName());
+                    }
+                }
+            }
+        }
+        LOADER
+            /opt/jdk-28/bin/javac --enable-preview --source 28 /tmp/LoadTest.java -d /tmp
+            
+            # Get class names from files
+            CLASS_NAMES=""
+            for cf in $CLASSES; do
+              cn=$(echo "$cf" | sed 's|build/classes/||; s|\.class$||; s|/|.|g')
+              CLASS_NAMES="$CLASS_NAMES $cn"
+            done
+            
+            if /opt/jdk-28/bin/java --enable-preview -cp /tmp LoadTest build/classes $CLASS_NAMES 2>&1; then
+              echo "  Load: OK"
+              PASS=$((PASS + 1))
+            else
+              echo "  Load: FAILED"
+              FAIL=$((FAIL + 1))
+            fi
+          fi
+        done
+        
+        echo ""
+        echo "=== Runtime Build Results ==="
+        echo "Passed: $PASS"
+        echo "Failed: $FAIL"
+        echo "Expected failures (PR 3): $EXPECTED_FAIL"
+        
+        if [ $FAIL -gt 0 ]; then
+          echo "ERROR: $FAIL unexpected runtime failures"
+          exit 1
+        fi
+      env:
+        NGJ_SKIP_JDK_CHECK: "false"
 
   container-build:
     runs-on: ubuntu-latest

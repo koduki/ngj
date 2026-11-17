@@ -1,0 +1,6 @@
+// listOf function call (expected failure: IncompatibleClassChangeError)
+package test.listof;
+
+public fn makeList() -> List<Int> effects() {
+    return listOf(1, 2, 3);
+}
