@@ -515,7 +515,10 @@ public final class Java25CodeGenerator {
                 default -> ctx.code.aload(slot);
             }
         } else {
-            ctx.code.aconst_null();
+            // Unresolved identifier - this should have been caught by type checking
+            throw new IllegalStateException(
+                "Unresolved identifier '" + ident.name() + "' at codegen. " +
+                "This indicates a type checker bug - unresolved identifiers should be diagnosed.");
         }
     }
     
