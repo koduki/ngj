@@ -6,11 +6,9 @@
 # Pinned build: JDK 28 EA Build 24 (2026-11-12)
 # Download: https://jdk.java.net/28/
 #
-# JEP 401 provides:
-# - Value classes declared with the `value` modifier
-# - Value objects that are immutable and lack object identity
-# - `==` operator compares value objects by field values
-# - Sealed hierarchies with PermittedSubclasses attribute
+# Build Strategy:
+# - Builder stage: Uses JDK 25 (Gradle compatible) for compilation
+# - Runtime stage: Uses JDK 28 EA with --enable-preview for Valhalla features
 # =============================================================================
 
 ARG VALHALLA_JDK_VERSION=28
@@ -19,7 +17,7 @@ ARG VALHALLA_JDK_DATE=2026-11-12
 ARG VALHALLA_JDK_URL=https://download.java.net/java/early_access/jdk28/24/GPL/openjdk-28-ea+24_linux-x64_bin.tar.gz
 
 # =============================================================================
-# Stage 0: JDK Download - Fetch JDK 28 EA Build 24
+# Stage 0: JDK Download - Fetch JDK 28 EA Build 24 (for runtime)
 # =============================================================================
 FROM debian:bookworm-slim AS jdk-download
 
@@ -36,13 +34,9 @@ RUN curl -sSL -o /tmp/jdk.tar.gz "${VALHALLA_JDK_URL}" \
     && rm /tmp/jdk.tar.gz
 
 # =============================================================================
-# Stage 1: Builder - Compile the NGJ compiler
+# Stage 1: Builder - Compile the NGJ compiler with JDK 25
 # =============================================================================
-FROM debian:bookworm-slim AS builder
-
-COPY --from=jdk-download /opt/jdk /opt/jdk
-ENV JAVA_HOME=/opt/jdk
-ENV PATH="${JAVA_HOME}/bin:${PATH}"
+FROM eclipse-temurin:25-jdk-jammy AS builder
 
 WORKDIR /build
 
@@ -61,7 +55,7 @@ COPY compiler/src/ compiler/src/
 RUN ./gradlew :compiler:fatJar --no-daemon
 
 # =============================================================================
-# Stage 2: Runtime - Minimal image for running the compiler
+# Stage 2: Runtime - Minimal image for running the compiler with JDK 28
 # =============================================================================
 FROM debian:bookworm-slim AS runtime
 
@@ -90,13 +84,9 @@ ENTRYPOINT ["java", "--enable-preview", "-jar", "/app/ngjc.jar"]
 CMD ["--help"]
 
 # =============================================================================
-# Stage 3: Development - Full JDK with source for development
+# Stage 3: Development - Full JDK 25 for development (Gradle compatible)
 # =============================================================================
-FROM debian:bookworm-slim AS development
-
-COPY --from=jdk-download /opt/jdk /opt/jdk
-ENV JAVA_HOME=/opt/jdk
-ENV PATH="${JAVA_HOME}/bin:${PATH}"
+FROM eclipse-temurin:25-jdk-jammy AS development
 
 WORKDIR /workspace
 
