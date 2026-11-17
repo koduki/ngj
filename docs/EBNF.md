@@ -9,7 +9,7 @@
 Every construct has one source spelling. Package/import declarations and statements end with semicolons. Blocks use braces. Newlines are whitespace. Keywords cannot be used as identifiers, including path segments.
 
 - Declarations and statements use `package`, `public`, `fn`, `record`, `enum`, `val`, `var`, `return`.
-- Type names are `Int`, `Long`, `Float`, `Double`, `Byte`, `Bool`, `String`, `Unit`, `Result<T,E>`, `Option<T>`, `List<T>`.
+- Type names are `Int`, `Long`, `Bool`, `String`, `Unit`, `Result<T,E>`, `Option<T>`, `List<T>`. (`Float`, `Double`, `Byte` are staged for future release.)
 - Functions require parameter types, result types and `effects(...)`, including private functions.
 - Arguments and constructor fields are positional, in declaration order. Named/default/variadic arguments are deferred.
 - Imports name one symbol per declaration. Grouped imports, aliases and wildcards are deferred.
@@ -202,17 +202,17 @@ fn area(shape: Shape) -> Float effects() {
 
 ### 8.4 JVM representation
 
-Records and enum variants compile to sealed hierarchies with value semantics. Current output uses identity classes with structural equality enforced at the language level; actual JEP 401 `value class` bytecode is gated on the final JDK 28 release:
+Records and enum variants compile to sealed hierarchies with JEP 401 value class semantics (`--target=valhalla`, default). Value classes have no object identity (no `ACC_IDENTITY` flag) and are compared by field values:
 
 ```
 // NGJ
-enum Shape { Circle(r: Float), Rectangle(w: Float, h: Float), Point() }
+enum Shape { Circle(r: Int), Rectangle(w: Int, h: Int), Point() }
 
-// JVM output (conceptual, using value class syntax for clarity)
+// JVM output (JEP 401 value classes, no ACC_IDENTITY flag)
 sealed abstract class Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {}
-final class Shape.Circle extends Shape { float r; }
-final class Shape.Rectangle extends Shape { float w; float h; }
-final class Shape.Point extends Shape {}
+final value class Shape.Circle extends Shape { int r; }
+final value class Shape.Rectangle extends Shape { int w; int h; }
+final value class Shape.Point extends Shape {}
 ```
 
 ### 8.5 Identity types (staged feature)

@@ -38,96 +38,56 @@ All numeric types are **value types**. There is no primitive/boxed distinction v
 
 ### 2.1 Int (32-bit signed integer)
 
-```
-// Conceptual definition (built-in, not user-definable)
-// Int is a value type wrapping JVM int
-record Int();  // Internal representation; actual Int has no user-visible fields
+`Int` is a built-in value type wrapping JVM `int`. It supports arithmetic operators (`+`, `-`, `*`, `/`, `%`) which fault on overflow/division-by-zero, and checked operations that return `Result`:
 
-// Operations
-fn add(a: Int, b: Int) -> Int effects() { ... }      // Overflow: task fault
-fn sub(a: Int, b: Int) -> Int effects() { ... }      // Overflow: task fault
-fn mul(a: Int, b: Int) -> Int effects() { ... }      // Overflow: task fault
-fn div(a: Int, b: Int) -> Int effects() { ... }      // Division by zero: task fault
-fn mod(a: Int, b: Int) -> Int effects() { ... }
+| Operation | Syntax/Function | Overflow behavior |
+|-----------|-----------------|-------------------|
+| Addition | `a + b` | Task fault |
+| Subtraction | `a - b` | Task fault |
+| Multiplication | `a * b` | Task fault |
+| Division | `a / b` | Task fault (zero divisor) |
+| Modulo | `a % b` | Task fault (zero divisor) |
+| Checked add | `checkedAdd(a, b)` | Returns `Result<Int, OverflowError>` |
+| Checked sub | `checkedSub(a, b)` | Returns `Result<Int, OverflowError>` |
+| Checked mul | `checkedMul(a, b)` | Returns `Result<Int, OverflowError>` |
 
-// Checked operations (recoverable)
-fn checkedAdd(a: Int, b: Int) -> Result<Int, OverflowError> effects() { ... }
-fn checkedSub(a: Int, b: Int) -> Result<Int, OverflowError> effects() { ... }
-fn checkedMul(a: Int, b: Int) -> Result<Int, OverflowError> effects() { ... }
+Comparisons use operators: `==`, `!=`, `<`, `<=`, `>`, `>=`.
 
-// Comparisons
-fn eq(a: Int, b: Int) -> Bool effects() { ... }      // a == b
-fn lt(a: Int, b: Int) -> Bool effects() { ... }      // a < b
-fn le(a: Int, b: Int) -> Bool effects() { ... }      // a <= b
-fn gt(a: Int, b: Int) -> Bool effects() { ... }      // a > b
-fn ge(a: Int, b: Int) -> Bool effects() { ... }      // a >= b
-
-// Conversions
-fn toInt(x: Int) -> Int effects() { x }
-fn toLong(x: Int) -> Long effects() { ... }
-fn toString(x: Int) -> String effects() { ... }
-```
+Conversions:
+- `toLong(x: Int) -> Long` — lossless widening
+- `toString(x: Int) -> String` — decimal representation
 
 ### 2.2 Long (64-bit signed integer)
 
-```
-// Long is a value type wrapping JVM long
-record Long();  // Internal representation; actual Long has no user-visible fields
+`Long` is a built-in value type wrapping JVM `long`. It has the same arithmetic and comparison operators as `Int`, with checked variants (`checkedAdd`, etc.) returning `Result<Long, OverflowError>`.
 
-// Same operations as Int, with Long types
-fn add(a: Long, b: Long) -> Long effects() { ... }
-fn checkedAdd(a: Long, b: Long) -> Result<Long, OverflowError> effects() { ... }
-// ... etc.
-
-// Conversions
-fn toInt(x: Long) -> Result<Int, OverflowError> effects() { ... }  // May truncate
-fn toLong(x: Long) -> Long effects() { x }
-```
+Conversions:
+- `longToInt(x: Long) -> Result<Int, OverflowError>` — narrowing, returns `Err` on out-of-range
+- `toString(x: Long) -> String` — decimal representation
 
 ### 2.3 Bool (Boolean)
 
-```
-// Bool is a value type wrapping JVM boolean
-record Bool();  // Internal representation; actual Bool has no user-visible fields
-
-// Operations
-fn and(a: Bool, b: Bool) -> Bool effects() { ... }   // a && b (short-circuit in syntax)
-fn or(a: Bool, b: Bool) -> Bool effects() { ... }    // a || b (short-circuit in syntax)
-fn not(a: Bool) -> Bool effects() { ... }            // !a
-
-// Equality
-fn eq(a: Bool, b: Bool) -> Bool effects() { ... }
-```
+`Bool` is a built-in value type wrapping JVM `boolean`. Logical operators: `&&` (short-circuit and), `||` (short-circuit or), `!` (not). Equality uses `==` and `!=`.
 
 ### 2.4 Byte (8-bit unsigned) — *staged, not yet implemented*
 
 > **Note:** `Byte` is defined in the type system but code generation is not yet implemented. Using `Byte` values will result in a code generation error.
 
-```
-// Byte is a value type wrapping JVM byte (interpreted as unsigned 0..255)
-record Byte();  // Internal representation; actual Byte has no user-visible fields
+`Byte` is a built-in value type wrapping JVM `byte` (interpreted as unsigned 0..255).
 
-// Operations for binary data processing
-fn toInt(x: Byte) -> Int effects() { ... }           // Always succeeds (0..255)
-fn fromInt(x: Int) -> Result<Byte, RangeError> effects() { ... }
-```
+Conversions:
+- `byteToInt(x: Byte) -> Int` — always succeeds (0..255)
+- `intToByte(x: Int) -> Result<Byte, RangeError>` — returns `Err` if out of 0..255
 
 ### 2.5 Float / Double (IEEE 754) — *staged, not yet implemented*
 
 > **Note:** `Float` and `Double` are defined in the type system but code generation is not yet implemented. Using floating-point values will result in a code generation error.
 
-```
-// Float is a value type wrapping JVM float
-record Float();  // Internal representation
+`Float` and `Double` are built-in value types wrapping JVM `float` and `double`. They follow IEEE 754 semantics where `NaN == NaN` is `false`.
 
-// Double is a value type wrapping JVM double
-record Double();  // Internal representation
-
-// Note: NaN == NaN is false (IEEE 754 semantics)
-// Use isNaN(x) for NaN checks
-fn isNaN(x: Float) -> Bool effects() { ... }
-fn isNaN(x: Double) -> Bool effects() { ... }
-```
+NaN checks:
+- `floatIsNaN(x: Float) -> Bool`
+- `doubleIsNaN(x: Double) -> Bool`
 
 ## 3. Option Type
 
@@ -303,14 +263,7 @@ fn toOption<T, E>(res: Result<T, E>) -> Option<T> effects() {
 
 `List<T>` is an **immutable** collection. All operations return new lists without modifying the original.
 
-```
-// Conceptual definition (List is a built-in value type)
-// List<T> is backed by persistent data structure or copy-on-write
-public enum List<T> {
-    Nil(),
-    Cons(head: T, tail: List<T>)
-}
-```
+The runtime representation uses `java.util.List` (immutable views via `List.of()`). Construction uses `listOf(...)` for elements and `Nil()` for empty. The `Cons(head, tail)` syntax is supported but copies the tail list.
 
 ### 5.1 Construction
 
@@ -448,7 +401,7 @@ JavaAdapter.process(nums)  // Int values boxed to Integer at boundary
 ### 9.1 JVM Representation
 
 - Numeric value types map to JVM primitives (`int`, `long`, `boolean`)
-- `Option<T>` and `Result<T,E>` are sealed class hierarchies with value semantics enforced at the language level (JEP 401 value class output gated on JDK 28 final release)
+- `Option<T>` and `Result<T,E>` are sealed class hierarchies emitted as JEP 401 value classes (no `ACC_IDENTITY` flag) with `--target=valhalla` (default)
 - `List<T>` uses `java.util.List` internally with immutability enforced by API
 - At Java boundary, boxing/unboxing is automatic
 

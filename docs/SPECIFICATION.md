@@ -1,7 +1,7 @@
 # NGJ — Concept & Language Specification
 
 > Draft v0.3 / 2026-11-17
-> Status: v0.3 specification (core syntax, mandatory `return`, Valhalla value semantics, and `match` exhaustiveness implemented in compiler).
+> Status: v0.3 core syntax and type checking implemented; code generation targets JDK 28 EA with `--enable-preview` for JEP 401 value classes.
 > Baseline: Valhalla対応JDK（JDK 28 EA + `--enable-preview`、互換プロファイルとしてJava 25 LTS bytecode出力もサポート）。Valhalla（JEP 401/539）と最新JVM基盤（Loom確定版、Integrity by Default、Project Leyden、Panama FFM）はオプションではなく、言語設計の前提である。
 
 ## 1. 目的・適用範囲
@@ -413,7 +413,7 @@ public enum List<T> {
 
 #### 2.4.6 JVM表現
 
-Enumはsealed hierarchyとして出力される。現行実装ではidentity classを使用し、言語レベルでvalue意味論（不変性、構造的等価性、null禁止）を強制する。JEP 401 value classバイトコード（`ACC_VALUE`フラグ）はJDK 28正式リリース後に有効化予定。
+Enumはsealed hierarchy + JEP 401 value classとして出力される（`--target=valhalla`、デフォルト）。Value classは`ACC_IDENTITY`フラグを持たず、フィールド値で比較される。
 
 ```scala
 // NGJ
@@ -425,7 +425,7 @@ public enum Shape {
 ```
 
 ```java
-// JVM出力（現行: identity class実装）
+// JVM出力（JEP 401 value class）
 public sealed abstract class Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {
 }
 
@@ -736,7 +736,7 @@ Source -> lossless syntax + holes -> name/type/effect/ownership checks
 
 | target/profile | データ表現 | 前提・制限 |
 |---|---|---|
-| `valhalla` (基本) | value class + sealed hierarchy (`ACC_VALUE` + `ACC_STRICT_INIT`) | JDK 28 EA + `--enable-preview`（JEP 401 / JEP 539）をターゲットとする。record/enumはvalue意味論で出力 |
+| `valhalla` (基本) | value class + sealed hierarchy (no `ACC_IDENTITY`, fields with `ACC_STRICT`) | JDK 28 EA + `--enable-preview`（JEP 401）をターゲット。record/enumはvalue class（同一性なし）として出力 |
 | `valhalla-compat` / `java25` | identity class fallback | Java 25 LTS以上向け。value意味論（構造的等価性・不変性）は維持し、`ScopedValue`(JEP 506)・`Flexible Constructor Bodies`(JEP 513)・Leyden(JEP 514/515)を活用（JVMフラット化なし） |
 | `leyden` | valhalla / compat + Leyden AOT cache | **標準AOT本線。** JDK 24〜26（JEP 483/514/515/516）〜JDK 28（JEP 544）。Valhalla結合時はEA検証状況を検査 |
 | `native-image` | `valhalla-compat`出力から外部AOT | **外部任意ターゲット**（独立系GraalVM Native Image）。SubstrateVMのvalue class未対応時は`valhalla-compat`経由 |
@@ -745,7 +745,7 @@ Source -> lossless syntax + holes -> name/type/effect/ownership checks
 
 | AOTレベル | Valhalla互換 | 状態 |
 |-----------|-------------|------|
-| JIT (通常JVM) | ✅ 完全対応 | JDK 28 EA + preview（JEP 401 / JEP 539） |
+| JIT (通常JVM) | ✅ 動作 | JDK 28 EA + preview（JEP 401 / JEP 539）で動作確認済み |
 | Leyden AOT cache | ⚠️ 組合せ検証中 | JDK 25〜26（JEP 514/515/516）で`valhalla-compat`は運用可能。JDK 28 JEP 544 × value classの結合を要検証 |
 | Native Image (外部) | ❌ 未サポート | Oracle製品版は2025年9月にJava SEから分離。独立系SubstrateVMはvalue class未対応のため`valhalla-compat`で生成 |
 
@@ -855,11 +855,11 @@ AOTレベル（JIT/Leyden/native-image）の統一的なUXとProject Leyden対�
 
 ### 12.4 移行パス
 
-現在のJava 25互換クラス出力から完全なValhalla preview classfileへの移行:
+JEP 401 value class出力の段階的完成:
 
 1. **完了:** v0.3構文正規化、関数`return`必須化、Value型意味論・網羅性検査の実装
-2. **JDK 28 EA利用可能後:** CI移行、`ACC_VALUE`（JEP 401）/ `ACC_STRICT_INIT`（JEP 539）preview classfile直接出力・`StructuredTaskScope`（JEP 543）連携の有効化
-3. **JDK 28 GA後（2027年3月予定）:** 本番利用開始、Project Leyden（JEP 544）との結合検証
+2. **完了:** JDK 28 EA + `--enable-preview`対応、JEP 401 value class（no `ACC_IDENTITY`）+ `ACC_STRICT` fields preview classfile直接出力、Option/Result ADT sealed hierarchy
+3. **JDK 28 GA後（2027年3月予定）:** 本番利用開始、Project Leyden（JEP 544）との結合検証、`StructuredTaskScope`（JEP 543）連携の有効化
 4. **preview卒業後:** 安定版としてリリース
 
 ## 13. v0.2からの変更（v0.3）

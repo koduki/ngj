@@ -121,8 +121,8 @@ their implementation status, and explicit exclusions.
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | JVM class output | Yes | ✅ | Class-File API (standard since Java 24) |
-| `final class` for record | Yes | ✅ | Identity class with structural `equals`/`hashCode` (value semantics enforced at language level; JEP 401 value class output gated on JDK 28 final) |
-| Sealed hierarchy for enum | Yes | ✅ | Abstract sealed class + final variant classes (identity classes with value semantics enforced at language level) |
+| `final class` for record | Yes | ✅ | JEP 401 value class (no `ACC_IDENTITY`) with structural `equals`/`hashCode` (`--target=valhalla`, default on JDK 28 EA) |
+| Sealed hierarchy for enum | Yes | ✅ | Abstract sealed class + final value class variants (JEP 401, `--target=valhalla`) |
 | Integer overflow fault | Yes | ✅ | Runtime check via `Math.xxxExact` |
 | Short-circuit evaluation | Yes | ✅ | Left-to-right |
 
@@ -202,7 +202,7 @@ The following features are explicitly excluded and must be rejected with
 ### Compiler Migration Checklist
 
 - [ ] Update Gradle/build to use JDK 28 EA toolchain when available
-- [ ] Add `--enable-preview` to compile and runtime flags for `ACC_VALUE` classfile bits
+- [x] Add `--enable-preview` to compile and runtime flags for JEP 401 value classes (no `ACC_IDENTITY`)
 - [x] Implement structural `equals`/`hashCode` for `record` and `enum` variants
 - [x] Implement sealed hierarchy for enum variants
 - [x] Enforce no-`null` rule (language design: `Option<T>` instead of `null`)

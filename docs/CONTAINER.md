@@ -28,24 +28,25 @@ docker run --rm ngj:latest --help
 # バージョン確認
 docker run --rm ngj:latest --version
 
-# ソースファイルのチェック
-docker run --rm -v $(pwd)/examples:/src ngj:latest check /src/payment_service.ngj
+# ソースファイルのチェック（syntax_v03.ngjはv0.3正規構文の基準例）
+docker run --rm -v $(pwd)/examples:/src ngj:latest check /src/syntax_v03.ngj
 
 # JSON形式で出力
-docker run --rm -v $(pwd)/examples:/src ngj:latest check --format=json /src/payment_service.ngj
+docker run --rm -v $(pwd)/examples:/src ngj:latest check --format=json /src/syntax_v03.ngj
 
-# ビルド（クラスファイル生成）
-docker run --rm -v $(pwd)/examples:/src -v $(pwd)/out:/out ngj:latest build -o /out /src/payment_service.ngj
+# ビルド（クラスファイル生成、build/classesに出力）
+docker run --rm -v $(pwd)/examples:/src -v $(pwd)/build:/app/build ngj:latest build /src/syntax_v03.ngj
+
+# Note: payment_service.ngj等の既存例はv0.2構文であり、v0.3では受理されない。
+# 詳細はexamples/README.mdを参照。
 ```
 
 ## イメージ構成
 
-> **Note:** NGJ v0.3 targets JDK 28 EA with `--enable-preview` for Valhalla value classes (JEP 401). The JDK 25 images below are for `--target=java25` / `--target=valhalla-compat` mode only. For full JEP 401 value class support, use JDK 28 EA images when available.
-
 | ターゲット | ベースイメージ | 用途 | サイズ目安 |
 |-----------|---------------|------|-----------|
-| `builder` | temurin:25-jdk | 内部ビルド用（valhalla-compat） | - |
-| `runtime` | temurin:25-jre | 本番実行用（valhalla-compat） | ~200MB |
+| `builder` | temurin:25-jdk | 内部ビルド用（Gradleコンパイル） | - |
+| `runtime` | JDK 28 EA + debian:bookworm-slim | 本番実行用（`--enable-preview`でJEP 401対応） | ~200MB |
 | `development` | temurin:25-jdk | 開発・テスト用 | ~500MB |
 
 ## 開発環境

@@ -139,7 +139,7 @@ AOTレベル × バックエンド × OS/archの組み合わせでCI行列が爆
 {
   "schema_version": "ngj.build/1",
   "aot_level": "leyden",
-  "valhalla_mode": "native",
+  "target": "valhalla",
   "aot_details": {
     "cache_path": "build/leyden-cache",
     "jdk_version": "28",
