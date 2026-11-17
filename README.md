@@ -6,7 +6,7 @@
 
 ## Design principles
 
-- **Value-first data:** Immutable data and closed ADTs, with a Java 25 baseline using the standard Class-File API for bytecode generation, and an optional pinned Valhalla backend. Allocation elimination and flattening are optimization opportunities, not unconditional promises.
+- **Value-first (Valhalla foundation):** Project Valhalla value classes are the foundation of the type system, not an optional optimization backend. All user-defined types are value types by default (identity-free, immutable, structural equality). Identity types exist only where explicitly needed (resources, actors, mutable state). No primitive/boxed split visible to users; `Int`/`Long`/`Bool` are value types. No `null` in the core language; absence is `Option<T>`. Generics over value types are a language guarantee.
 - **Structured concurrency:** Direct-style `scope` / `fork`, bounded channels, explicit cancellation and resource lifetimes, without `async/await` coloring.
 - **Checkable authority:** Effects, host-issued capabilities, ownership and typestate constrain operations. Java interoperability is a declared trust boundary.
 - **Compiler support for agents:** Typed holes, partial checking, structured diagnostics, type-directed context retrieval and revision-aware patch validation.
@@ -20,6 +20,7 @@
 
 - [Language specification](docs/SPECIFICATION.md): semantics, safety boundaries, JVM mapping and roadmap.
 - [Agent tooling protocol](docs/AGENT_TOOLING.md): proposed CLI, JSON diagnostics and context API.
+- [AOT design direction](docs/AOT.md): post-MVP strategy for Leyden AOT and native-image support.
 - [Validation plan](docs/VALIDATION.md): conformance cases, performance checks and controlled AI-generation experiments.
 - [Research basis](docs/RESEARCH.md): primary sources and the limits of transferring their findings to NGJ.
 - [Examples and adapter contracts](examples/README.md): illustrative REST, payment, binary parser, CLI and typed-hole examples.

@@ -2,6 +2,7 @@
 
 > Normative target for the syntax migration. The compiler at the base commit still implements v0.2 forms.
 > The archived [v0.2 grammar](EBNF_V02.md) and existing compiler fixtures document the migration baseline.
+> Valhalla foundation and enum ADT semantics: Refs #7.
 
 ## 1. Canonical forms
 
@@ -135,6 +136,84 @@ Public shape decisions for those stages:
 - Library types (Secret, Capability, typestate markers) reuse ordinary type application.
 - No general macros or user-defined syntax extensions.
 
-## 8. Migration acceptance
+## 8. Valhalla foundation and value type semantics
+
+NGJ targets Valhalla-capable JDK (JDK 28 EA + `--enable-preview`) as the foundation. All types declared with `record` and `enum` are **value types** (identity-free) by default. See [SPECIFICATION.md](SPECIFICATION.md) section 1.3 and 2.2.
+
+### 8.1 Value types are the default
+
+| Declaration | Semantics | `==` behavior |
+|-------------|-----------|---------------|
+| `record` | Immutable, identity-free | Structural equality (field values) |
+| `enum` variant | Immutable, identity-free | Variant tag + field comparison |
+| `Int`, `Long`, `Bool` | Value type | Value comparison |
+| `Option<T>`, `Result<T,E>` | Library enums (value types) | Variant + field comparison |
+
+**Key implications:**
+- `Point(1, 2) == Point(1, 2)` is `true` for `record Point(x: Int, y: Int)`
+- `Some(42) == Some(42)` is `true`
+- No `null` in core language; absence is `Option<T>` with `None()`
+
+### 8.2 Enum as algebraic data type
+
+The core grammar's `enum` and `variant` rules support payload-carrying variants:
+
+```
+enum Shape {
+    Circle(radius: Float),
+    Rectangle(width: Float, height: Float),
+    Point()
+}
+```
+
+Each variant is a value type. `Result` and `Option` are ordinary library enums, not special built-ins:
+
+```
+enum Option<T> {
+    Some(value: T),
+    None()
+}
+
+enum Result<T, E> {
+    Ok(value: T),
+    Err(error: E)
+}
+```
+
+### 8.3 Match exhaustiveness
+
+Match expressions **must** cover all enum variants. Missing variants produce a compile error with **precise diagnostics** naming the missing variants. This is critical for the AI fix loop.
+
+```
+// Error: missing variant 'Point' in match expression
+fn area(shape: Shape) -> Float effects() {
+    match (shape) {
+        case Circle(r) => { 3.14159 * r * r }
+        case Rectangle(w, h) => { w * h }
+        // Point is missing → compile error with diagnostic
+    }
+}
+```
+
+### 8.4 JVM representation
+
+Records and enum variants compile to Valhalla value classes in a sealed hierarchy:
+
+```
+// NGJ
+enum Shape { Circle(r: Float), Rectangle(w: Float, h: Float), Point() }
+
+// JVM output (conceptual)
+sealed value interface Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {}
+final value class Shape.Circle implements Shape { float r; }
+final value class Shape.Rectangle implements Shape { float w; float h; }
+final value class Shape.Point implements Shape {}
+```
+
+### 8.5 Identity types (staged feature)
+
+Identity types (`identity class`, `resource`, `actor`) require explicit declaration and are staged features. See SPECIFICATION.md section 2.2.2.
+
+## 9. Migration acceptance
 
 See [SYNTAX_MIGRATION.md](SYNTAX_MIGRATION.md) for change mapping, implementation work and positive/negative cases. This EBNF has undergone document review only. Parser conformance and AI-generation measurements are required before declaring v0.3 supported.
