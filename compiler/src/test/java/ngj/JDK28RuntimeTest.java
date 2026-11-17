@@ -416,9 +416,10 @@ class JDK28RuntimeTest {
             
             assertNotNull(invoke, "invoke method should exist");
             
-            Object red = getEnumVariant(loader, "test.enumeration.Red");
-            Object green = getEnumVariant(loader, "test.enumeration.Green");
-            Object blue = getEnumVariant(loader, "test.enumeration.Blue");
+            // Enum variants are generated as nested classes: EnumName$VariantName
+            Object red = getEnumVariant(loader, "test.enumeration.Color$Red");
+            Object green = getEnumVariant(loader, "test.enumeration.Color$Green");
+            Object blue = getEnumVariant(loader, "test.enumeration.Color$Blue");
             
             assertNotNull(red, "Red variant should be instantiable");
             assertNotNull(green, "Green variant should be instantiable");
