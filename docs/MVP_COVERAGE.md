@@ -69,7 +69,7 @@ their implementation status, and explicit exclusions.
 | `Some(v)` / `None()` | Yes | ✅ | Option constructors, `None()` with parentheses |
 | Postfix `?` on Result | Yes | ✅ | Same-E propagation only |
 | Postfix `?` on Option | **No - Reject** | ✅ | v0.3 rejects, use `match` instead (`NGJ-TYPE-020`) |
-| Different-E `?` | **No - Reject** | ✅ | Rejected (`NGJ-TYPE-019`), must use explicit conversion |
+| Different-E `?` | **No - Reject** | ✅ | Rejected (`NGJ-PROP-001`), must use explicit conversion |
 
 ### Type Inference
 
@@ -121,8 +121,8 @@ their implementation status, and explicit exclusions.
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | JVM class output | Yes | ✅ | Class-File API (standard since Java 24) |
-| Value class for record | Yes | ✅ | JEP 401 value class with structural `equals`/`hashCode` |
-| Sealed hierarchy for enum | Yes | ✅ | Interface + final variant classes |
+| `final class` for record | Yes | ✅ | Identity class with structural `equals`/`hashCode` (value semantics enforced at language level; JEP 401 value class output gated on JDK 28 final) |
+| Sealed hierarchy for enum | Yes | ✅ | Abstract sealed class + final variant classes (identity classes with value semantics enforced at language level) |
 | Integer overflow fault | Yes | ✅ | Runtime check via `Math.xxxExact` |
 | Short-circuit evaluation | Yes | ✅ | Left-to-right |
 

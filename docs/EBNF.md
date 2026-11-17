@@ -202,17 +202,17 @@ fn area(shape: Shape) -> Float effects() {
 
 ### 8.4 JVM representation
 
-Records and enum variants compile to Valhalla value classes in a sealed hierarchy:
+Records and enum variants compile to sealed hierarchies with value semantics. Current output uses identity classes with structural equality enforced at the language level; actual JEP 401 `value class` bytecode is gated on the final JDK 28 release:
 
 ```
 // NGJ
 enum Shape { Circle(r: Float), Rectangle(w: Float, h: Float), Point() }
 
-// JVM output (conceptual)
-sealed abstract value class Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {}
-final value class Shape.Circle extends Shape { float r; }
-final value class Shape.Rectangle extends Shape { float w; float h; }
-final value class Shape.Point extends Shape {}
+// JVM output (conceptual, using value class syntax for clarity)
+sealed abstract class Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {}
+final class Shape.Circle extends Shape { float r; }
+final class Shape.Rectangle extends Shape { float w; float h; }
+final class Shape.Point extends Shape {}
 ```
 
 ### 8.5 Identity types (staged feature)

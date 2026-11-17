@@ -92,11 +92,11 @@ while (index < limit) { index = index + 1; };
 | `return 42` without semicolon | missing-semicolon diagnostic (`NGJ-PARSE-008`) |
 | early return in guard clause (`if (x < 0) { return 0; } return x;`) | valid |
 | adjacent bindings separated only by newline | missing-semicolon diagnostic (`NGJ-PARSE-008`) |
-| `if` with mismatched branch types | type error (`NGJ-TYPE-003`) |
-| `if` without `else` and non-`Unit` body | type error (`NGJ-TYPE-004`) |
+| `if` with mismatched branch types | type error (`NGJ-TYPE-011`) |
+| `if` without `else` and non-`Unit` body | type error (`NGJ-TYPE-021`) |
 | incomplete `enum` `match` | exhaustiveness error (`NGJ-MATCH-001`) |
 | `None()` and `case None()` | valid `Option` construction/pattern |
-| bare `None` in expression | rejected constructor-without-call |
+| bare `None`/`Some`/`Ok`/`Err` in expression | rejected (`NGJ-TYPE-022`), must use parentheses e.g. `None()` |
 | bare `x` pattern | binding, never guessed to be a constant |
 | `f()?.field` | same AST meaning as `(f()?).field` |
 | `a + f()?` | `a + (f()?)` |
@@ -109,7 +109,9 @@ while (index < limit) { index = index + 1; };
 | callback capturing outer `var` | capture diagnostic (`NGJ-CAPTURE-001`) |
 | `while` updating local `var` | valid in sequential profile |
 | obsolete `module`/`pub`/`data`/`let`/`! {}` spellings | migration diagnostic (`NGJ-MIGRATE-*`) |
-| wildcard/grouped import, named/default args | unsupported syntax (`NGJ-PARSE-001`) |
+| wildcard import (`import pkg.*;`) | unsupported syntax (`NGJ-PARSE-001`) |
+| grouped import (`import pkg.{A, B};`) | migration diagnostic (`NGJ-MIGRATE-002`) |
+| named/default args | unsupported syntax (`NGJ-PARSE-007`) |
 
 ## Work items
 

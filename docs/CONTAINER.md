@@ -40,14 +40,13 @@ docker run --rm -v $(pwd)/examples:/src -v $(pwd)/out:/out ngj:latest build -o /
 
 ## イメージ構成
 
+> **Note:** NGJ v0.3 targets JDK 28 EA with `--enable-preview` for Valhalla value classes (JEP 401). The JDK 25 images below are for `--target=java25` / `--target=valhalla-compat` mode only. For full JEP 401 value class support, use JDK 28 EA images when available.
+
 | ターゲット | ベースイメージ | 用途 | サイズ目安 |
 |-----------|---------------|------|-----------|
-| `builder` | JDK 25 | Gradle ビルド用 | - |
-| `runtime` | JDK 28 EA | 本番実行用（Valhalla） | ~200MB |
-| `development` | JDK 28 EA | 開発・テスト用 | ~500MB |
-
-> **Note**: NGJ は JDK 28 EA with JEP 401 (Value Objects) をターゲットとしています。
-> Gradle ビルドには JDK 25 を、ランタイムには JDK 28 を使用します。
+| `builder` | temurin:25-jdk | 内部ビルド用（valhalla-compat） | - |
+| `runtime` | temurin:25-jre | 本番実行用（valhalla-compat） | ~200MB |
+| `development` | temurin:25-jdk | 開発・テスト用 | ~500MB |
 
 ## 開発環境
 
@@ -133,7 +132,6 @@ docker run --rm -u $(id -u):$(id -g) -v $(pwd):/src ngj:latest check /src/file.n
 
 ## 技術仕様
 
-- **ビルド用 Java バージョン**: 25 (Gradle 実行用)
-- **ランタイム Java バージョン**: 28 EA (JEP 401 Value Objects)
+- **Java バージョン**: 25+ (Eclipse Temurin) for `valhalla-compat`; JDK 28 EA + `--enable-preview` for full Valhalla value classes
 - **バイトコード生成**: Class-File API（標準ライブラリ、外部依存なし）
 - **ビルドツール**: Gradle 9.9.1

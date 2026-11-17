@@ -99,7 +99,9 @@ fn not(a: Bool) -> Bool effects() { ... }            // !a
 fn eq(a: Bool, b: Bool) -> Bool effects() { ... }
 ```
 
-### 2.4 Byte (8-bit unsigned)
+### 2.4 Byte (8-bit unsigned) — *staged, not yet implemented*
+
+> **Note:** `Byte` is defined in the type system but code generation is not yet implemented. Using `Byte` values will result in a code generation error.
 
 ```
 // Byte is a value type wrapping JVM byte (interpreted as unsigned 0..255)
@@ -110,7 +112,9 @@ fn toInt(x: Byte) -> Int effects() { ... }           // Always succeeds (0..255)
 fn fromInt(x: Int) -> Result<Byte, RangeError> effects() { ... }
 ```
 
-### 2.5 Float / Double (IEEE 754)
+### 2.5 Float / Double (IEEE 754) — *staged, not yet implemented*
+
+> **Note:** `Float` and `Double` are defined in the type system but code generation is not yet implemented. Using floating-point values will result in a code generation error.
 
 ```
 // Float is a value type wrapping JVM float
@@ -444,7 +448,7 @@ JavaAdapter.process(nums)  // Int values boxed to Integer at boundary
 ### 9.1 JVM Representation
 
 - Numeric value types map to JVM primitives (`int`, `long`, `boolean`)
-- `Option<T>` and `Result<T,E>` are sealed value class hierarchies
+- `Option<T>` and `Result<T,E>` are sealed class hierarchies with value semantics enforced at the language level (JEP 401 value class output gated on JDK 28 final release)
 - `List<T>` uses `java.util.List` internally with immutability enforced by API
 - At Java boundary, boxing/unboxing is automatic
 

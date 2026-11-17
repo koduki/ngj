@@ -199,7 +199,7 @@ val opt: Option<Int> = Some(42);
 
 **NGJコア言語に`null`は存在しない。**
 
-- `null`リテラルは提供しない（`NGJ-TYPE-020`）
+- `null`リテラルは提供しない（`NGJ-NULL-001`）
 - 参照型の「何もない」状態は`Option<T>`で表現する
 - `throw`構文も提供しない（`Result`を使用）
 
@@ -413,7 +413,7 @@ public enum List<T> {
 
 #### 2.4.6 JVM表現
 
-Enumはsealed hierarchyのvalue classesとして出力される。
+Enumはsealed hierarchyとして出力される。現行実装ではidentity classを使用し、言語レベルでvalue意味論（不変性、構造的等価性、null禁止）を強制する。JEP 401 value classバイトコード（`ACC_VALUE`フラグ）はJDK 28正式リリース後に有効化予定。
 
 ```scala
 // NGJ
@@ -425,37 +425,38 @@ public enum Shape {
 ```
 
 ```java
-// JVM出力（概念）
-public sealed abstract value class Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {
+// JVM出力（現行: identity class実装）
+public sealed abstract class Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {
 }
 
-public final value class Shape.Circle extends Shape {
+public final class Shape.Circle extends Shape {
     private final int radius;
-    // ...
+    // structural equals/hashCode generated
 }
 
-public final value class Shape.Rectangle extends Shape {
+public final class Shape.Rectangle extends Shape {
     private final int width;
     private final int height;
-    // ...
+    // structural equals/hashCode generated
 }
 
-public final value class Shape.Point extends Shape {
-    // ...
+public final class Shape.Point extends Shape {
+    // structural equals/hashCode generated
 }
 ```
 
 **JVM表現の詳細:**
-- 基底型はsealed abstract value class
-- 各バリアントはvalue class（permits句で列挙、extendsで継承）
+- 基底型はsealed abstract class（permits句で列挙）
+- 各バリアントはfinal class（JEP 401対応時にvalue classへ移行）
 - パターンマッチはinstanceofとキャストに展開
+- 構造的等価性は`equals`/`hashCode`生成で実現
 
 #### 2.4.7 Java相互運用
 
 **NGJ enumをJavaから使用:**
-- Javaからはsealed abstract classとして見える
+- Javaからはsealed classとして見える
 - pattern matching（Java 21+）で分岐可能
-- value class意味論はJDK 28 + preview必須
+- JEP 401 value class意味論はJDK 28 + preview必須（将来対応）
 
 **Java sealed型をNGJで使用:**
 - Java sealed interface + recordsはNGJ enumとして扱える
