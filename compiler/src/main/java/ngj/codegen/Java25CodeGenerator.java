@@ -110,6 +110,9 @@ public final class Java25CodeGenerator {
             var moduleDir = outputDir.resolve(currentModule.replace('.', '/'));
             Files.createDirectories(moduleDir);
             
+            // Generate standard library runtime classes (Option, Result)
+            outputs.addAll(generateRuntimeClasses());
+            
             for (var decl : unit.declarations()) {
                 var classFile = generateDecl(decl);
                 if (classFile != null) {
@@ -129,6 +132,277 @@ public final class Java25CodeGenerator {
         } catch (Exception e) {
             throw new CodeGenException("Code generation failed: " + e.getMessage(), e);
         }
+    }
+    
+    /**
+     * Generate Option and Result as standard library runtime classes.
+     * These are sealed ADT hierarchies per the specification.
+     */
+    private List<Path> generateRuntimeClasses() throws Exception {
+        var outputs = new ArrayList<Path>();
+        var runtimeDir = outputDir.resolve("ngj/runtime");
+        Files.createDirectories(runtimeDir);
+        
+        // Generate Option hierarchy
+        outputs.add(generateOptionBase(runtimeDir));
+        outputs.add(generateOptionSome(runtimeDir));
+        outputs.add(generateOptionNone(runtimeDir));
+        
+        // Generate Result hierarchy  
+        outputs.add(generateResultBase(runtimeDir));
+        outputs.add(generateResultOk(runtimeDir));
+        outputs.add(generateResultErr(runtimeDir));
+        
+        return outputs;
+    }
+    
+    private Path generateOptionBase(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Option";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var someDesc = ClassDesc.ofInternalName("ngj/runtime/Option$Some");
+        var noneDesc = ClassDesc.ofInternalName("ngj/runtime/Option$None");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            // Sealed abstract class
+            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            // PermittedSubclasses attribute for sealed hierarchy
+            classBuilder.with(PermittedSubclassesAttribute.ofSymbols(someDesc, noneDesc));
+            
+            // Protected no-arg constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME, 
+                MethodTypeDesc.of(ConstantDescs.CD_void), ACC_PROTECTED, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Option.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateOptionSome(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Option$Some";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Option");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            if (isValueClassTarget()) {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
+            classBuilder.withSuperclass(baseDesc);
+            
+            // Field: value
+            int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+            if (isValueClassTarget()) {
+                fieldFlags |= ACC_STRICT;
+            }
+            classBuilder.withField("value", ConstantDescs.CD_Object, fieldFlags);
+            
+            // Constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    if (isValueClassTarget()) {
+                        // Value class: fields before super
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "value", ConstantDescs.CD_Object);
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                    } else {
+                        // Identity class: super first
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "value", ConstantDescs.CD_Object);
+                    }
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Option$Some.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateOptionNone(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Option$None";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Option");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            if (isValueClassTarget()) {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
+            classBuilder.withSuperclass(baseDesc);
+            
+            // No fields - None has no payload
+            
+            // No-arg constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Option$None.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateResultBase(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Result";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var okDesc = ClassDesc.ofInternalName("ngj/runtime/Result$Ok");
+        var errDesc = ClassDesc.ofInternalName("ngj/runtime/Result$Err");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            // Sealed abstract class
+            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            // PermittedSubclasses attribute for sealed hierarchy
+            classBuilder.with(PermittedSubclassesAttribute.ofSymbols(okDesc, errDesc));
+            
+            // Protected no-arg constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void), ACC_PROTECTED, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Result.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateResultOk(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Result$Ok";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Result");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            if (isValueClassTarget()) {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
+            classBuilder.withSuperclass(baseDesc);
+            
+            // Field: value
+            int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+            if (isValueClassTarget()) {
+                fieldFlags |= ACC_STRICT;
+            }
+            classBuilder.withField("value", ConstantDescs.CD_Object, fieldFlags);
+            
+            // Constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    if (isValueClassTarget()) {
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "value", ConstantDescs.CD_Object);
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                    } else {
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "value", ConstantDescs.CD_Object);
+                    }
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Result$Ok.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateResultErr(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Result$Err";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Result");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            if (isValueClassTarget()) {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
+            classBuilder.withSuperclass(baseDesc);
+            
+            // Field: error
+            int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+            if (isValueClassTarget()) {
+                fieldFlags |= ACC_STRICT;
+            }
+            classBuilder.withField("error", ConstantDescs.CD_Object, fieldFlags);
+            
+            // Constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    if (isValueClassTarget()) {
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "error", ConstantDescs.CD_Object);
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                    } else {
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "error", ConstantDescs.CD_Object);
+                    }
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Result$Err.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
     }
     
     public void setOutputDir(Path outputDir) {
@@ -793,50 +1067,52 @@ public final class Java25CodeGenerator {
             var methodName = ident.name();
             
             switch (methodName) {
-                // STDLIB-03: Result constructors - wrap in Optional-like structure
+                // STDLIB-03: Result constructors - ngj.runtime.Result ADT
                 case "Ok" -> {
-                    ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
                     ctx.code.dup();
-                    ctx.code.ldc("Ok");
                     generateExpr(ctx, call.args().get(0));
                     boxIfPrimitive(ctx, call.args().get(0));
                     ctx.code.invokespecial(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                        ClassDesc.ofInternalName("ngj/runtime/Result$Ok"),
                         ConstantDescs.INIT_NAME,
-                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                     );
                     return;
                 }
                 case "Err" -> {
-                    ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
                     ctx.code.dup();
-                    ctx.code.ldc("Err");
                     generateExpr(ctx, call.args().get(0));
                     boxIfPrimitive(ctx, call.args().get(0));
                     ctx.code.invokespecial(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                        ClassDesc.ofInternalName("ngj/runtime/Result$Err"),
                         ConstantDescs.INIT_NAME,
-                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                     );
                     return;
                 }
                 
-                // STDLIB-02: Option constructors using java.util.Optional
+                // STDLIB-02: Option constructors - ngj.runtime.Option ADT
                 case "Some" -> {
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                    ctx.code.dup();
                     generateExpr(ctx, call.args().get(0));
                     boxIfPrimitive(ctx, call.args().get(0));
-                    ctx.code.invokestatic(
-                        ClassDesc.of("java.util.Optional"),
-                        "of",
-                        MethodTypeDesc.of(ClassDesc.of("java.util.Optional"), ConstantDescs.CD_Object)
+                    ctx.code.invokespecial(
+                        ClassDesc.ofInternalName("ngj/runtime/Option$Some"),
+                        ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                     );
                     return;
                 }
                 case "None" -> {
-                    ctx.code.invokestatic(
-                        ClassDesc.of("java.util.Optional"),
-                        "empty",
-                        MethodTypeDesc.of(ClassDesc.of("java.util.Optional"))
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Option$None"));
+                    ctx.code.dup();
+                    ctx.code.invokespecial(
+                        ClassDesc.ofInternalName("ngj/runtime/Option$None"),
+                        ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void)
                     );
                     return;
                 }
@@ -852,14 +1128,14 @@ public final class Java25CodeGenerator {
                 }
                 case "listOf" -> {
                     if (call.args().isEmpty()) {
-                        // Empty list via List.of()
+                        // Empty immutable list via List.of()
                         ctx.code.invokestatic(
                             ClassDesc.of("java.util.List"),
                             "of",
                             MethodTypeDesc.of(ClassDesc.of("java.util.List"))
                         );
                     } else {
-                        // Use ArrayList constructor to avoid interface static method issues on JDK 28
+                        // Build ArrayList then wrap in unmodifiableList for immutability
                         ctx.code.new_(ClassDesc.of("java.util.ArrayList"));
                         ctx.code.dup();
                         ctx.code.invokespecial(
@@ -878,6 +1154,12 @@ public final class Java25CodeGenerator {
                             );
                             ctx.code.pop(); // discard boolean
                         }
+                        // Wrap in unmodifiableList for STDLIB immutability guarantee
+                        ctx.code.invokestatic(
+                            ClassDesc.of("java.util.Collections"),
+                            "unmodifiableList",
+                            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ClassDesc.of("java.util.List"))
+                        );
                     }
                     return;
                 }
@@ -1029,64 +1311,46 @@ public final class Java25CodeGenerator {
                     return;
                 }
                 
-                // Option/Result predicates
+                // Option/Result predicates using ngj.runtime classes
                 case "isSome" -> {
                     generateExpr(ctx, call.args().get(0));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.Optional"),
-                        "isPresent",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
                     return;
                 }
                 case "isNone" -> {
                     generateExpr(ctx, call.args().get(0));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.Optional"),
-                        "isEmpty",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Option$None"));
                     return;
                 }
                 case "isOk" -> {
                     generateExpr(ctx, call.args().get(0));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-                        "getKey",
-                        MethodTypeDesc.of(ConstantDescs.CD_Object)
-                    );
-                    ctx.code.ldc("Ok");
-                    ctx.code.invokevirtual(
-                        ConstantDescs.CD_Object,
-                        "equals",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
                     return;
                 }
                 case "isErr" -> {
                     generateExpr(ctx, call.args().get(0));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-                        "getKey",
-                        MethodTypeDesc.of(ConstantDescs.CD_Object)
-                    );
-                    ctx.code.ldc("Err");
-                    ctx.code.invokevirtual(
-                        ConstantDescs.CD_Object,
-                        "equals",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
                     return;
                 }
                 case "getOrElse" -> {
                     var defaultType = inferTypeName(ctx, call.args().get(1));
                     generateExpr(ctx, call.args().get(0));
+                    var optSlot = ctx.allocateLocal("$opt$" + ctx.nextSlot, "Object");
+                    ctx.code.astore(optSlot);
                     generateExpr(ctx, call.args().get(1));
                     boxIfPrimitive(ctx, call.args().get(1));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.Optional"),
-                        "orElse",
-                        MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                    var defSlot = ctx.allocateLocal("$def$" + ctx.nextSlot, "Object");
+                    ctx.code.astore(defSlot);
+                    
+                    ctx.code.aload(optSlot);
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                    ctx.code.ifThenElse(Opcode.IFNE,
+                        tb -> {
+                            tb.aload(optSlot);
+                            tb.checkcast(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                            tb.getfield(ClassDesc.ofInternalName("ngj/runtime/Option$Some"), "value", ConstantDescs.CD_Object);
+                        },
+                        fb -> fb.aload(defSlot)
                     );
                     unboxIfNeeded(ctx, defaultType);
                     return;
@@ -1095,37 +1359,31 @@ public final class Java25CodeGenerator {
                     generateExpr(ctx, call.args().get(0));
                     var resSlot = ctx.allocateLocal("$res$" + ctx.nextSlot, "Object");
                     ctx.code.astore(resSlot);
+                    
                     ctx.code.aload(resSlot);
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-                        "getKey",
-                        MethodTypeDesc.of(ConstantDescs.CD_Object)
-                    );
-                    ctx.code.ldc("Ok");
-                    ctx.code.invokevirtual(
-                        ConstantDescs.CD_Object,
-                        "equals",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
                     ctx.code.ifThenElse(Opcode.IFNE,
                         tb -> {
+                            tb.new_(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                            tb.dup();
                             tb.aload(resSlot);
-                            tb.invokevirtual(
-                                ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-                                "getValue",
-                                MethodTypeDesc.of(ConstantDescs.CD_Object)
-                            );
-                            tb.invokestatic(
-                                ClassDesc.of("java.util.Optional"),
-                                "of",
-                                MethodTypeDesc.of(ClassDesc.of("java.util.Optional"), ConstantDescs.CD_Object)
+                            tb.checkcast(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
+                            tb.getfield(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"), "value", ConstantDescs.CD_Object);
+                            tb.invokespecial(
+                                ClassDesc.ofInternalName("ngj/runtime/Option$Some"),
+                                ConstantDescs.INIT_NAME,
+                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                             );
                         },
-                        fb -> fb.invokestatic(
-                            ClassDesc.of("java.util.Optional"),
-                            "empty",
-                            MethodTypeDesc.of(ClassDesc.of("java.util.Optional"))
-                        )
+                        fb -> {
+                            fb.new_(ClassDesc.ofInternalName("ngj/runtime/Option$None"));
+                            fb.dup();
+                            fb.invokespecial(
+                                ClassDesc.ofInternalName("ngj/runtime/Option$None"),
+                                ConstantDescs.INIT_NAME,
+                                MethodTypeDesc.of(ConstantDescs.CD_void)
+                            );
+                        }
                     );
                     return;
                 }
@@ -1137,38 +1395,30 @@ public final class Java25CodeGenerator {
                     boxIfPrimitive(ctx, call.args().get(1));
                     var errSlot = ctx.allocateLocal("$err$" + ctx.nextSlot, "Object");
                     ctx.code.astore(errSlot);
+                    
                     ctx.code.aload(optSlot);
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.Optional"),
-                        "isPresent",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
                     ctx.code.ifThenElse(Opcode.IFNE,
                         tb -> {
-                            tb.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+                            tb.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
                             tb.dup();
-                            tb.ldc("Ok");
                             tb.aload(optSlot);
-                            tb.invokevirtual(
-                                ClassDesc.of("java.util.Optional"),
-                                "get",
-                                MethodTypeDesc.of(ConstantDescs.CD_Object)
-                            );
+                            tb.checkcast(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                            tb.getfield(ClassDesc.ofInternalName("ngj/runtime/Option$Some"), "value", ConstantDescs.CD_Object);
                             tb.invokespecial(
-                                ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                                ClassDesc.ofInternalName("ngj/runtime/Result$Ok"),
                                 ConstantDescs.INIT_NAME,
-                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                             );
                         },
                         fb -> {
-                            fb.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+                            fb.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
                             fb.dup();
-                            fb.ldc("Err");
                             fb.aload(errSlot);
                             fb.invokespecial(
-                                ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                                ClassDesc.ofInternalName("ngj/runtime/Result$Err"),
                                 ConstantDescs.INIT_NAME,
-                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                             );
                         }
                     );
@@ -1527,14 +1777,19 @@ public final class Java25CodeGenerator {
                         var castedSlot = ctx.allocateLocal("$match$casted", typePath);
                         ctx.code.astore(castedSlot);
                         
-                        for (var field : ctor.fields()) {
+                        for (int fieldIdx = 0; fieldIdx < ctor.fields().size(); fieldIdx++) {
+                            var field = ctor.fields().get(fieldIdx);
                             if (field.pattern() instanceof BindingPattern bindPat) {
                                 ctx.code.aload(castedSlot);
-                                ctx.code.getfield(variantClass, field.name(), ConstantDescs.CD_Object);
+                                
+                                // Resolve the actual field name in the variant class
+                                // For Option/Result ADTs, the field names are fixed
+                                String actualFieldName = resolveVariantFieldName(typePath, field.name(), fieldIdx);
+                                ctx.code.getfield(variantClass, actualFieldName, ConstantDescs.CD_Object);
                                 
                                 // For Option/Result, use the inner type for field bindings
                                 String fieldType = (scrutineeType.equals("Option") || scrutineeType.equals("Result")) 
-                                    ? innerType : "Object";
+                                    ? innerType : lookupEnumVariantFieldType(typePath, actualFieldName);
                                 
                                 // Unbox if needed
                                 if (fieldType.equals("Int")) {
@@ -1630,6 +1885,57 @@ public final class Java25CodeGenerator {
         return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + typePath);
     }
     
+    /**
+     * Resolve the actual field name in a variant class.
+     * For Option/Result ADTs, the field names are fixed:
+     * - Some: "value"
+     * - Ok: "value"
+     * - Err: "error"
+     * For user-defined enums, use the declared field name from the enum definition.
+     */
+    private String resolveVariantFieldName(String typePath, String patternFieldName, int fieldIndex) {
+        // Built-in Option/Result ADT field names
+        if (typePath.equals("Some") || typePath.equals("Ok")) {
+            return "value";
+        }
+        if (typePath.equals("Err")) {
+            return "error";
+        }
+        
+        // For user-defined enums, look up the declared field name
+        for (var entry : enums.entrySet()) {
+            for (var variant : entry.getValue().variants()) {
+                if (variant.name().equals(typePath)) {
+                    var fields = variant.fields();
+                    if (fieldIndex < fields.size()) {
+                        return fields.get(fieldIndex).name();
+                    }
+                }
+            }
+        }
+        
+        // Fallback to pattern field name (might not match, but best effort)
+        return patternFieldName;
+    }
+    
+    /**
+     * Look up the type of a field in an enum variant.
+     */
+    private String lookupEnumVariantFieldType(String typePath, String fieldName) {
+        for (var entry : enums.entrySet()) {
+            for (var variant : entry.getValue().variants()) {
+                if (variant.name().equals(typePath)) {
+                    for (var field : variant.fields()) {
+                        if (field.name().equals(fieldName)) {
+                            return getTypeName(field.type());
+                        }
+                    }
+                }
+            }
+        }
+        return "Object";
+    }
+    
     private void boxIfNeeded(CodeGenContext ctx, LiteralExpr literal) {
         switch (literal.kind()) {
             case INT -> ctx.code.invokestatic(
@@ -1657,32 +1963,22 @@ public final class Java25CodeGenerator {
         var resSlot = ctx.allocateLocal("$prop$" + ctx.nextSlot, "Object");
         ctx.code.astore(resSlot);
         
+        // Check if it's an Err using instanceof
         ctx.code.aload(resSlot);
-        ctx.code.invokevirtual(
-            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-            "getKey",
-            MethodTypeDesc.of(ConstantDescs.CD_Object)
-        );
-        ctx.code.ldc("Err");
-        ctx.code.invokevirtual(
-            ConstantDescs.CD_Object,
-            "equals",
-            MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
-        );
+        ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
         
         var okLabel = ctx.code.newLabel();
         ctx.code.ifeq(okLabel);
         
+        // It's an Err - return early
         ctx.code.aload(resSlot);
         ctx.code.areturn();
         
+        // It's Ok - extract the value
         ctx.code.labelBinding(okLabel);
         ctx.code.aload(resSlot);
-        ctx.code.invokevirtual(
-            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-            "getValue",
-            MethodTypeDesc.of(ConstantDescs.CD_Object)
-        );
+        ctx.code.checkcast(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
+        ctx.code.getfield(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"), "value", ConstantDescs.CD_Object);
         unboxIfNeeded(ctx, unwrappedType);
     }
     
