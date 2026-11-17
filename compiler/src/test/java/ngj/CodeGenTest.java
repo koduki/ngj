@@ -13,8 +13,20 @@ import java.nio.file.*;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.*;
 
+/**
+ * Code generation tests.
+ * 
+ * Note: These tests generate JDK 28 class files (class file version 72) and
+ * attempt to load/execute them. On JDK versions below 28, the loadClass()
+ * calls will fail with UnsupportedClassVersionError, which is expected.
+ * 
+ * Tests that require class loading are skipped on JDK < 28.
+ */
 class CodeGenTest {
+    
+    private static final int REQUIRED_JDK_FOR_RUNTIME = 28;
     
     private Path tempDir;
     
@@ -258,7 +270,15 @@ class CodeGenTest {
         return outputs.isEmpty() ? null : Files.readAllBytes(outputs.get(0));
     }
     
+    /**
+     * Load a generated class. Skips the test if running on JDK < 28,
+     * since we generate JDK 28 class files (version 72).
+     */
     private Class<?> loadClass(String className, byte[] bytecode) throws Exception {
+        int jdkVersion = Runtime.version().feature();
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Skipping class loading test: JDK " + REQUIRED_JDK_FOR_RUNTIME + " required (current: " + jdkVersion + ")");
+        
         var loader = new ByteArrayClassLoader(className.replace('/', '.'), bytecode);
         return loader.loadClass(className.replace('/', '.'));
     }
