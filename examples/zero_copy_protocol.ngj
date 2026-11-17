@@ -1,3 +1,4 @@
+// Legacy v0.2 architecture sketch. Canonical v0.3 syntax: syntax_v03.ngj.
 // Design example, not compiler-validated. See examples/README.md.
 module net.protocol
 
