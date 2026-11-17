@@ -33,21 +33,34 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Download and install JDK 28 EA Build 24 (Valhalla)
+    - name: Setup JDK 21 for Gradle
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+    
+    - name: Setup JDK 25 for compilation (toolchain)
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '25'
+    
+    - name: Download JDK 28 EA Build 24 (Valhalla runtime)
       run: |
         echo "Downloading JDK 28 EA Build 24 with JEP 401 Value Objects..."
         curl -sSL -o /tmp/jdk28.tar.gz "$VALHALLA_JDK_URL"
         sudo mkdir -p /opt/jdk-28
         sudo tar -xzf /tmp/jdk28.tar.gz -C /opt/jdk-28 --strip-components=1
-        echo "JAVA_HOME=/opt/jdk-28" >> $GITHUB_ENV
-        echo "/opt/jdk-28/bin" >> $GITHUB_PATH
+        echo "JAVA_HOME_28=/opt/jdk-28" >> $GITHUB_ENV
         
-    - name: Verify JDK version and preview features
+    - name: Verify JDK installations
       run: |
+        echo "=== Gradle JDK (21) ==="
         java --version
-        echo "Verifying JEP 401 Value Objects support..."
-        # Verify --enable-preview flag is accepted (JDK 28 EA with JEP 401)
-        java --enable-preview -version
+        echo ""
+        echo "=== Valhalla JDK 28 ==="
+        /opt/jdk-28/bin/java --version
+        /opt/jdk-28/bin/java --enable-preview -version
         echo "Preview features enabled successfully"
     
     - name: Setup Gradle
@@ -56,10 +69,10 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
     
-    - name: Build with preview features
+    - name: Build with toolchain
       run: ./gradlew build
     
-    - name: Run tests with preview features
+    - name: Run tests
       run: ./gradlew test
     
     - name: Upload test results
@@ -76,13 +89,24 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Download and install JDK 28 EA Build 24 (Valhalla)
+    - name: Setup JDK 21 for Gradle
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+    
+    - name: Setup JDK 25 for compilation (toolchain)
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '25'
+    
+    - name: Download JDK 28 EA Build 24 (Valhalla runtime)
       run: |
         curl -sSL -o /tmp/jdk28.tar.gz "$VALHALLA_JDK_URL"
         sudo mkdir -p /opt/jdk-28
         sudo tar -xzf /tmp/jdk28.tar.gz -C /opt/jdk-28 --strip-components=1
-        echo "JAVA_HOME=/opt/jdk-28" >> $GITHUB_ENV
-        echo "/opt/jdk-28/bin" >> $GITHUB_PATH
+        echo "JAVA_HOME_28=/opt/jdk-28" >> $GITHUB_ENV
     
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
@@ -93,14 +117,14 @@ jobs:
     - name: Build compiler JAR
       run: ./gradlew fatJar
     
-    - name: Run fixture tests with preview features
+    - name: Run fixture tests with Valhalla JDK
       run: |
-        java --enable-preview -jar compiler/build/libs/compiler-*-all.jar --version || true
+        /opt/jdk-28/bin/java --enable-preview -jar compiler/build/libs/compiler-*-all.jar --version || true
         
     - name: Verify Valhalla value class output
       run: |
         echo "Testing value class generation..."
-        java --enable-preview -jar compiler/build/libs/compiler-*-all.jar check fixtures/positive/simple_function.ngj || true
+        /opt/jdk-28/bin/java --enable-preview -jar compiler/build/libs/compiler-*-all.jar check fixtures/positive/simple_function.ngj || true
 
   container-build:
     runs-on: ubuntu-latest
