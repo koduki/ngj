@@ -14,7 +14,7 @@ class ParserTest {
             package test.simple;
             
             public fn main() -> Int effects() {
-                42
+                return 42;
             }
             """;
         
@@ -30,6 +30,8 @@ class ParserTest {
         assertTrue(fn.isPublic());
         assertEquals(0, fn.params().size());
         assertTrue(fn.effects().isEmpty());
+        assertEquals(1, fn.body().statements().size());
+        assertInstanceOf(ReturnStmt.class, fn.body().statements().get(0));
     }
     
     @Test
@@ -83,7 +85,7 @@ class ParserTest {
             import std.io.read;
             import std.io.write;
             
-            public fn test() -> Int effects() { 0 }
+            public fn test() -> Int effects() { return 0; }
             """;
         
         var lexer = new Lexer(source, "test.ngj");
@@ -101,7 +103,7 @@ class ParserTest {
             package test.hole;
             
             public fn calculate() -> Int effects() {
-                ?todo
+                return ?todo;
             }
             """;
         
@@ -110,7 +112,8 @@ class ParserTest {
         var unit = parser.parse();
         
         var fn = (FnDecl) unit.declarations().get(0);
-        var hole = (HoleExpr) fn.body().tailExpr();
+        var retStmt = (ReturnStmt) fn.body().statements().get(0);
+        var hole = (HoleExpr) retStmt.value();
         assertEquals("todo", hole.name());
     }
     
@@ -120,7 +123,7 @@ class ParserTest {
             package test.cond;
             
             public fn max(a: Int, b: Int) -> Int effects() {
-                if (a > b) { a } else { b }
+                return if (a > b) { a } else { b };
             }
             """;
         
@@ -129,7 +132,8 @@ class ParserTest {
         var unit = parser.parse();
         
         var fn = (FnDecl) unit.declarations().get(0);
-        var ifExpr = (IfExpr) fn.body().tailExpr();
+        var retStmt = (ReturnStmt) fn.body().statements().get(0);
+        var ifExpr = (IfExpr) retStmt.value();
         assertNotNull(ifExpr.condition());
         assertNotNull(ifExpr.thenBranch());
         assertNotNull(ifExpr.elseBranch());
@@ -143,10 +147,10 @@ class ParserTest {
             public enum Status { Ok(), Err() }
             
             public fn test(s: Status) -> Int effects() {
-                match (s) {
+                return match (s) {
                     case Ok() => { 1 },
                     case Err() => { 0 }
-                }
+                };
             }
             """;
         
@@ -155,7 +159,8 @@ class ParserTest {
         var unit = parser.parse();
         
         var fn = (FnDecl) unit.declarations().get(1);
-        var matchExpr = (MatchExpr) fn.body().tailExpr();
+        var retStmt = (ReturnStmt) fn.body().statements().get(0);
+        var matchExpr = (MatchExpr) retStmt.value();
         assertEquals(2, matchExpr.arms().size());
     }
     
@@ -166,7 +171,7 @@ class ParserTest {
             
             public fn test() -> Int effects() {
                 val x: Int = 42;
-                x
+                return x;
             }
             """;
         
@@ -175,7 +180,7 @@ class ParserTest {
         var unit = parser.parse();
         
         var fn = (FnDecl) unit.declarations().get(0);
-        assertEquals(1, fn.body().statements().size());
+        assertEquals(2, fn.body().statements().size());
         var valStmt = (ValStmt) fn.body().statements().get(0);
         assertEquals("x", valStmt.name());
     }
@@ -188,7 +193,7 @@ class ParserTest {
             public fn test() -> Int effects() {
                 var x: Int = 0;
                 x = 42;
-                x
+                return x;
             }
             """;
         
@@ -197,7 +202,7 @@ class ParserTest {
         var unit = parser.parse();
         
         var fn = (FnDecl) unit.declarations().get(0);
-        assertEquals(2, fn.body().statements().size());
+        assertEquals(3, fn.body().statements().size());
         var varStmt = (VarStmt) fn.body().statements().get(0);
         assertEquals("x", varStmt.name());
         var assignStmt = (AssignStmt) fn.body().statements().get(1);

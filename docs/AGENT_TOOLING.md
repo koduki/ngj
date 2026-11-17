@@ -1,10 +1,10 @@
 # Agent-facing compiler protocol — draft v0.3
 
-本仕様は[言語仕様](SPECIFICATION.md)の一部。以下は設計契約である。既存compilerにはCLI実装があるが、v0.3構文・全プロトコルの適合確認は移行試験で行う。MCPはこのAPI上の任意のadapterとし、コンパイラがネットワークサービスへ依存しないようにする。
+本仕様は[言語仕様](SPECIFICATION.md)の一部。以下は設計契約である。コンパイラはv0.3正規構文およびCLIプロトコル（`check`/`context`/`inspect`/`build`）を実装している。MCPはこのAPI上の任意のadapterとし、コンパイラがネットワークサービスへ依存しないようにする。
 
 ## 1. 部分プログラムとTyped Holes
 
-`?name`は名前付きの未実装式。穴IDはpackage/symbol/source revision/局所IDに束縛する。周囲の署名から期待型、許可Effect、利用可能な値、所有権状態、契約を求める。
+`?name`は名前付きの未実装式。穴IDはpackage/symbol/source revision/局所IDに束縛する。周囲の署名やローカル束縛型から期待型、許可Effect、利用可能な値、所有権状態、契約を求める。
 
 穴を含む関数の検査結果は`incomplete`であり、`valid`ではない。未解決の型制約やEffectをpure/安全と仮定してはならない。穴がresourceを消費するか不明な場合、その後の使用は「証明待ち」として示す。すでに確定した矛盾と、補完すれば解消し得る未解決制約を区別する。
 
@@ -19,7 +19,7 @@ ngjc check --format=json --profile=restricted --revision=<hash> <files>
 ngjc context --format=json --hole=<id> --revision=<hash> --max-bytes=16000
 ngjc inspect --format=json --symbol=<id> --revision=<hash>
 ngjc check-patch --format=json --base-revision=<hash> --patch=<file>
-ngjc build --target=java25 --profile=restricted
+ngjc build --target=valhalla --profile=restricted
 ```
 
 全応答に`schema_version`, `compiler_version`, `source_revision`, `policy_digest`, `target_profile`を含む。revisionはソースと依存lockの内容digestから生成する。診断の再利用時はpolicy digestも一致させる。JSONはstdout、進捗はstderr。通常診断でstack traceや環境変数を漏らさない。
@@ -41,10 +41,10 @@ context/inspectは正常な情報取得をexit 0とする。buildのincomplete�
 ```json
 {
   "schema_version": "ngj.diagnostics/1",
-  "compiler_version": "design-v0.3",
+  "compiler_version": "0.3.0-valhalla",
   "source_revision": "sha256:example",
   "policy_digest": "sha256:policy-example",
-  "target_profile": "java25/restricted",
+  "target_profile": "valhalla/restricted",
   "status": "invalid",
   "diagnostics": [{
     "id": "NGJ-EFFECT-001",
@@ -79,10 +79,10 @@ ownership診断ではmove/borrow/freezeの発生位置と寿命境界を返す�
 ```json
 {
   "schema_version": "ngj.context/1",
-  "compiler_version": "design-v0.3",
+  "compiler_version": "0.3.0-valhalla",
   "source_revision": "sha256:example",
   "policy_digest": "sha256:policy-example",
-  "target_profile": "java25/restricted",
+  "target_profile": "valhalla/restricted",
   "hole_id": "net.protocol.parseFrames:body",
   "expected_type": "Result<List<PacketFrame<'a>>, ParseError>",
   "allowed_effects": [],
@@ -117,4 +117,4 @@ ownership診断ではmove/borrow/freezeの発生位置と寿命境界を返す�
 
 ## 7. v0.3構文と診断境界
 
-[EBNF.md](EBNF.md)の正規構文だけをcontextの生成例に使用する。旧構文の混在は移行診断で示す。Result伝播先のfunction/lambda/fork境界IDを保持し、for callback内の?は明示的に拒否する。末尾セミコロンによる戻り値消失、Optionへの?、constructorの括弧不足は原因に即した診断を返す。全関数の型・Effectは明示署名から取得する。
+[EBNF.md](EBNF.md)の正規構文だけをcontextの生成例に使用する。旧構文の混在は移行診断（`NGJ-MIGRATE-*`）で示す。Result伝播先のfunction/lambda/fork境界IDを保持し、for callback内の`?`および`return`は明示的に拒否する（`NGJ-PROP-002`）。関数の`return`漏れ（`NGJ-RETURN-001`）、非`Unit`式文による戻り値消失（`NGJ-TYPE-016`）、`Option`への`?`（`NGJ-PROP-001`）、constructorの括弧不足は原因に即した診断を返す。全関数の型・Effectは明示署名から取得する。

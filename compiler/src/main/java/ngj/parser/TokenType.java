@@ -2,7 +2,7 @@ package ngj.parser;
 
 public enum TokenType {
     // v0.3 Keywords
-    PACKAGE, IMPORT, PUBLIC, FN, VAL, VAR, IF, ELSE, MATCH, CASE, 
+    PACKAGE, IMPORT, PUBLIC, FN, VAL, VAR, RETURN, IF, ELSE, MATCH, CASE, 
     RECORD, ENUM, EFFECTS, FOR, YIELD, WHILE,
     TRUE, FALSE,
     
@@ -13,7 +13,7 @@ public enum TokenType {
     NULL,
     
     // Legacy v0.2 keywords (for migration diagnostics)
-    MODULE, PUB, DATA, LET, RETURN, MUT,
+    MODULE, PUB, DATA, LET, MUT,
     
     // Punctuation
     LPAREN, RPAREN,     // ( )

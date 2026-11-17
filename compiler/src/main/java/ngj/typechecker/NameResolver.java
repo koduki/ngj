@@ -19,19 +19,33 @@ public final class NameResolver {
     }
     
     public void resolve(CompilationUnit unit) {
-        currentModule = unit.modulePath();
-        
+        resolveAll(List.of(unit));
+    }
+    
+    public void resolveAll(List<CompilationUnit> units) {
         // Register built-in types
         registerBuiltins();
         
-        // First pass: register all top-level declarations
-        for (var decl : unit.declarations()) {
-            registerTopLevel(decl);
+        // First pass: register all top-level declarations across all units
+        for (var unit : units) {
+            currentModule = unit.modulePath();
+            for (var decl : unit.declarations()) {
+                registerTopLevel(decl);
+            }
         }
         
-        // Second pass: resolve references in bodies
-        for (var decl : unit.declarations()) {
-            resolveDecl(decl);
+        // Second pass: resolve imports and references in bodies
+        for (var unit : units) {
+            currentModule = unit.modulePath();
+            for (var imp : unit.imports()) {
+                for (var importedName : imp.names()) {
+                    String fullId = imp.modulePath().isEmpty() ? importedName : imp.modulePath() + "." + importedName;
+                    globalSymbols.putIfAbsent(importedName, new Symbol(fullId, Symbol.Kind.FUNCTION, true));
+                }
+            }
+            for (var decl : unit.declarations()) {
+                resolveDecl(decl);
+            }
         }
     }
     
@@ -51,16 +65,28 @@ public final class NameResolver {
         globalSymbols.put("Option", new Symbol("Option", Symbol.Kind.TYPE, true));
         globalSymbols.put("List", new Symbol("List", Symbol.Kind.TYPE, true));
         
-        // Standard error types (STDLIB-07)
+        // Standard error types and variants (STDLIB-07)
         globalSymbols.put("OverflowError", new Symbol("OverflowError", Symbol.Kind.TYPE, true));
+        globalSymbols.put("IntOverflow", new Symbol("OverflowError.IntOverflow", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("OverflowError.IntOverflow", new Symbol("OverflowError.IntOverflow", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("LongOverflow", new Symbol("OverflowError.LongOverflow", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("OverflowError.LongOverflow", new Symbol("OverflowError.LongOverflow", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("RangeError", new Symbol("RangeError", Symbol.Kind.TYPE, true));
+        globalSymbols.put("OutOfRange", new Symbol("RangeError.OutOfRange", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("RangeError.OutOfRange", new Symbol("RangeError.OutOfRange", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("IndexError", new Symbol("IndexError", Symbol.Kind.TYPE, true));
+        globalSymbols.put("IndexOutOfBounds", new Symbol("IndexError.IndexOutOfBounds", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("IndexError.IndexOutOfBounds", new Symbol("IndexError.IndexOutOfBounds", Symbol.Kind.CONSTRUCTOR, true));
         
         // Built-in constructors (STDLIB-02, STDLIB-03)
         globalSymbols.put("Ok", new Symbol("Ok", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("Result.Ok", new Symbol("Ok", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("Err", new Symbol("Err", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("Result.Err", new Symbol("Err", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("Some", new Symbol("Some", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("Option.Some", new Symbol("Some", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("None", new Symbol("None", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("Option.None", new Symbol("None", Symbol.Kind.CONSTRUCTOR, true));
         
         // List constructors (STDLIB-04)
         globalSymbols.put("Nil", new Symbol("Nil", Symbol.Kind.CONSTRUCTOR, true));
@@ -107,7 +133,9 @@ public final class NameResolver {
                 globalSymbols.put(enumDecl.name(), new Symbol(id, Symbol.Kind.TYPE, enumDecl.isPublic()));
                 for (var variant : enumDecl.variants()) {
                     String variantId = id + "." + variant.name();
-                    globalSymbols.put(variant.name(), new Symbol(variantId, Symbol.Kind.CONSTRUCTOR, enumDecl.isPublic()));
+                    var sym = new Symbol(variantId, Symbol.Kind.CONSTRUCTOR, enumDecl.isPublic());
+                    globalSymbols.put(variant.name(), sym);
+                    globalSymbols.put(enumDecl.name() + "." + variant.name(), sym);
                 }
             }
         }

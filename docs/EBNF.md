@@ -1,19 +1,19 @@
 # NGJ v0.3 grammar
 
-> Normative target for the syntax migration. The compiler at the base commit still implements v0.2 forms.
-> The archived [v0.2 grammar](EBNF_V02.md) and existing compiler fixtures document the migration baseline.
+> Normative v0.3 grammar implemented by the compiler.
+> The archived [v0.2 grammar](EBNF_V02.md) documents the pre-migration baseline.
 > Valhalla foundation and enum ADT semantics: Refs #7.
 
 ## 1. Canonical forms
 
-Every construct has one source spelling. Package/import declarations end with semicolons. Blocks use braces. Newlines are whitespace. Keywords cannot be used as identifiers, including path segments.
+Every construct has one source spelling. Package/import declarations and statements end with semicolons. Blocks use braces. Newlines are whitespace. Keywords cannot be used as identifiers, including path segments.
 
-- Declarations use `package`, `public`, `fn`, `record`, `enum`, `val`, `var`.
+- Declarations and statements use `package`, `public`, `fn`, `record`, `enum`, `val`, `var`, `return`.
 - Type names are `Int`, `Long`, `Bool`, `String`, `Unit`, `Result<T,E>`, `Option<T>`.
 - Functions require parameter types, result types and `effects(...)`, including private functions.
 - Arguments and constructor fields are positional, in declaration order. Named/default/variadic arguments are deferred.
 - Imports name one symbol per declaration. Grouped imports, aliases and wildcards are deferred.
-- Value-producing blocks use a tail expression. `return` is absent.
+- Functions with non-`Unit` return types require explicit `return <expr>;` statements along all execution paths (`NGJ-RETURN-001`). Expression blocks (`if`, `match`, `for-yield`) evaluate to their tail expression (or exit the enclosing function early via `return`).
 - Assignment is a statement. Only local `var` bindings can be reassigned when the sequential profile is enabled.
 - No overloads, implicit conversions, operator overloading, infix calls, inheritance or implicit parameters.
 - Member access and qualified variants use `.`. Explicit type arguments in expressions use `::<...>`.
@@ -48,9 +48,10 @@ variant = IDENT "(" [ parameters ] ")" ;
 type = path [ "<" type { "," type } ">" ] ;
 
 block = "{" { statement } [ expression ] "}" ;
-statement = binding | assignment | expression ";" ;
+statement = binding | assignment | returnStmt | conditional | matching | expression ";" ;
 binding = ( "val" | "var" ) IDENT [ ":" type ] "=" expression ";" ;
 assignment = IDENT "=" expression ";" ;
+returnStmt = "return" [ expression ] ";" ;
 expression = logicalOr ;
 logicalOr = logicalAnd { "||" logicalAnd } ;
 logicalAnd = equality { "&&" equality } ;
@@ -84,13 +85,17 @@ The core recognizes type application syntactically, then checks the supported ty
 
 The block notation above has a shared expression prefix. A recursive-descent parser handles it as follows.
 
-1. On val/var, parse a binding.
-2. On IDENT followed by a single equals token, parse assignment.
-3. Otherwise parse one expression. A following semicolon ends a statement. A following closing brace makes it the tail. Any other token produces a missing-semicolon diagnostic.
+1. On `val`/`var`, parse a binding (`binding`).
+2. On `return`, parse a return statement (`returnStmt`), requiring a trailing `;` (`NGJ-PARSE-008`).
+3. On `IDENT` followed by a single equals token, parse assignment (`assignment`).
+4. Otherwise parse one expression. A following semicolon ends a statement. If the expression is a block-structured `if` or `match` not at the end of the block, it may stand as a statement without a trailing semicolon (supporting guard clauses such as `if (x < 0) { return 0; }`). A following closing brace makes the expression the tail of the block. Any other token produces a missing-semicolon diagnostic (`NGJ-PARSE-008`).
 
-Declarations cannot appear inside blocks. Expression statements must have Unit type. This prevents silently discarding a value or Result. A trailing semicolon on a required Int result produces a diagnostic identifying the lost result, with the enclosing return type.
+Declarations cannot appear inside blocks.
+- **Function bodies (`fn`)**: A function with a non-`Unit` return type must exit via `return <expr>;` along every execution path (for example, ending with `return <expr>;` or returning in all branches of an `if`/`else` or `match`). A bare tail expression at the top level of a non-`Unit` function body (or a path without `return`) produces `NGJ-RETURN-001` (except when the body is a bare typed hole `{ ?hole }`, which remains `INCOMPLETE` with `NGJ-HOLE-001`). A `Unit` function may omit `return`, use `return;`, or use `return ();`.
+- **Expression blocks (`if`, `match`, `for-yield`)**: When used as value expressions, branches evaluate to their tail expression (or may exit the enclosing function early via `return <expr>;`).
+- **Expression statements**: Non-`return` expression statements must have `Unit` type (`NGJ-TYPE-016`), preventing silently discarding a value or `Result`.
 
-An if with else requires both branch types to agree under the expected type. An if without else requires a Unit then-branch and produces Unit. Braces are mandatory even for nested else-if. Match checks all variants and compatible arm result types. There are no implicit numeric widenings.
+An if with else requires both branch types to agree under the expected type (unless a branch diverges via `return`). An if without else requires a Unit or returning then-branch and produces Unit. Braces are mandatory even for nested else-if. Match checks all variants and compatible arm result types. There are no implicit numeric widenings.
 
 A binding's name is available only after its initializer. Local declarations cannot shadow active local/parameter/import names in the initial profile. Type and term declarations share a namespace within a package, except record constructors, which are the value construction operation of their type.
 
@@ -119,8 +124,8 @@ These forms extend primary expressions. Lambda parameters always have explicit t
 - for-yield with List<T> input and U body returns List<U>, eagerly.
 - for without yield requires a Unit body and returns Unit.
 - while requires Bool condition and Unit body and returns Unit. Condition is reevaluated before every iteration.
-- The for body is a callback boundary. To keep result typing explicit, postfix `?` is rejected in that body, except inside a separately declared nested lambda. Return Result values explicitly, producing List<Result<...>>, or use a typed traversal library operation.
-- Nested while blocks in a for body inherit that restriction. A while in a function may propagate to that function.
+- The for body is a callback boundary. To keep result typing explicit, both postfix `?` and `return` are rejected in that body (`NGJ-PROP-002`), except inside a separately declared nested lambda. Yield Result values explicitly, producing List<Result<...>>, or use a typed traversal library operation.
+- Nested while blocks in a for body inherit that restriction. A while in a function may propagate or return from that function.
 - Mutable captures in ordinary lambdas and for callbacks are initially rejected. Read-only val captures are allowed, subject to ownership. Local var declared inside the callback is allowed. Accumulating mutable state uses while in the owning function.
 - break/continue, labeled exits and non-local returns are deferred.
 
@@ -187,11 +192,11 @@ Match expressions **must** cover all enum variants. Missing variants produce a c
 ```
 // Error: missing variant 'Point' in match expression
 fn area(shape: Shape) -> Float effects() {
-    match (shape) {
-        case Circle(r) => { 3.14159 * r * r }
+    return match (shape) {
+        case Circle(r) => { 3.14159 * r * r },
         case Rectangle(w, h) => { w * h }
         // Point is missing → compile error with diagnostic
-    }
+    };
 }
 ```
 

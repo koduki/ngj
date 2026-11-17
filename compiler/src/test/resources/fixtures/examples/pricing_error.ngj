@@ -4,20 +4,20 @@ package example.pricing_error;
 
 // Error: returning String when Int expected
 public fn itemSubtotal(basePrice: Int, quantity: Int) -> Int effects() {
-    "not a number"
+    return "not a number";
 }
 
 // Error: wrong arithmetic types
 public fn calculateTax(amount: Int, taxRate: Int) -> Int effects() {
-    amount * "10" / 100
+    return amount * "10" / 100;
 }
 
 // Error: type mismatch in return
 public fn applyDiscount(amount: Int, percentOff: Int) -> Int effects() {
-    true
+    return true;
 }
 
 // Error: wrong argument types in function call
 public fn calculateTotal(basePrice: Int, quantity: Int) -> Int effects() {
-    itemSubtotal("hello", quantity)
+    return itemSubtotal("hello", quantity);
 }

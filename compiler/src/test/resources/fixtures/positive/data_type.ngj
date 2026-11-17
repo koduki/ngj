@@ -4,9 +4,9 @@ package test.data;
 public record Point(x: Int, y: Int);
 
 public fn createPoint(x: Int, y: Int) -> Point effects() {
-    Point(x, y)
+    return Point(x, y);
 }
 
 public fn getX(p: Point) -> Int effects() {
-    p.x
+    return p.x;
 }

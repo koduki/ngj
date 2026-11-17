@@ -8,9 +8,9 @@ public enum Color {
 }
 
 public fn colorToInt(c: Color) -> Int effects() {
-    match (c) {
+    return match (c) {
         case Red() => { 0 },
         case Green() => { 1 },
         case Blue() => { 2 }
-    }
+    };
 }

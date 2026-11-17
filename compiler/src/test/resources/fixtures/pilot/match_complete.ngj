@@ -11,8 +11,8 @@ public enum Color {
 
 // The match is incomplete - AI should detect missing cases
 public fn colorCode(c: Color) -> Int effects() {
-    match (c) {
+    return match (c) {
         case Red() => { 1 },
         case Green() => { ?greenCode }
-    }
+    };
 }

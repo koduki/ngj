@@ -309,7 +309,7 @@ public final class Main {
         String revision = null;
         String holeId = null;
         String symbolId = null;
-        String target = "java25";
+        String target = "valhalla";
         int maxBytes = 16000;
         List<Path> files = new ArrayList<>();
         

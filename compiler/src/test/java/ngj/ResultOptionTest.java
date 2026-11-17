@@ -14,7 +14,7 @@ class ResultOptionTest {
             package test.ok;
             
             public fn test() -> Result<Int, String> effects() {
-                Ok(42)
+                return Ok(42);
             }
             """;
         
@@ -37,7 +37,7 @@ class ResultOptionTest {
             package test.err;
             
             public fn test() -> Result<Int, String> effects() {
-                Err("error")
+                return Err("error");
             }
             """;
         
@@ -60,7 +60,7 @@ class ResultOptionTest {
             package test.some;
             
             public fn test() -> Option<Int> effects() {
-                Some(42)
+                return Some(42);
             }
             """;
         
@@ -83,7 +83,7 @@ class ResultOptionTest {
             package test.none;
             
             public fn test() -> Option<Int> effects() {
-                None()
+                return None();
             }
             """;
         
@@ -106,12 +106,12 @@ class ResultOptionTest {
             package test.prop;
             
             public fn inner() -> Result<Int, String> effects() {
-                Ok(1)
+                return Ok(1);
             }
             
             public fn outer() -> Result<Int, String> effects() {
                 val x = inner()?;
-                Ok(x + 1)
+                return Ok(x + 1);
             }
             """;
         
@@ -135,7 +135,7 @@ class ResultOptionTest {
             
             public fn outer() -> Result<Int, String> effects() {
                 val x: Int = 42;
-                x?
+                return x?;
             }
             """;
         

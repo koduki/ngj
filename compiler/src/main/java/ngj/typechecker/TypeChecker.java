@@ -14,9 +14,11 @@ import java.util.HashSet;
 public final class TypeChecker {
     private final List<Diagnostic> diagnostics = new ArrayList<>();
     private final Map<String, TypeInfo> typeEnv = new HashMap<>();
+    private final Map<String, FnDecl> fnEnv = new HashMap<>();
     private final Deque<Map<String, TypeExpr>> scopes = new ArrayDeque<>();
     private final Deque<Set<String>> mutableVars = new ArrayDeque<>();
     private TypeExpr currentReturnType;
+    private TypeExpr currentExpectedType;
     private List<String> currentEffects;
     
     public List<Diagnostic> getDiagnostics() {
@@ -24,17 +26,25 @@ public final class TypeChecker {
     }
     
     public void check(CompilationUnit unit) {
+        checkAll(List.of(unit));
+    }
+    
+    public void checkAll(List<CompilationUnit> units) {
         // Register built-in types
         registerBuiltins();
         
-        // First pass: register type declarations
-        for (var decl : unit.declarations()) {
-            registerDecl(decl);
+        // First pass: register type and function declarations across all units
+        for (var unit : units) {
+            for (var decl : unit.declarations()) {
+                registerDecl(decl);
+            }
         }
         
         // Second pass: type check bodies
-        for (var decl : unit.declarations()) {
-            checkDecl(decl);
+        for (var unit : units) {
+            for (var decl : unit.declarations()) {
+                checkDecl(decl);
+            }
         }
     }
     
@@ -145,7 +155,7 @@ public final class TypeChecker {
                     .toList();
                 typeEnv.put(enumDecl.name(), new TypeInfo(TypeInfo.Kind.ENUM, variants));
             }
-            case FnDecl _ -> {}
+            case FnDecl fn -> fnEnv.put(fn.name(), fn);
         }
     }
     
@@ -167,13 +177,14 @@ public final class TypeChecker {
     private void checkFn(FnDecl fn) {
         pushScope();
         currentReturnType = fn.returnType();
+        currentExpectedType = fn.returnType();
         currentEffects = fn.effects();
         
         // Check effect bound (MVP only allows empty)
         if (!fn.effects().isEmpty()) {
             diagnostics.add(Diagnostic.error(
                 "NGJ-EFFECT-001",
-                "Non-empty effect bound not supported in MVP: ! {" + String.join(", ", fn.effects()) + "}",
+                "Non-empty effect bound not supported in MVP: effects(" + String.join(", ", fn.effects()) + ")",
                 fn.span()
             ));
         }
@@ -185,21 +196,95 @@ public final class TypeChecker {
         
         // Check body
         var bodyType = checkBlock(fn.body());
+        boolean isUnitReturn = getTypeName(fn.returnType()).equals("Unit");
         
-        // Verify return type
-        if (bodyType != null && !isAssignable(fn.returnType(), bodyType)) {
-            diagnostics.add(Diagnostic.error(
-                "NGJ-TYPE-001",
-                "Return type mismatch",
-                fn.body().span(),
-                new ExpectedActual(fn.returnType().toString()),
-                new ExpectedActual(bodyType.toString())
-            ));
+        if (!isUnitReturn) {
+            if (fn.body().tailExpr() instanceof HoleExpr) {
+                // Typed hole at function body level is incomplete, not a missing return error
+            } else if (fn.body().tailExpr() != null) {
+                if (!exprAlwaysReturns(fn.body().tailExpr())) {
+                    if (bodyType != null && !isAssignable(fn.returnType(), bodyType)) {
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-TYPE-001",
+                            "Return type mismatch",
+                            fn.body().span(),
+                            new ExpectedActual(fn.returnType().toString()),
+                            new ExpectedActual(bodyType.toString())
+                        ));
+                    }
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-RETURN-001",
+                        "Missing 'return' statement: function returning " + fn.returnType() + " must use 'return <expr>;'",
+                        fn.body().tailExpr().span()
+                    ));
+                }
+            } else if (!blockAlwaysReturns(fn.body())) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-RETURN-001",
+                    "Missing 'return' statement on all control flow paths for function returning " + fn.returnType(),
+                    fn.body().span()
+                ));
+            }
+        } else if (fn.body().tailExpr() != null && !(fn.body().tailExpr() instanceof HoleExpr)) {
+            if (bodyType != null && !isAssignable(fn.returnType(), bodyType)) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-TYPE-001",
+                    "Return type mismatch",
+                    fn.body().span(),
+                    new ExpectedActual(fn.returnType().toString()),
+                    new ExpectedActual(bodyType.toString())
+                ));
+            }
         }
         
         popScope();
         currentReturnType = null;
+        currentExpectedType = null;
         currentEffects = null;
+    }
+    
+    private boolean blockAlwaysReturns(BlockExpr block) {
+        for (var stmt : block.statements()) {
+            if (stmtAlwaysReturns(stmt)) {
+                return true;
+            }
+        }
+        if (block.tailExpr() != null) {
+            return exprAlwaysReturns(block.tailExpr());
+        }
+        return false;
+    }
+    
+    private boolean stmtAlwaysReturns(Statement stmt) {
+        return switch (stmt) {
+            case ReturnStmt _ -> true;
+            case ExprStmt exprStmt -> exprAlwaysReturns(exprStmt.expr());
+            default -> false;
+        };
+    }
+    
+    private boolean exprAlwaysReturns(Expr expr) {
+        return switch (expr) {
+            case HoleExpr _ -> true;
+            case BlockExpr block -> blockAlwaysReturns(block);
+            case IfExpr ifExpr -> ifExpr.elseBranch() != null
+                && blockAlwaysReturns(ifExpr.thenBranch())
+                && exprAlwaysReturns(ifExpr.elseBranch());
+            case MatchExpr matchExpr -> !matchExpr.arms().isEmpty()
+                && matchExpr.arms().stream().allMatch(arm -> exprAlwaysReturns(arm.body()));
+            case ParenExpr paren -> exprAlwaysReturns(paren.inner());
+            default -> false;
+        };
+    }
+    
+    private TypeExpr checkExprWithExpected(Expr expr, TypeExpr expected) {
+        var prev = currentExpectedType;
+        currentExpectedType = expected;
+        try {
+            return checkExpr(expr);
+        } finally {
+            currentExpectedType = prev;
+        }
     }
     
     private void checkData(DataDecl data) {
@@ -218,14 +303,19 @@ public final class TypeChecker {
     
     private TypeExpr checkBlock(BlockExpr block) {
         pushScope();
+        var savedExpected = currentExpectedType;
         
         for (var stmt : block.statements()) {
+            currentExpectedType = null;
             checkStmt(stmt);
         }
         
+        currentExpectedType = savedExpected;
         TypeExpr result = null;
         if (block.tailExpr() != null) {
             result = checkExpr(block.tailExpr());
+        } else if (!blockAlwaysReturns(block)) {
+            result = new UnitTypeExpr(block.span());
         }
         
         popScope();
@@ -235,7 +325,7 @@ public final class TypeChecker {
     private void checkStmt(Statement stmt) {
         switch (stmt) {
             case ValStmt val -> {
-                var initType = checkExpr(val.initializer());
+                var initType = checkExprWithExpected(val.initializer(), val.explicitType());
                 
                 TypeExpr varType;
                 if (val.explicitType() != null) {
@@ -254,7 +344,7 @@ public final class TypeChecker {
                 } else {
                     varType = initType;
                     
-                    if (varType == null) {
+                    if (varType == null && !(val.initializer() instanceof HoleExpr)) {
                         diagnostics.add(Diagnostic.error(
                             "NGJ-TYPE-003",
                             "Cannot infer type for val binding. Please add explicit type annotation.",
@@ -266,7 +356,7 @@ public final class TypeChecker {
                 addLocal(val.name(), varType, false);
             }
             case VarStmt var -> {
-                var initType = checkExpr(var.initializer());
+                var initType = checkExprWithExpected(var.initializer(), var.explicitType());
                 
                 TypeExpr varType;
                 if (var.explicitType() != null) {
@@ -285,7 +375,7 @@ public final class TypeChecker {
                 } else {
                     varType = initType;
                     
-                    if (varType == null) {
+                    if (varType == null && !(var.initializer() instanceof HoleExpr)) {
                         diagnostics.add(Diagnostic.error(
                             "NGJ-TYPE-003",
                             "Cannot infer type for var binding. Please add explicit type annotation.",
@@ -297,8 +387,8 @@ public final class TypeChecker {
                 addLocal(var.name(), varType, true);
             }
             case AssignStmt assign -> {
-                var valueType = checkExpr(assign.value());
                 var targetType = lookupLocal(assign.name());
+                var valueType = checkExprWithExpected(assign.value(), targetType);
                 
                 if (targetType == null) {
                     diagnostics.add(Diagnostic.error(
@@ -323,7 +413,7 @@ public final class TypeChecker {
                 }
             }
             case LetStmt let -> {
-                var initType = checkExpr(let.initializer());
+                var initType = checkExprWithExpected(let.initializer(), let.explicitType());
                 
                 TypeExpr varType;
                 if (let.explicitType() != null) {
@@ -342,7 +432,7 @@ public final class TypeChecker {
                 } else {
                     varType = initType;
                     
-                    if (varType == null) {
+                    if (varType == null && !(let.initializer() instanceof HoleExpr)) {
                         diagnostics.add(Diagnostic.error(
                             "NGJ-TYPE-003",
                             "Cannot infer type for let binding. Please add explicit type annotation.",
@@ -367,7 +457,7 @@ public final class TypeChecker {
             }
             case ReturnStmt ret -> {
                 if (ret.value() != null) {
-                    var valueType = checkExpr(ret.value());
+                    var valueType = checkExprWithExpected(ret.value(), currentReturnType);
                     if (currentReturnType != null && valueType != null && 
                         !isAssignable(currentReturnType, valueType)) {
                         diagnostics.add(Diagnostic.error(
@@ -378,6 +468,14 @@ public final class TypeChecker {
                             new ExpectedActual(valueType.toString())
                         ));
                     }
+                } else if (currentReturnType != null && !getTypeName(currentReturnType).equals("Unit")) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-TYPE-001",
+                        "Return type mismatch: bare 'return;' is only valid in Unit functions",
+                        ret.span(),
+                        new ExpectedActual(currentReturnType.toString()),
+                        new ExpectedActual("Unit")
+                    ));
                 }
             }
         }
@@ -397,7 +495,7 @@ public final class TypeChecker {
             
             case HoleExpr hole -> {
                 // Record hole context for context retrieval
-                hole.setExpectedType(currentReturnType);
+                hole.setExpectedType(currentExpectedType != null ? currentExpectedType : currentReturnType);
                 hole.setAllowedEffects(currentEffects != null ? currentEffects : List.of());
                 
                 // Add bindings from current scope
@@ -707,6 +805,120 @@ public final class TypeChecker {
                             }
                         }
                         yield new GenericTypeExpr("Result", List.of(), call.span());
+                    } else if (fnEnv.containsKey(name)) {
+                        var fn = fnEnv.get(name);
+                        if (call.args().size() != fn.params().size()) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                name + " requires " + fn.params().size() + " arguments",
+                                call.span()
+                            ));
+                        } else {
+                            for (int i = 0; i < call.args().size(); i++) {
+                                var expectedParamType = fn.params().get(i).type();
+                                var argType = checkExprWithExpected(call.args().get(i), expectedParamType);
+                                if (argType != null && !isAssignable(expectedParamType, argType)) {
+                                    diagnostics.add(Diagnostic.error(
+                                        "NGJ-TYPE-002",
+                                        "Type mismatch in argument " + (i + 1) + " of " + name,
+                                        call.args().get(i).span(),
+                                        new ExpectedActual(expectedParamType.toString()),
+                                        new ExpectedActual(argType.toString())
+                                    ));
+                                }
+                            }
+                        }
+                        yield fn.returnType();
+                    } else if (typeEnv.containsKey(name) && typeEnv.get(name).kind() == TypeInfo.Kind.DATA) {
+                        var fields = typeEnv.get(name).fields();
+                        if (call.args().size() != fields.size()) {
+                            diagnostics.add(Diagnostic.error(
+                                "NGJ-TYPE-014",
+                                name + " requires " + fields.size() + " arguments",
+                                call.span()
+                            ));
+                        } else {
+                            for (int i = 0; i < call.args().size(); i++) {
+                                var expectedFieldType = fields.get(i).type();
+                                var argType = checkExprWithExpected(call.args().get(i), expectedFieldType);
+                                if (argType != null && expectedFieldType != null && !isAssignable(expectedFieldType, argType)) {
+                                    diagnostics.add(Diagnostic.error(
+                                        "NGJ-TYPE-002",
+                                        "Type mismatch in field '" + fields.get(i).name() + "' of " + name,
+                                        call.args().get(i).span(),
+                                        new ExpectedActual(expectedFieldType.toString()),
+                                        new ExpectedActual(argType.toString())
+                                    ));
+                                }
+                            }
+                        }
+                        yield new SimpleTypeExpr(name, call.span());
+                    } else {
+                        // Check if name is an unqualified enum variant constructor
+                        for (var entry : typeEnv.entrySet()) {
+                            if (entry.getValue().kind() == TypeInfo.Kind.ENUM) {
+                                for (var variant : entry.getValue().variants()) {
+                                    if (variant.name().equals(name)) {
+                                        var fields = variant.fields();
+                                        if (call.args().size() != fields.size()) {
+                                            diagnostics.add(Diagnostic.error(
+                                                "NGJ-TYPE-014",
+                                                name + " requires " + fields.size() + " arguments",
+                                                call.span()
+                                            ));
+                                        } else {
+                                            for (int i = 0; i < call.args().size(); i++) {
+                                                var expectedFieldType = fields.get(i).type();
+                                                var argType = checkExprWithExpected(call.args().get(i), expectedFieldType);
+                                                if (argType != null && expectedFieldType != null && !isAssignable(expectedFieldType, argType)) {
+                                                    diagnostics.add(Diagnostic.error(
+                                                        "NGJ-TYPE-002",
+                                                        "Type mismatch in field '" + fields.get(i).name() + "' of " + name,
+                                                        call.args().get(i).span(),
+                                                        new ExpectedActual(expectedFieldType.toString()),
+                                                        new ExpectedActual(argType.toString())
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        yield new SimpleTypeExpr(entry.getKey(), call.span());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (call.callee() instanceof FieldAccessExpr access && access.object() instanceof IdentExpr enumIdent) {
+                    var enumName = enumIdent.name();
+                    var variantName = access.fieldName();
+                    var typeInfo = typeEnv.get(enumName);
+                    if (typeInfo != null && typeInfo.kind() == TypeInfo.Kind.ENUM) {
+                        for (var variant : typeInfo.variants()) {
+                            if (variant.name().equals(variantName)) {
+                                var fields = variant.fields();
+                                if (call.args().size() != fields.size()) {
+                                    diagnostics.add(Diagnostic.error(
+                                        "NGJ-TYPE-014",
+                                        enumName + "." + variantName + " requires " + fields.size() + " arguments",
+                                        call.span()
+                                    ));
+                                } else {
+                                    for (int i = 0; i < call.args().size(); i++) {
+                                        var expectedFieldType = fields.get(i).type();
+                                        var argType = checkExprWithExpected(call.args().get(i), expectedFieldType);
+                                        if (argType != null && expectedFieldType != null && !isAssignable(expectedFieldType, argType)) {
+                                            diagnostics.add(Diagnostic.error(
+                                                "NGJ-TYPE-002",
+                                                "Type mismatch in field '" + fields.get(i).name() + "' of " + enumName + "." + variantName,
+                                                call.args().get(i).span(),
+                                                new ExpectedActual(expectedFieldType.toString()),
+                                                new ExpectedActual(argType.toString())
+                                            ));
+                                        }
+                                    }
+                                }
+                                yield new SimpleTypeExpr(enumName, call.span());
+                            }
+                        }
                     }
                 }
                 
@@ -714,12 +926,27 @@ public final class TypeChecker {
                 for (var arg : call.args()) {
                     checkExpr(arg);
                 }
-                yield null; // Would need function signature tracking
+                yield null;
             }
             
             case FieldAccessExpr access -> {
                 var objType = checkExpr(access.object());
-                // Would need to lookup field type
+                if (objType != null) {
+                    var typeName = getTypeName(objType);
+                    var typeInfo = typeEnv.get(typeName);
+                    if (typeInfo != null && typeInfo.kind() == TypeInfo.Kind.DATA) {
+                        for (var field : typeInfo.fields()) {
+                            if (field.name().equals(access.fieldName())) {
+                                yield field.type();
+                            }
+                        }
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-TYPE-025",
+                            "Unknown field '" + access.fieldName() + "' on type " + typeName,
+                            access.span()
+                        ));
+                    }
+                }
                 yield null;
             }
             
@@ -912,7 +1139,14 @@ public final class TypeChecker {
             case VarStmt var -> checkExprForPropagate(var.initializer(), forSpan);
             case AssignStmt assign -> checkExprForPropagate(assign.value(), forSpan);
             case LetStmt let -> checkExprForPropagate(let.initializer(), forSpan);
-            case ReturnStmt ret -> { if (ret.value() != null) checkExprForPropagate(ret.value(), forSpan); }
+            case ReturnStmt ret -> {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-PROP-002",
+                    "return statement is not allowed inside for body. For bodies are callback boundaries.",
+                    ret.span()
+                ));
+                if (ret.value() != null) checkExprForPropagate(ret.value(), forSpan);
+            }
         }
     }
     
@@ -1096,7 +1330,8 @@ public final class TypeChecker {
     }
     
     private TypeExpr checkIfExpr(IfExpr ifExpr) {
-        var condType = checkExpr(ifExpr.condition());
+        var savedExpected = currentExpectedType;
+        var condType = checkExprWithExpected(ifExpr.condition(), new SimpleTypeExpr("Bool", ifExpr.condition().span()));
         if (condType != null && !getTypeName(condType).equals("Bool")) {
             diagnostics.add(Diagnostic.error(
                 "NGJ-TYPE-010",
@@ -1105,10 +1340,12 @@ public final class TypeChecker {
             ));
         }
         
+        currentExpectedType = savedExpected;
         var thenType = checkBlock(ifExpr.thenBranch());
         
         TypeExpr elseType = null;
         if (ifExpr.elseBranch() != null) {
+            currentExpectedType = savedExpected;
             elseType = checkExpr(ifExpr.elseBranch());
             
             if (thenType != null && elseType != null && !isAssignable(thenType, elseType)) {
@@ -1120,6 +1357,7 @@ public final class TypeChecker {
                     new ExpectedActual(elseType.toString())
                 ));
             }
+            return thenType != null ? thenType : elseType;
         } else {
             if (thenType != null && !getTypeName(thenType).equals("Unit")) {
                 diagnostics.add(Diagnostic.error(
@@ -1132,12 +1370,11 @@ public final class TypeChecker {
             }
             return new UnitTypeExpr(ifExpr.span());
         }
-        
-        return thenType;
     }
     
     private TypeExpr checkMatchExpr(MatchExpr matchExpr) {
-        var scrutineeType = checkExpr(matchExpr.scrutinee());
+        var savedExpected = currentExpectedType;
+        var scrutineeType = checkExprWithExpected(matchExpr.scrutinee(), null);
         
         // Check exhaustiveness for enum types
         if (scrutineeType != null) {
@@ -1152,7 +1389,8 @@ public final class TypeChecker {
         TypeExpr resultType = null;
         for (var arm : matchExpr.arms()) {
             pushScope();
-            bindPatternVars(arm.pattern());
+            bindPatternVars(arm.pattern(), scrutineeType);
+            currentExpectedType = savedExpected;
             var armType = checkExpr(arm.body());
             popScope();
             
@@ -1185,7 +1423,11 @@ public final class TypeChecker {
         for (var arm : matchExpr.arms()) {
             switch (arm.pattern()) {
                 case WildcardPattern _ -> hasWildcard = true;
-                case ConstructorPattern ctor -> coveredVariants.add(ctor.typePath());
+                case ConstructorPattern ctor -> {
+                    var path = ctor.typePath();
+                    var shortName = path.contains(".") ? path.substring(path.lastIndexOf('.') + 1) : path;
+                    coveredVariants.add(shortName);
+                }
                 case BindingPattern _ -> hasWildcard = true;
                 default -> {}
             }
@@ -1258,17 +1500,54 @@ public final class TypeChecker {
         return null;
     }
     
-    private void bindPatternVars(Pattern pattern) {
+    private void bindPatternVars(Pattern pattern, TypeExpr scrutineeType) {
         switch (pattern) {
             case WildcardPattern _ -> {}
             case LiteralPattern _ -> {}
-            case BindingPattern binding -> addLocal(binding.name(), null);
+            case BindingPattern binding -> addLocal(binding.name(), scrutineeType);
             case ConstructorPattern ctor -> {
-                for (var field : ctor.fields()) {
+                var path = ctor.typePath();
+                var shortName = path.contains(".") ? path.substring(path.lastIndexOf('.') + 1) : path;
+                List<TypeExpr> fieldTypes = new ArrayList<>();
+                
+                if (scrutineeType != null) {
+                    var typeName = getTypeName(scrutineeType);
+                    var typeInfo = typeEnv.get(typeName);
+                    if (typeInfo != null && typeInfo.kind() == TypeInfo.Kind.ENUM) {
+                        for (var variant : typeInfo.variants()) {
+                            if (variant.name().equals(shortName)) {
+                                for (var f : variant.fields()) {
+                                    fieldTypes.add(f.type());
+                                }
+                                break;
+                            }
+                        }
+                    } else if (typeInfo != null && typeInfo.kind() == TypeInfo.Kind.DATA) {
+                        for (var f : typeInfo.fields()) {
+                            fieldTypes.add(f.type());
+                        }
+                    }
+                    
+                    if (fieldTypes.isEmpty() && scrutineeType instanceof GenericTypeExpr gen) {
+                        if (gen.name().equals("Option") && shortName.equals("Some") && !gen.typeArgs().isEmpty()) {
+                            fieldTypes.add(gen.typeArgs().get(0));
+                        } else if (gen.name().equals("Result")) {
+                            if (shortName.equals("Ok") && gen.typeArgs().size() >= 1) {
+                                fieldTypes.add(gen.typeArgs().get(0));
+                            } else if (shortName.equals("Err") && gen.typeArgs().size() >= 2) {
+                                fieldTypes.add(gen.typeArgs().get(1));
+                            }
+                        }
+                    }
+                }
+                
+                for (int i = 0; i < ctor.fields().size(); i++) {
+                    var field = ctor.fields().get(i);
+                    TypeExpr fieldType = i < fieldTypes.size() ? fieldTypes.get(i) : null;
                     if (field.pattern() != null) {
-                        bindPatternVars(field.pattern());
+                        bindPatternVars(field.pattern(), fieldType);
                     } else {
-                        addLocal(field.name(), null);
+                        addLocal(field.name(), fieldType);
                     }
                 }
             }

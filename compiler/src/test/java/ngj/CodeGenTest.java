@@ -38,7 +38,7 @@ class CodeGenTest {
             package test.simple;
             
             public fn answer() -> Int effects() {
-                42
+                return 42;
             }
             """;
         
@@ -62,7 +62,7 @@ class CodeGenTest {
             package test.arith;
             
             public fn addNumbers(a: Int, b: Int) -> Int effects() {
-                a + b
+                return a + b;
             }
             """;
         
@@ -105,7 +105,7 @@ class CodeGenTest {
             package test.cond;
             
             public fn max(a: Int, b: Int) -> Int effects() {
-                if (a > b) { a } else { b }
+                if (a > b) { return a; } else { return b; }
             }
             """;
         
@@ -124,7 +124,7 @@ class CodeGenTest {
             package test.overflow;
             
             public fn addOverflow() -> Int effects() {
-                2147483647 + 1
+                return 2147483647 + 1;
             }
             """;
         
@@ -144,7 +144,7 @@ class CodeGenTest {
             package test.shortcircuit;
             
             public fn andTest(a: Bool, b: Bool) -> Bool effects() {
-                a && b
+                return a && b;
             }
             """;
         
@@ -164,7 +164,7 @@ class CodeGenTest {
             package test.shortcircuit;
             
             public fn orTest(a: Bool, b: Bool) -> Bool effects() {
-                a || b
+                return a || b;
             }
             """;
         
@@ -184,7 +184,7 @@ class CodeGenTest {
             package test.neg;
             
             public fn negate(n: Int) -> Int effects() {
-                -n
+                return -n;
             }
             """;
         
