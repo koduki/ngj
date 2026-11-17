@@ -1,8 +1,11 @@
 # Design examples
 
-[syntax_v03.ngj](syntax_v03.ngj)をv0.3正規構文の基準例とする。`incomplete`関数には意図的なholeがあり、`ngjc check`では`incomplete`（exit 2）として検査され、release buildでは拒否される。
+`examples/`配下の6ファイルのうち5ファイルはv0.2時点の設計スケッチ（v0.3 `ngjc check`では`invalid` / exit 1）、残り1ファイルの[syntax_v03.ngj](syntax_v03.ngj)がv0.3正規構文の基準例です。
 
-以下の既存例はv0.2のアーキテクチャ設計例として保存する。`app.*` adapterを省略した例であり、実行可能なテストfixtureは`compiler/src/test/resources`にある。旧例の`module`/`pub`/`data`/`let`/`! {}`はv0.3で受理する別名ではない（関数の戻り値には`return <expr>;`が必須）。変更規則は[SYNTAX_MIGRATION.md](../docs/SYNTAX_MIGRATION.md)を参照する。
+- [syntax_v03.ngj](syntax_v03.ngj): v0.3正規構文。`incomplete`関数に意図的なhole（`?validated_amount`）があるため、`ngjc check`では`incomplete`（exit 2）となり、`ngjc build`では拒否（exit 2 / `NGJ-BUILD-001`）されます。
+- ビルド・実行まで通る完全なv0.3サンプルは、[pricing_complete.ngj](../compiler/src/test/resources/fixtures/examples/pricing_complete.ngj)および[fixtures/positive/](../compiler/src/test/resources/fixtures/positive/hello.ngj)配下の各fixture（`ngjc check` exit 0、`ngjc build`成功）を参照してください。
+
+以下の既存5例はv0.2のアーキテクチャ設計例として保存しているものであり、`ngjc check`では`invalid`（exit 1：`NGJ-MIGRATE-*`診断、`app.*` adapter未定義、後続フェーズの未実装機能）となります。旧例の`module`/`pub`/`data`/`let`/`! {}`はv0.3で受理する別名ではない（関数の戻り値には`return <expr>;`が必須）。変更規則は[SYNTAX_MIGRATION.md](../docs/SYNTAX_MIGRATION.md)を参照する。
 
 | ファイル | 示すもの | 特に必要な試験 |
 |---|---|---|

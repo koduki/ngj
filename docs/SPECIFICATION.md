@@ -1,7 +1,7 @@
 # NGJ — Concept & Language Specification
 
 > Draft v0.3 / 2026-11-17
-> Status: v0.3 core syntax and type checking implemented; code generation targets JDK 28 EA with `--enable-preview` for JEP 401 value classes.
+> Status: v0.3 pure core MVP implemented (`fn`/`record`/`enum`/`Option`/`Result`/`List`, `for`/`while`, typed holes, `--target=valhalla` and `--target=valhalla-compat` / `java25` codegen); ownership/borrowing, named `effects(...)`, concurrency (`scope`/`fork`), contracts, and Leyden/Native AOT remain staged (see [MVP_COVERAGE.md](MVP_COVERAGE.md)).
 > Baseline: Valhalla対応JDK（JDK 28 EA + `--enable-preview`、互換プロファイルとしてJava 25 LTS bytecode出力もサポート）。Valhalla（JEP 401/539）と最新JVM基盤（Loom確定版、Integrity by Default、Project Leyden、Panama FFM）はオプションではなく、言語設計の前提である。
 
 ## 1. 目的・適用範囲
@@ -28,13 +28,13 @@ NGJはProject Valhallaのvalue classesを言語設計の**基盤**とする。�
 - **Primitive/Boxed分離の廃止:** `Int`/`Long`/`Bool`等はvalue型であり、ユーザーにprimitive/boxedの二重性を見せない
 - **nullの廃止:** コア言語に`null`リテラルは存在しない。不在は`Option<T>`で表現する
 - **値等価性がデフォルト:** `==`はすべてのvalue型でフィールド値による等価性比較
-- **厳格な初期化と不変性のVM保証:** JEP 539（Strict Field Initialization, `ACC_STRICT_INIT`）とJEP 513（Flexible Constructor Bodies）を前提とし、未初期化状態（`0`/`null`）の露出やJava境界からのdeep reflection・`ObjectInputStream`による不変フィールド改変をJVM検証レベルで防ぐ
+- **厳格な初期化と不変性のVM保証:** JEP 539（Strict Field Initialization, JVMS名 `ACC_STRICT_INIT` / Class-File API定数 `ACC_STRICT` `0x0800`）とJEP 513（Flexible Constructor Bodies）を前提とし、未初期化状態（`0`/`null`）の露出やJava境界からのdeep reflection・`ObjectInputStream`による不変フィールド改変をJVM検証レベルで防ぐ
 - **ジェネリクスはvalue型を含む:** `List<Int>`は言語レベルで保証された機能であり、実装の最適化状況に依存しない
 
 **Identity型が必要な場面:**
 - `resource`: 寿命・所有権・クリーンアップを持つ型
 - `actor`: 隔離された可変状態を持つ型
-- 明示的な`identity`宣言: 可変性、同期、参照比較が必要な場合
+- `identity`宣言（後段）: 可変性、同期、参照比較が必要な場合
 - Java境界: Java側identity objectとの相互運用
 
 **実装状況（2026年11月時点）:**
@@ -42,7 +42,7 @@ NGJはProject Valhallaのvalue classesを言語設計の**基盤**とする。�
 | 言語機能 | 仕様上の扱い | JVM実装基盤 | 状態 |
 |---------|-------------|------------|------|
 | Value型デフォルト | 必須 | JEP 401 Value Objects | JDK 28 Preview |
-| 厳格な初期化・`final`改変防御 | 必須 | JEP 539 Strict Field Initialization (`ACC_STRICT_INIT`) | JDK 28 Preview（JEP 401と同時統合） |
+| 厳格な初期化・`final`改変防御 | 必須 | JEP 539 Strict Field Initialization (`ACC_STRICT_INIT` / `ACC_STRICT`) | JDK 28 Preview（JEP 401と同時統合） |
 | コンストラクタ事前検証 | 標準対応 | JEP 513 Flexible Constructor Bodies | JDK 25 Final |
 | Null廃止 / Option | 必須 | JEP draft 8316779 Null-Restricted Types | Draft |
 | Primitive統一 | 必須 | JEP 402 Enhanced Primitive Boxing | Draft |
@@ -314,7 +314,7 @@ public fn area(shape: Shape) -> Int effects() {
 
 **網羅性検査:**
 - 全バリアントを網羅しなければコンパイルエラー（`NGJ-MATCH-001`）
-- 欠落バリアント名を診断の`missing`および`expected`フィールドに含める（AIフィックスループに重要）
+- 欠落バリアント名を`message`、`related`（`kind: "missing_variant"`）および`suggestions`に含める（AIフィックスループに重要）
 - `_`ワイルドカードまたは変数束縛パターンで残り全部をキャッチ可能
 
 ```scala
@@ -382,8 +382,8 @@ match (expr) {
 
 `?`は以下の条件で使用可能:
 - 式の型が`Result<T, E>`で、囲む関数の戻り値型が`Result<U, E>`（同じ`E`）
-- `Option<T>`の不在処理には`match`、`Option.getOrElse`、または`Option.toResult(opt, err)?`を使用する
-- 異なる`E`への変換は明示的な`Result.mapErr`を要求する
+- `Option<T>`の不在処理には`match`、`getOrElse(opt, default)`、または`toResult(opt, err)?`を使用する
+- 異なる`E`への変換は明示的な`match`（後段で`mapErr`も提供予定）を要求する
 
 #### 2.4.5 ジェネリックEnum
 
@@ -411,6 +411,8 @@ public enum List<T> {
 }
 ```
 
+> **Note:** 上記`Cons`/`Nil`の`enum`定義は概念モデルであり、JVM実装では不変`java.util.List`（空リストは`List.of()`、非空は`Collections.unmodifiableList(...)`）として表現する（[STDLIB.md](STDLIB.md) 5節・9.1節参照）。
+
 #### 2.4.6 JVM表現
 
 Enumはsealed hierarchy + JEP 401 value classとして出力される（`--target=valhalla`、デフォルト）。Value classは`ACC_IDENTITY`フラグを持たず、フィールド値で比較される。
@@ -425,38 +427,36 @@ public enum Shape {
 ```
 
 ```java
-// JVM出力（JEP 401 value class）
-public sealed abstract class Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {
+// JVMバイトコード表現の概要（--target=valhalla, JEP 401 value class）
+// ※クラスファイル出力では無Identity（no ACC_IDENTITY）+ strictフィールドとして生成される
+public sealed abstract value class Shape permits Shape$Circle, Shape$Rectangle, Shape$Point {
 }
 
-public final class Shape.Circle extends Shape {
-    private final int radius;
-    // structural equals/hashCode generated
+public final value class Shape$Circle extends Shape {
+    public final strict int radius; // super()前に初期化（ACC_STRICT_INIT / ACC_STRICT）
 }
 
-public final class Shape.Rectangle extends Shape {
-    private final int width;
-    private final int height;
-    // structural equals/hashCode generated
+public final value class Shape$Rectangle extends Shape {
+    public final strict int width;
+    public final strict int height;
 }
 
-public final class Shape.Point extends Shape {
-    // structural equals/hashCode generated
+public final value class Shape$Point extends Shape {
 }
 ```
 
 **JVM表現の詳細:**
-- 基底型はsealed abstract class（permits句で列挙）
-- 各バリアントはfinal class（JEP 401対応時にvalue classへ移行）
-- パターンマッチはinstanceofとキャストに展開
-- 構造的等価性は`equals`/`hashCode`生成で実現
+- 基底型は`sealed abstract` value class（`--target=valhalla`時`ACC_IDENTITY`なし、`PermittedSubclasses`属性で列挙）
+- 各バリアント（`<Enum>$<Variant>`）は`final` value class（`--target=valhalla`時`ACC_IDENTITY`なし、`ACC_STRICT_INIT` / `ACC_STRICT`フィールドを`super()`前に初期化）
+- パターンマッチは`instanceof`とフィールドアクセスに展開
+- 等価性: `record`は構造的`equals`/`hashCode`を生成し、`enum`バリアントは`--target=valhalla`下でJEP 401のvalue class等価性（`Objects.equals`）に従う（`--target=valhalla-compat` / `java25`時は`ACC_IDENTITY`付き通常クラスを出力し、Java 25+でプレビューなし実行可能）
 
 #### 2.4.7 Java相互運用
 
 **NGJ enumをJavaから使用:**
 - Javaからはsealed classとして見える
 - pattern matching（Java 21+）で分岐可能
-- JEP 401 value class意味論はJDK 28 + preview必須（将来対応）
+- `--target=valhalla`（既定）のクラスファイルはJDK 28 EA + `--enable-preview`が必須（互換用には`--target=valhalla-compat` / `java25`を使用）
 
 **Java sealed型をNGJで使用:**
 - Java sealed interface + recordsはNGJ enumとして扱える
@@ -620,7 +620,7 @@ release(Pending) -> Released | Unknown(RecoveryToken)
 
 `for (x <- xs) yield { body }`は各反復の値を収集し、`for (x <- xs) { body }`と`while (condition) { body }`はUnitを返す。Scalaの区別に合わせる。
 
-初期対応は即時評価の標準Listと単一generatorに限定する。入力は一度評価し、左から右にbodyを実行する。for-yieldの結果はList、空入力なら空List。for/whileのbodyはUnit。遅延列、guard、複数generator、任意map/flatMapプロトコルは後続仕様に分離する。
+初期対応は即時評価の標準Listと単一generatorに限定する（`List`以外の反復対象は`NGJ-TYPE-026`エラー）。入力は一度評価し、左から右にbodyを実行する。for-yieldの結果はList、空入力なら空List。for/whileのbodyはUnit。遅延列、guard、複数generator、任意map/flatMapプロトコルは後続仕様に分離する。
 
 forのbodyはcallback境界であり、body直下の`?`および`return`は拒否する（`NGJ-PROP-002`）。body内のwhileにもこの規則が及ぶ。検証結果を収集するなら`List<Result<T,E>>`を明示的に生成する。複数結果をまとめるtraverse等は標準ライブラリの型付き操作として追加する。独立したlambda内の`?`はそのlambdaだけから退出する。
 
@@ -708,7 +708,7 @@ Java呼び出しはversion/hash固定のアダプターを経由する。各メ�
 Class-File APIによる走査は既知のreflection、Unsafe、native、dynamic loading、未解決呼び出しを発見する補助であり、任意の依存JARの安全性証明ではない。推移的依存とruntime profileも検査対象。さらに、ランタイム側の隔離基盤として **OpenJDK Integrity by Default（JEP draft 8305968）** およびJPMSの強カプセル化（Security ManagerはJEP 486により廃止済み）を前提とする。
 
 - NGJの通常コードから実行時reflection、`sun.misc.Unsafe`（JEP 471/498）、JNI（JEP 472）、動的クラスロード、動的エージェント読み込み（JEP 451）は禁止する。
-- NGJの`record`/`enum`はJEP 539の`ACC_STRICT_INIT`対象として出力し、deep reflectionによる`final`フィールド改変と標準`ObjectInputStream`迂回をVM検証器水準で拒否する。
+- NGJの`record`/`enum`はJEP 539の`ACC_STRICT_INIT`（Class-File API定数 `ACC_STRICT`）対象として出力し、deep reflectionによる`final`フィールド改変と標準`ObjectInputStream`迂回をVM検証器水準で拒否する。
 - `restricted`プロファイルのJVM実行時は、`--illegal-final-field-mutation=deny`（JEP 500, JDK 26確定、監査時は`jdk.FinalFieldMutation` JFRイベントを収集）、`--enable-native-access`の未付与強制（JEP 472/454）、不要な`--add-opens`禁止をホスト側で強制する。
 - 選択したAOT profileで許可されるJava内部reflectionやFFMネイティブ呼び出しは、信頼されたadapterとreachability metadata、smoke test、明示的CLIフラグ許可を必要とする。
 - `unsafe java_interop`は監査対象の境界表示であり、許可の発行ではない。restricted sourceでは禁止し、allowlistに固定されたadapter package内だけに限定する。
@@ -736,7 +736,7 @@ Source -> lossless syntax + holes -> name/type/effect/ownership checks
 
 | target/profile | データ表現 | 前提・制限 |
 |---|---|---|
-| `valhalla` (基本) | value class + sealed hierarchy (no `ACC_IDENTITY`, fields with `ACC_STRICT`) | JDK 28 EA + `--enable-preview`（JEP 401）をターゲット。record/enumはvalue class（同一性なし）として出力 |
+| `valhalla` (基本) | value class + sealed hierarchy (no `ACC_IDENTITY`, fields with `ACC_STRICT_INIT` / `ACC_STRICT`) | JDK 28 EA + `--enable-preview`（JEP 401）をターゲット。record/enumはvalue class（同一性なし）として出力 |
 | `valhalla-compat` / `java25` | identity class fallback | Java 25 LTS以上向け。value意味論（構造的等価性・不変性）は維持し、`ScopedValue`(JEP 506)・`Flexible Constructor Bodies`(JEP 513)・Leyden(JEP 514/515)を活用（JVMフラット化なし） |
 | `leyden` | valhalla / compat + Leyden AOT cache | **標準AOT本線。** JDK 24〜26（JEP 483/514/515/516）〜JDK 28（JEP 544）。Valhalla結合時はEA検証状況を検査 |
 | `native-image` | `valhalla-compat`出力から外部AOT | **外部任意ターゲット**（独立系GraalVM Native Image）。SubstrateVMのvalue class未対応時は`valhalla-compat`経由 |
@@ -745,7 +745,7 @@ Source -> lossless syntax + holes -> name/type/effect/ownership checks
 
 | AOTレベル | Valhalla互換 | 状態 |
 |-----------|-------------|------|
-| JIT (通常JVM) | ✅ 動作 | JDK 28 EA + preview（JEP 401 / JEP 539）で動作確認済み |
+| JIT (通常JVM) | ✅ 動作（MVP範囲） | v0.3純粋コアをJDK 28 EA + preview（JEP 401 / JEP 539）で動作確認済み（Effects・所有権・並行性・ラムダ等は未実装） |
 | Leyden AOT cache | ⚠️ 組合せ検証中 | JDK 25〜26（JEP 514/515/516）で`valhalla-compat`は運用可能。JDK 28 JEP 544 × value classの結合を要検証 |
 | Native Image (外部) | ❌ 未サポート | Oracle製品版は2025年9月にJava SEから分離。独立系SubstrateVMはvalue class未対応のため`valhalla-compat`で生成 |
 
@@ -858,7 +858,7 @@ AOTレベル（JIT/Leyden/native-image）の統一的なUXとProject Leyden対�
 JEP 401 value class出力の段階的完成:
 
 1. **完了:** v0.3構文正規化、関数`return`必須化、Value型意味論・網羅性検査の実装
-2. **完了:** JDK 28 EA + `--enable-preview`対応、JEP 401 value class（no `ACC_IDENTITY`）+ `ACC_STRICT` fields preview classfile直接出力、Option/Result ADT sealed hierarchy
+2. **完了（v0.3純粋コアMVP）:** JDK 28 EA + `--enable-preview`対応、`record`/`enum`/`Option`/`Result`のJEP 401 value class（no `ACC_IDENTITY`）+ `ACC_STRICT_INIT`（`ACC_STRICT`）フィールド直接出力（互換用の`--target=valhalla-compat`/`java25`も提供；Effects・所有権・並行性・Leyden/Native AOTは後続フェーズ）
 3. **JDK 28 GA後（2027年3月予定）:** 本番利用開始、Project Leyden（JEP 544）との結合検証、`StructuredTaskScope`（JEP 543）連携の有効化
 4. **preview卒業後:** 安定版としてリリース
 

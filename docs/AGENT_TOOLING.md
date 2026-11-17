@@ -22,6 +22,8 @@ ngjc check-patch --format=json --base-revision=<hash> --patch=<file>
 ngjc build --target=valhalla --profile=restricted
 ```
 
+> **MVP実装範囲の補足:** 現行MVP（`0.1.0-mvp`）で実装済みのコマンドは `check` / `context` / `inspect` / `build`（オプション: `--format=json`, `--revision=<hash>`, `--hole=<id>`, `--symbol=<id>`, `--max-bytes=N`, `--target=valhalla|valhalla-compat|java25`）であり、`--profile=...` および `check-patch` はpost-MVP計画項目である。
+
 全応答に`schema_version`, `compiler_version`, `source_revision`, `policy_digest`, `target_profile`を含む。revisionはソースと依存lockの内容digestから生成する。診断の再利用時はpolicy digestも一致させる。JSONはstdout、進捗はstderr。通常診断でstack traceや環境変数を漏らさない。
 
 | exit | 意味 |
@@ -36,7 +38,7 @@ context/inspectは正常な情報取得をexit 0とする。buildのincomplete�
 
 ## 3. 構造化診断
 
-例はwire formatのサンプルであり、存在するソースの診断結果ではない。
+以下はプロトコル形式のイラストレーション（現行MVPは `"schema_version": "ngj.cli/1"`, `"compiler_version": "0.1.0-mvp"`, `"target_profile": "valhalla/jdk28-ea-b24"` を返す）。
 
 ```json
 {
@@ -74,7 +76,7 @@ ownership診断ではmove/borrow/freezeの発生位置と寿命境界を返す�
 
 ## 4. 型に基づくcontext取得
 
-以下のBytes/借用のJSON例は所有権機能を有効にした後続profileの契約である。最初のpure core profileで対応済みとは扱わない。
+以下の`Bytes`/借用のJSON例は所有権機能を有効にした後続profileの契約である（現行MVPの`ngjc context`は`schema_version: "ngj.cli/1"`, `compiler_version: "0.1.0-mvp"`, `target_profile: "valhalla/jdk28-ea-b24"`を出力する）。最初のpure core profileで所有権/Bytes対応済みとは扱わない。
 
 ```json
 {

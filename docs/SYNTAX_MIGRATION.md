@@ -29,7 +29,7 @@ The mapping is semantic where return/propagation/callback boundaries change.
 3. Resource/concurrency extension adds lexical borrowing, `build`, `scope`/`fork` and cleanup.
 4. Richer collection protocols, effects polymorphism, contracts and information-flow rules follow their own acceptance tests.
 
-An unavailable feature produces `unsupported_feature`. All function signatures specify `effects`, including private functions. The initial core accepts `effects()` only.
+An unavailable feature produces an unsupported-feature error diagnostic (`NGJ-UNSUPPORTED-001`, `NGJ-EFFECT-001`, `NGJ-PARSE-001`, etc.). All function signatures specify `effects`, including private functions. The initial core accepts `effects()` only.
 
 ## Control-flow boundaries
 
@@ -91,7 +91,7 @@ while (index < limit) { index = index + 1; };
 | `Int` function ending in `1;` | invalid, lost-result diagnostic (`NGJ-TYPE-017` / `NGJ-RETURN-001`) |
 | `return 42` without semicolon | missing-semicolon diagnostic (`NGJ-PARSE-008`) |
 | early return in guard clause (`if (x < 0) { return 0; } return x;`) | valid |
-| adjacent bindings separated only by newline | missing-semicolon diagnostic (`NGJ-PARSE-008`) |
+| adjacent `val`/`var` bindings separated only by newline | missing-semicolon diagnostic (`NGJ-PARSE-007`) |
 | `if` with mismatched branch types | type error (`NGJ-TYPE-011`) |
 | `if` without `else` and non-`Unit` body | type error (`NGJ-TYPE-021`) |
 | incomplete `enum` `match` | exhaustiveness error (`NGJ-MATCH-001`) |
@@ -103,8 +103,9 @@ while (index < limit) { index = index + 1; };
 | `?body` | incomplete, hole position/type preserved (`NGJ-HOLE-001`) |
 | postfixed `?` on `Option` | type error (`NGJ-TYPE-020`) |
 | malformed/unclosed angle arguments | bounded diagnostic recovery |
-| `f::<T>(x)` | syntactically recognized, unsupported if profile lacks generic calls |
+| `f::<T>(x)` | syntactically recognized, rejected in MVP (`NGJ-UNSUPPORTED-001`) |
 | `List` generator, with/without `yield` | `List<U>`/`Unit` respectively |
+| `for` over non-`List` expression | type error (`NGJ-TYPE-026`) |
 | `for` body containing `?` or `return` | propagation-boundary diagnostic (`NGJ-PROP-002`) |
 | callback capturing outer `var` | capture diagnostic (`NGJ-CAPTURE-001`) |
 | `while` updating local `var` | valid in sequential profile |

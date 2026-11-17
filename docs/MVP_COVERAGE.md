@@ -101,9 +101,10 @@ their implementation status, and explicit exclusions.
 
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
-| `List<T>` | Yes | ✅ | Eager list backed by `java.util.List` |
-| `Nil()` | Yes | ✅ | Empty list constructor |
-| `listOf(...)` | Yes | ✅ | List literal constructor |
+| `List<T>` | Yes | ✅ | Eager unmodifiable `java.util.List` (`List.of()` / `Collections.unmodifiableList`) |
+| `Nil()` | Yes | ✅ | Empty list constructor (`List.of()`) |
+| `listOf(...)` | Yes | ✅ | List constructor |
+| `Cons(head, tail)` | Yes | ✅ | Immutable prepend constructor (copies elements into unmodifiable `List`) |
 
 ### Loops and Iteration
 
@@ -111,6 +112,7 @@ their implementation status, and explicit exclusions.
 |---------|-------------|--------|-------|
 | `for (x <- list) { ... }` | Yes | ✅ | Iteration over `List<T>`, single generator |
 | `for (x <- list) yield { ... }` | Yes | ✅ | List comprehension producing `List<U>` |
+| Non-`List` iterable in `for` | **No - Reject** | ✅ | Type error `NGJ-TYPE-026` |
 | `while (condition) { ... }` | Yes | ✅ | Loop with parenthesized condition |
 | `?` or `return` in `for` body | **No - Reject** | ✅ | Propagation boundary diagnostic `NGJ-PROP-002` |
 | Outer `var` capture in `for` | **No - Reject** | ✅ | Capture diagnostic `NGJ-CAPTURE-001` |
@@ -121,8 +123,8 @@ their implementation status, and explicit exclusions.
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | JVM class output | Yes | ✅ | Class-File API (standard since Java 24) |
-| `final class` for record | Yes | ✅ | JEP 401 value class (no `ACC_IDENTITY`) with structural `equals`/`hashCode` (`--target=valhalla`, default on JDK 28 EA) |
-| Sealed hierarchy for enum | Yes | ✅ | Abstract sealed class + final value class variants (JEP 401, `--target=valhalla`) |
+| `record` value class output | Yes | ✅ | JEP 401 value class (no `ACC_IDENTITY`, `ACC_STRICT_INIT`/`ACC_STRICT` fields, structural `equals`/`hashCode` under `--target=valhalla`; `--target=java25` fallback emits `ACC_IDENTITY` class) |
+| Sealed hierarchy for enum | Yes | ✅ | Sealed abstract value class + final value class variants with `ACC_STRICT_INIT`/`ACC_STRICT` fields (`--target=valhalla`, JEP 401) |
 | Integer overflow fault | Yes | ✅ | Runtime check via `Math.xxxExact` |
 | Short-circuit evaluation | Yes | ✅ | Left-to-right |
 
@@ -177,9 +179,9 @@ The following features are explicitly excluded and must be rejected with
 - SMT proof obligations
 
 ### Advanced Types
-- User-defined generics (beyond Result/Option)
+- User-defined generics (beyond built-in `Result`/`Option`/`List`) (`NGJ-TYPE-024`, `NGJ-UNSUPPORTED-001`)
 - Higher-order functions
-- Closures / lambdas (typed lambdas in sequential profile)
+- Lambda codegen (typed lambda syntax `(x: T) => { ... }` is parsed and typechecked in the sequential profile, but closure/lambda codegen is not yet implemented)
 - Typestate
 
 ### Java Interop
@@ -201,13 +203,13 @@ The following features are explicitly excluded and must be rejected with
 
 ### Compiler Migration Checklist
 
-- [ ] Update Gradle/build to use JDK 28 EA toolchain when available
-- [x] Add `--enable-preview` to compile and runtime flags for JEP 401 value classes (no `ACC_IDENTITY`)
-- [x] Implement structural `equals`/`hashCode` for `record` and `enum` variants
-- [x] Implement sealed hierarchy for enum variants
-- [x] Enforce no-`null` rule (language design: `Option<T>` instead of `null`)
+- [x] Verify runtime & bytecode on JDK 28 EA in CI (Gradle compiles with JDK 25 toolchain; `test-jdk28` and integration jobs execute generated classes on JDK 28 EA b24 via `JAVA_HOME_28`)
+- [x] Add `--enable-preview`, omit `ACC_IDENTITY`, and emit `ACC_STRICT_INIT` (`ACC_STRICT`) fields for JEP 401/539 value classes
+- [x] Implement structural `equals`/`hashCode` for `record` (`enum` variants use JEP 401 value-object equality under `--target=valhalla`)
+- [x] Implement sealed hierarchy for enum variants (`sealed abstract` base + `final` value class variants)
+- [x] Enforce no-`null` rule (language design: `Option<T>` instead of `null`, `NGJ-NULL-001`)
 - [x] Implement value-based `==` comparison semantics (`Objects.equals` for composite value types)
-- [x] Enhance match exhaustiveness diagnostics (include missing variant names in `NGJ-MATCH-001`)
+- [x] Enhance match exhaustiveness diagnostics (include missing variant names in `message`, `related`, and `suggestions` for `NGJ-MATCH-001`)
 - [x] Verify `Int`/`Long`/`Bool` behave as value types
 - [ ] Add `identity class` syntax support (staged feature)
 - [ ] Add Java interop tests for null → Option conversion (staged feature)
@@ -233,7 +235,7 @@ public enum Option<T> {
 
 Required compiler changes:
 - [x] Parse payload-carrying enum variants
-- [x] Generate sealed hierarchy (interface + variant classes)
+- [x] Generate sealed hierarchy (`sealed abstract` base value class + `final` value class variants)
 - [x] Support nested/destructuring patterns in `match`
 - [x] Implement exhaustiveness checking with precise diagnostics (`NGJ-MATCH-001`)
 - [x] Support built-in generic enums (`Option<T>`, `Result<T, E>`)

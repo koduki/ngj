@@ -106,7 +106,7 @@ NGJ標準ライブラリは以下を保証する：
 
 | AOTレベル | Valhalla互換 | 状態・リスク |
 |-----------|-------------|-------------|
-| `jit` (通常JVM) | ✅ 完全対応 | JDK 28 EA + `--enable-preview`で動作 |
+| `jit` (通常JVM) | ✅ 動作（MVP範囲） | v0.3純粋コア（`record`/`enum`/`Option`/`Result`/`List`、`for`/`while`）をJDK 28 EA + `--enable-preview`で検証済み。所有権・Effects・並行性・ラムダ等は未実装 |
 | `leyden` | ⚠️ 検証中 | `valhalla-compat`（JDK 25+）はJEP 483/514/515/516で動作可能。JDK 28 JEP 544 × JEP 401/539の結合キャッシュは要検証 |
 | `native` | ❌ 未サポート（外部依存） | 独立系GraalVM SubstrateVMはJEP 401/539を未実装（[Graal on the Road to Valhalla](https://epub.jku.at/download/pdf/11912841.pdf)参照）。`valhalla-compat`経由で生成 |
 
@@ -132,6 +132,8 @@ AOTレベル × バックエンド × OS/archの組み合わせでCI行列が爆
 - バージョン・ハッシュ固定方針をビルドマニフェスト（`abi_manifest`）で分離管理
 
 ### 4.5 CLI JSONでのAOTレベル報告
+
+> **補足（未実装・拡張案）:** 現行MVPの`ngjc build --format=json`は`schema_version: "ngj.cli/1"`および`target_profile: "valhalla/jdk28-ea-b24"`を出力する。以下はPhase 4以降のAOT統合時に追加予定の拡張JSONスキーマ案である。
 
 `ngjc build`のJSON出力にAOTレベル情報を含める形式：
 
