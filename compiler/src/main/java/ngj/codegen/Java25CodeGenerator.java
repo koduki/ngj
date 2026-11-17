@@ -159,7 +159,9 @@ public final class Java25CodeGenerator {
         
         return ClassFile.of().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
-            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            // Function wrapper classes are always identity classes (not value classes)
+            // JDK 28 with preview features requires explicit ACC_IDENTITY for non-value classes
+            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
             var methodDesc = buildMethodDescriptor(fn);
