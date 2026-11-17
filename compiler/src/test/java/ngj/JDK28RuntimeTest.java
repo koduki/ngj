@@ -193,7 +193,7 @@ class JDK28RuntimeTest {
                 String className = getClassName(classFile, tempDir);
                 
                 if (className.endsWith("$Fn")) {
-                    Class<?> clazz = loader.loadClass(className);
+                    Class<?> clazz = Class.forName(className, true, loader);
                     assertNotNull(clazz, "Should load class: " + className);
                     
                     verifyFunctionExecution(fixture, clazz, className);
@@ -364,7 +364,7 @@ class JDK28RuntimeTest {
         try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
             for (Path classFile : outputs) {
                 String className = getClassName(classFile, tempDir);
-                Class<?> clazz = loader.loadClass(className);
+                Class<?> clazz = Class.forName(className, true, loader);
                 assertNotNull(clazz, "Class should load successfully: " + className);
             }
         }
@@ -398,7 +398,7 @@ class JDK28RuntimeTest {
             
             for (Path classFile : outputs) {
                 String className = getClassName(classFile, tempDir);
-                Class<?> clazz = loader.loadClass(className);
+                Class<?> clazz = Class.forName(className, true, loader);
                 if (className.contains("colorToInt")) {
                     colorToIntFn = clazz;
                 }
@@ -541,15 +541,173 @@ class JDK28RuntimeTest {
         
         assertTrue(different, "Different targets should produce different output");
         System.out.println("SUCCESS: --target option produces different output for different targets");
+        
+        // Verify java25 output loads on current JDK (without --enable-preview)
+        // This is important: java25 target should produce classes loadable without preview
+        System.out.println("Verifying java25 output loads on JDK " + jdkVersion + " without preview...");
+        URL[] urls = { dir2.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, null)) {
+            for (Path classFile : outputs2) {
+                String className = getClassName(classFile, dir2);
+                try {
+                    Class<?> clazz = Class.forName(className, true, loader);
+                    System.out.println("  Loaded (java25 target): " + clazz.getName());
+                    
+                    // Try to invoke the answer() function (class name is like test.target.answer$Fn)
+                    if (className.contains("answer") && className.endsWith("$Fn")) {
+                        Method invoke = clazz.getMethod("invoke");
+                        Object result = invoke.invoke(null);
+                        assertEquals(42, result, "answer() should return 42");
+                        System.out.println("  Executed answer() = " + result);
+                    }
+                } catch (ClassFormatError | VerifyError e) {
+                    fail("java25 target output should load without --enable-preview: " + e.getMessage());
+                }
+            }
+        }
+        System.out.println("SUCCESS: java25 output loads on JDK " + jdkVersion + " without preview");
     }
     
     private Object getEnumVariant(URLClassLoader loader, String className) {
         try {
-            Class<?> clazz = loader.loadClass(className);
+            Class<?> clazz = Class.forName(className, true, loader);
             return clazz.getConstructor().newInstance();
         } catch (Exception e) {
             return null;
         }
+    }
+    
+    // ========== Comprehensive Runtime Verification Tests ==========
+    
+    /**
+     * Verify arithmetic.ngj functions return correct values.
+     * Tests: add, subtract, multiply, divide, modulo
+     */
+    @Test
+    void runtimeVerify_arithmetic_returnsCorrectResults() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = readFixture("positive/arithmetic.ngj");
+        
+        var lexer = new Lexer(source, "arithmetic.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            // Load all arithmetic functions
+            Class<?> addFn = loadFunction(loader, outputs, "add");
+            Class<?> subtractFn = loadFunction(loader, outputs, "subtract");
+            Class<?> multiplyFn = loadFunction(loader, outputs, "multiply");
+            Class<?> divideFn = loadFunction(loader, outputs, "divide");
+            Class<?> moduloFn = loadFunction(loader, outputs, "modulo");
+            
+            assertNotNull(addFn, "add function should be loaded");
+            assertNotNull(subtractFn, "subtract function should be loaded");
+            assertNotNull(multiplyFn, "multiply function should be loaded");
+            assertNotNull(divideFn, "divide function should be loaded");
+            assertNotNull(moduloFn, "modulo function should be loaded");
+            
+            // Test add(5, 3) = 8
+            Method addInvoke = addFn.getMethod("invoke", int.class, int.class);
+            assertEquals(8, addInvoke.invoke(null, 5, 3), "add(5, 3) should return 8");
+            
+            // Test subtract(10, 4) = 6
+            Method subInvoke = subtractFn.getMethod("invoke", int.class, int.class);
+            assertEquals(6, subInvoke.invoke(null, 10, 4), "subtract(10, 4) should return 6");
+            
+            // Test multiply(6, 7) = 42
+            Method mulInvoke = multiplyFn.getMethod("invoke", int.class, int.class);
+            assertEquals(42, mulInvoke.invoke(null, 6, 7), "multiply(6, 7) should return 42");
+            
+            // Test divide(15, 3) = 5
+            Method divInvoke = divideFn.getMethod("invoke", int.class, int.class);
+            assertEquals(5, divInvoke.invoke(null, 15, 3), "divide(15, 3) should return 5");
+            
+            // Test modulo(17, 5) = 2
+            Method modInvoke = moduloFn.getMethod("invoke", int.class, int.class);
+            assertEquals(2, modInvoke.invoke(null, 17, 5), "modulo(17, 5) should return 2");
+            
+            System.out.println("SUCCESS: All arithmetic functions return correct results");
+        }
+    }
+    
+    /**
+     * Verify logic.ngj functions return correct boolean values.
+     */
+    @Test
+    void runtimeVerify_logic_returnsCorrectResults() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = readFixture("positive/logic.ngj");
+        
+        var lexer = new Lexer(source, "logic.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            Class<?> andFn = loadFunction(loader, outputs, "and");
+            Class<?> orFn = loadFunction(loader, outputs, "or");
+            Class<?> notFn = loadFunction(loader, outputs, "not");
+            
+            assertNotNull(andFn, "and function should be loaded");
+            assertNotNull(orFn, "or function should be loaded");
+            assertNotNull(notFn, "not function should be loaded");
+            
+            Method andInvoke = andFn.getMethod("invoke", boolean.class, boolean.class);
+            assertEquals(true, andInvoke.invoke(null, true, true), "and(true, true) should return true");
+            assertEquals(false, andInvoke.invoke(null, true, false), "and(true, false) should return false");
+            
+            Method orInvoke = orFn.getMethod("invoke", boolean.class, boolean.class);
+            assertEquals(true, orInvoke.invoke(null, true, false), "or(true, false) should return true");
+            assertEquals(false, orInvoke.invoke(null, false, false), "or(false, false) should return false");
+            
+            Method notInvoke = notFn.getMethod("invoke", boolean.class);
+            assertEquals(false, notInvoke.invoke(null, true), "not(true) should return false");
+            assertEquals(true, notInvoke.invoke(null, false), "not(false) should return true");
+            
+            System.out.println("SUCCESS: All logic functions return correct results");
+        }
+    }
+    
+    /**
+     * Helper to load a function class by name from outputs.
+     */
+    private Class<?> loadFunction(URLClassLoader loader, List<Path> outputs, String functionName) {
+        for (Path classFile : outputs) {
+            String className = getClassName(classFile, tempDir);
+            if (className.toLowerCase().contains(functionName.toLowerCase()) && className.endsWith("$Fn")) {
+                try {
+                    return Class.forName(className, true, loader);
+                } catch (Exception e) {
+                    System.out.println("Failed to load " + functionName + ": " + e.getMessage());
+                }
+            }
+        }
+        return null;
     }
     
     // ========== Helper Methods ==========

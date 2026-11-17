@@ -492,10 +492,10 @@ public final class Java25CodeGenerator {
             case GenericTypeExpr generic -> switch (generic.name()) {
                 case "Result" -> enums.containsKey("Result")
                     ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Result")
-                    : ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry");
+                    : ClassDesc.ofInternalName("ngj/runtime/Result");
                 case "Option" -> enums.containsKey("Option")
                     ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option")
-                    : ClassDesc.of("java.util.Optional");
+                    : ClassDesc.ofInternalName("ngj/runtime/Option");
                 case "List" -> ClassDesc.of("java.util.List");
                 default -> ConstantDescs.CD_Object;
             };
@@ -859,8 +859,13 @@ public final class Java25CodeGenerator {
         ctx.code.labelBinding(loopEnd);
         
         if (forExpr.hasYield()) {
-            // Push result list as return value
+            // Push unmodifiable result list as return value
             ctx.code.aload(resultListSlot);
+            ctx.code.invokestatic(
+                ClassDesc.of("java.util.Collections"),
+                "unmodifiableList",
+                MethodTypeDesc.of(ClassDesc.of("java.util.List"), ClassDesc.of("java.util.List"))
+            );
         }
     }
     
@@ -1223,12 +1228,20 @@ public final class Java25CodeGenerator {
                         MethodTypeDesc.of(ConstantDescs.CD_boolean)
                     );
                     ctx.code.ifThenElse(Opcode.IFNE,
-                        tb -> tb.invokestatic(
-                            ClassDesc.of("java.util.Optional"),
-                            "empty",
-                            MethodTypeDesc.of(ClassDesc.of("java.util.Optional"))
-                        ),
+                        tb -> {
+                            // Empty list -> return None()
+                            tb.new_(ClassDesc.ofInternalName("ngj/runtime/Option$None"));
+                            tb.dup();
+                            tb.invokespecial(
+                                ClassDesc.ofInternalName("ngj/runtime/Option$None"),
+                                ConstantDescs.INIT_NAME,
+                                MethodTypeDesc.of(ConstantDescs.CD_void)
+                            );
+                        },
                         fb -> {
+                            // Non-empty list -> return Some(first element)
+                            fb.new_(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                            fb.dup();
                             fb.aload(listSlot);
                             fb.ldc(0);
                             fb.invokeinterface(
@@ -1236,10 +1249,10 @@ public final class Java25CodeGenerator {
                                 "get",
                                 MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_int)
                             );
-                            fb.invokestatic(
-                                ClassDesc.of("java.util.Optional"),
-                                "of",
-                                MethodTypeDesc.of(ClassDesc.of("java.util.Optional"), ConstantDescs.CD_Object)
+                            fb.invokespecial(
+                                ClassDesc.ofInternalName("ngj/runtime/Option$Some"),
+                                ConstantDescs.INIT_NAME,
+                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                             );
                         }
                     );
@@ -1268,6 +1281,9 @@ public final class Java25CodeGenerator {
                     );
                     ctx.code.if_icmpge(outOfBounds);
                     
+                    // In bounds -> return Some(element)
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                    ctx.code.dup();
                     ctx.code.aload(listSlot);
                     ctx.code.iload(indexSlot);
                     ctx.code.invokeinterface(
@@ -1275,18 +1291,21 @@ public final class Java25CodeGenerator {
                         "get",
                         MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_int)
                     );
-                    ctx.code.invokestatic(
-                        ClassDesc.of("java.util.Optional"),
-                        "of",
-                        MethodTypeDesc.of(ClassDesc.of("java.util.Optional"), ConstantDescs.CD_Object)
+                    ctx.code.invokespecial(
+                        ClassDesc.ofInternalName("ngj/runtime/Option$Some"),
+                        ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                     );
                     ctx.code.goto_(end);
                     
+                    // Out of bounds -> return None()
                     ctx.code.labelBinding(outOfBounds);
-                    ctx.code.invokestatic(
-                        ClassDesc.of("java.util.Optional"),
-                        "empty",
-                        MethodTypeDesc.of(ClassDesc.of("java.util.Optional"))
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Option$None"));
+                    ctx.code.dup();
+                    ctx.code.invokespecial(
+                        ClassDesc.ofInternalName("ngj/runtime/Option$None"),
+                        ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void)
                     );
                     
                     ctx.code.labelBinding(end);
@@ -1552,29 +1571,29 @@ public final class Java25CodeGenerator {
         );
         ctx.code.labelBinding(tryEnd);
         
+        // Success: wrap in Ok
         var resultSlot = ctx.allocateLocal("$result$" + ctx.nextSlot, "Object");
         ctx.code.astore(resultSlot);
-        ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+        ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
         ctx.code.dup();
-        ctx.code.ldc("Ok");
         ctx.code.aload(resultSlot);
         ctx.code.invokespecial(
-            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+            ClassDesc.ofInternalName("ngj/runtime/Result$Ok"),
             ConstantDescs.INIT_NAME,
-            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
         );
         ctx.code.goto_(end);
         
+        // Overflow: wrap in Err with error variant
         ctx.code.labelBinding(catchStart);
         ctx.code.pop();
-        ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+        ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
         ctx.code.dup();
-        ctx.code.ldc("Err");
         ctx.code.ldc(errorVariant);
         ctx.code.invokespecial(
-            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+            ClassDesc.ofInternalName("ngj/runtime/Result$Err"),
             ConstantDescs.INIT_NAME,
-            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
         );
         
         ctx.code.labelBinding(end);
@@ -1651,17 +1670,27 @@ public final class Java25CodeGenerator {
         code.ifThenElse(Opcode.IFNULL,
             tb -> {
                 tb.pop();
-                tb.invokestatic(
-                    ClassDesc.of("java.util.Optional"),
-                    "empty",
-                    MethodTypeDesc.of(ClassDesc.of("java.util.Optional"))
+                // null -> None()
+                tb.new_(ClassDesc.ofInternalName("ngj/runtime/Option$None"));
+                tb.dup();
+                tb.invokespecial(
+                    ClassDesc.ofInternalName("ngj/runtime/Option$None"),
+                    ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void)
                 );
             },
-            fb -> fb.invokestatic(
-                ClassDesc.of("java.util.Optional"),
-                "of",
-                MethodTypeDesc.of(ClassDesc.of("java.util.Optional"), ConstantDescs.CD_Object)
-            )
+            fb -> {
+                // non-null -> Some(value)
+                var valueSlot = 0; // temp storage
+                fb.new_(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                fb.dup_x1();
+                fb.swap();
+                fb.invokespecial(
+                    ClassDesc.ofInternalName("ngj/runtime/Option$Some"),
+                    ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
+                );
+            }
         );
     }
     
@@ -1800,43 +1829,67 @@ public final class Java25CodeGenerator {
                                 // Resolve the actual field name in the variant class
                                 // For Option/Result ADTs, the field names are fixed
                                 String actualFieldName = resolveVariantFieldName(typePath, field.name(), fieldIdx);
-                                ctx.code.getfield(variantClass, actualFieldName, ConstantDescs.CD_Object);
                                 
-                                // For Option/Result, use the inner type for field bindings
-                                String fieldType = (scrutineeType.equals("Option") || scrutineeType.equals("Result")) 
-                                    ? innerType : lookupEnumVariantFieldType(typePath, actualFieldName);
-                                
-                                // Unbox if needed
-                                if (fieldType.equals("Int")) {
-                                    ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
-                                    ctx.code.invokevirtual(
-                                        ClassDesc.of("java.lang.Integer"),
-                                        "intValue",
-                                        MethodTypeDesc.of(ConstantDescs.CD_int)
-                                    );
-                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), "Int");
-                                    ctx.code.istore(fieldSlot);
-                                } else if (fieldType.equals("Long")) {
-                                    ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
-                                    ctx.code.invokevirtual(
-                                        ClassDesc.of("java.lang.Long"),
-                                        "longValue",
-                                        MethodTypeDesc.of(ConstantDescs.CD_long)
-                                    );
-                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), "Long");
-                                    ctx.code.lstore(fieldSlot);
-                                } else if (fieldType.equals("Bool")) {
-                                    ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
-                                    ctx.code.invokevirtual(
-                                        ClassDesc.of("java.lang.Boolean"),
-                                        "booleanValue",
-                                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
-                                    );
-                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), "Bool");
-                                    ctx.code.istore(fieldSlot);
+                                // Get the field type for the getfield descriptor
+                                // For Option/Result, fields are always Object
+                                // For user-defined enums, use the declared field type
+                                String fieldType;
+                                ClassDesc fieldDesc;
+                                if (scrutineeType.equals("Option") || scrutineeType.equals("Result")) {
+                                    fieldType = innerType;
+                                    fieldDesc = ConstantDescs.CD_Object; // Option/Result store as Object
                                 } else {
-                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
-                                    ctx.code.astore(fieldSlot);
+                                    fieldType = lookupEnumVariantFieldType(typePath, actualFieldName);
+                                    fieldDesc = typeNameToClassDesc(fieldType);
+                                }
+                                
+                                ctx.code.getfield(variantClass, actualFieldName, fieldDesc);
+                                
+                                // For Option/Result with boxed primitives, unbox if needed
+                                if (scrutineeType.equals("Option") || scrutineeType.equals("Result")) {
+                                    if (fieldType.equals("Int")) {
+                                        ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
+                                        ctx.code.invokevirtual(
+                                            ClassDesc.of("java.lang.Integer"),
+                                            "intValue",
+                                            MethodTypeDesc.of(ConstantDescs.CD_int)
+                                        );
+                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), "Int");
+                                        ctx.code.istore(fieldSlot);
+                                    } else if (fieldType.equals("Long")) {
+                                        ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
+                                        ctx.code.invokevirtual(
+                                            ClassDesc.of("java.lang.Long"),
+                                            "longValue",
+                                            MethodTypeDesc.of(ConstantDescs.CD_long)
+                                        );
+                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), "Long");
+                                        ctx.code.lstore(fieldSlot);
+                                    } else if (fieldType.equals("Bool")) {
+                                        ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
+                                        ctx.code.invokevirtual(
+                                            ClassDesc.of("java.lang.Boolean"),
+                                            "booleanValue",
+                                            MethodTypeDesc.of(ConstantDescs.CD_boolean)
+                                        );
+                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), "Bool");
+                                        ctx.code.istore(fieldSlot);
+                                    } else {
+                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
+                                        ctx.code.astore(fieldSlot);
+                                    }
+                                } else {
+                                    // User-defined enums: use the actual field type
+                                    if (fieldType.equals("Int") || fieldType.equals("Bool")) {
+                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
+                                        ctx.code.istore(fieldSlot);
+                                    } else if (fieldType.equals("Long")) {
+                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
+                                        ctx.code.lstore(fieldSlot);
+                                    } else {
+                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
+                                        ctx.code.astore(fieldSlot);
+                                    }
                                 }
                             }
                         }
@@ -1949,6 +2002,22 @@ public final class Java25CodeGenerator {
             }
         }
         return "Object";
+    }
+    
+    /**
+     * Convert a type name (like "Int", "String") to a ClassDesc for field access.
+     */
+    private ClassDesc typeNameToClassDesc(String typeName) {
+        return switch (typeName) {
+            case "Int" -> ConstantDescs.CD_int;
+            case "Long" -> ConstantDescs.CD_long;
+            case "Bool" -> ConstantDescs.CD_boolean;
+            case "Float" -> ConstantDescs.CD_float;
+            case "Double" -> ConstantDescs.CD_double;
+            case "String" -> ConstantDescs.CD_String;
+            case "Object" -> ConstantDescs.CD_Object;
+            default -> ClassDesc.of(typeName.contains(".") ? typeName : "java.lang." + typeName);
+        };
     }
     
     private void boxIfNeeded(CodeGenContext ctx, LiteralExpr literal) {
