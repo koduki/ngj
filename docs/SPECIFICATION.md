@@ -323,7 +323,7 @@ Pratt parser等で式を解析し、Java標準`java.lang.classfile` APIで直接
 | `valhalla` | 対応VMのvalue class表現 | JDK build/preview/class-file仕様をlock。未対応なら明示エラー |
 | `native-image` | java25等の対応出力からAOT | 別build profile。JDK、GraalVM、OS/arch、metadata、JFR等を個別検証 |
 
-Loom/ScopedValue/StructuredTaskScopeの利用可否・preview flagsはprofileに記録し、使用JDKでのAPI差分はruntime adapterに閉じる。Java 25のclass-file生成がpreview APIなしの実行を意味するわけではない。Valhallaのflagsや配置規則を将来の全JDKに固定しない。LeydenとNative Imageも同一機能として扱わない。
+Loom/ScopedValue/StructuredTaskScopeの利用可否・preview flagsはprofileに記録し、使用JDKでのAPI差分はruntime adapterに閉じる。Java 25のclass-file生成がpreview APIなしの実行を意味するわけではない。Valhallaのflagsや配置規則を将来の全JDKに固定しない。LeydenとNative Imageも同一機能として扱わない。Project Leyden AOTとnative-imageを統一的に扱うAOTレベル設計については[AOT設計方向](AOT.md)を参照。
 
 ### 10.2 特殊化と性能
 
@@ -341,6 +341,8 @@ Loom/ScopedValue/StructuredTaskScopeの利用可否・preview flagsはprofileに
 2. **Phase 2:** Effect/Capability、所有権・freeze、Bytes/Arena、Java adapterの信頼境界、restricted build。小さい意味論モデルとnegative testsを先に用意する。
 3. **Phase 3:** scope/fork/Channel/actor、Typestate、契約・property tests、明示的情報フロー、OTel/JFR、逐次I/O replay。
 4. **Phase 4:** Valhalla、選択的特殊化、Native Image互換性行列、限定的証明器、AI生成の比較実験。
+
+AOTレベル（JIT/Leyden/native-image）の統一的なUXとProject Leyden対応については[AOT設計方向](AOT.md)を参照。Phase 4以降の実装計画として位置づける。
 
 未決事項: システム機能の拡張EBNF、効果多相性の一般化範囲、actor supervisionの拡張、非字句借用、任意handler、暗黙情報フロー、並行replay、証明器の具体選定。未決機能を利用するソースは`unsupported_feature`として拒否し、実装済み保証と混在させない。
 
