@@ -24,7 +24,7 @@ class TypeCheckerTest {
             package test.mismatch;
             
             public fn test() -> Int effects() {
-                "hello"
+                return "hello";
             }
             """;
         
@@ -39,6 +39,28 @@ class TypeCheckerTest {
         assertTrue(diagnostics.stream()
             .anyMatch(d -> d.id().equals("NGJ-TYPE-001")));
     }
+
+    @Test
+    void detectMissingReturn() throws Exception {
+        var source = """
+            package test.missingreturn;
+            
+            public fn test() -> Int effects() {
+                42
+            }
+            """;
+        
+        var lexer = new Lexer(source, "test.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var diagnostics = typeChecker.getDiagnostics();
+        assertTrue(diagnostics.stream()
+            .anyMatch(d -> d.id().equals("NGJ-RETURN-001")));
+    }
     
     @Test
     void detectNonExhaustiveMatch() throws Exception {
@@ -48,10 +70,10 @@ class TypeCheckerTest {
             public enum Status { Ok(), Pending(), Error() }
             
             public fn test(s: Status) -> Int effects() {
-                match (s) {
+                return match (s) {
                     case Ok() => { 1 },
                     case Pending() => { 2 }
-                }
+                };
             }
             """;
         
@@ -73,7 +95,7 @@ class TypeCheckerTest {
             package test.unknown;
             
             public fn test() -> UnknownType effects() {
-                42
+                return 42;
             }
             """;
         
@@ -95,7 +117,7 @@ class TypeCheckerTest {
             package test.hole;
             
             public fn calculate() -> Int effects() {
-                ?todo
+                return ?todo;
             }
             """;
         
@@ -117,7 +139,7 @@ class TypeCheckerTest {
             package test.effect;
             
             public fn read() -> String effects(FsRead) {
-                "content"
+                return "content";
             }
             """;
         
@@ -139,7 +161,7 @@ class TypeCheckerTest {
             package test.arith;
             
             public fn test() -> Int effects() {
-                1 + "hello"
+                return 1 + "hello";
             }
             """;
         
@@ -161,7 +183,7 @@ class TypeCheckerTest {
             package test.logic;
             
             public fn test() -> Bool effects() {
-                1 && true
+                return 1 && true;
             }
             """;
         

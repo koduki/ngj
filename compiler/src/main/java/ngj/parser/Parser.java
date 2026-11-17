@@ -444,7 +444,7 @@ public final class Parser {
             } else if (check(TokenType.LET)) {
                 statements.add(parseLetStmtLegacy());
             } else if (check(TokenType.RETURN)) {
-                statements.add(parseReturnStmtLegacy());
+                statements.add(parseReturnStmt());
             } else if (check(TokenType.IDENT) && peekNext().type() == TokenType.ASSIGN) {
                 statements.add(parseAssignStmt());
             } else {
@@ -455,6 +455,8 @@ public final class Parser {
                     statements.add(new ExprStmt(expr, expr.span()));
                 } else if (check(TokenType.RBRACE)) {
                     tailExpr = expr;
+                } else if (expr instanceof IfExpr || expr instanceof MatchExpr) {
+                    statements.add(new ExprStmt(expr, expr.span()));
                 } else {
                     diagnostics.add(Diagnostic.error(
                         "NGJ-PARSE-008",
@@ -577,19 +579,21 @@ public final class Parser {
         return new LetStmt(name, explicitType, initializer, span(start, previous.span().endByte()));
     }
     
-    private ReturnStmt parseReturnStmtLegacy() throws ParseException {
+    private ReturnStmt parseReturnStmt() throws ParseException {
         int start = current.span().startByte();
         consume(TokenType.RETURN, "Expected 'return'");
         
-        diagnostics.add(Diagnostic.error(
-            "NGJ-MIGRATE-007",
-            "v0.2 syntax 'return' is no longer supported. Use tail expressions instead.",
-            previous.span()
-        ));
-        
         Expr value = null;
-        if (!check(TokenType.RBRACE) && !check(TokenType.SEMICOLON)) {
+        if (!check(TokenType.RBRACE) && !check(TokenType.SEMICOLON) && !isAtEnd()) {
             value = parseExpr();
+        }
+        
+        if (!match(TokenType.SEMICOLON)) {
+            diagnostics.add(Diagnostic.error(
+                "NGJ-PARSE-008",
+                "Expected ';' after return statement",
+                current.span()
+            ));
         }
         
         return new ReturnStmt(value, span(start, previous.span().endByte()));

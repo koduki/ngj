@@ -3,24 +3,24 @@
 package example.pricing;
 
 public fn itemSubtotal(basePrice: Int, quantity: Int) -> Int effects() {
-    basePrice * quantity
+    return basePrice * quantity;
 }
 
 public fn applyDiscount(amount: Int, percentOff: Int) -> Int effects() {
-    amount - (amount * percentOff / 100)
+    return amount - (amount * percentOff / 100);
 }
 
 public fn calculateTax(amount: Int, taxRate: Int) -> Int effects() {
-    amount * taxRate / 100
+    return amount * taxRate / 100;
 }
 
 public fn calculateTotal(basePrice: Int, quantity: Int, discountPct: Int, taxRate: Int) -> Int effects() {
     val subtotal: Int = basePrice * quantity;
     val discounted: Int = subtotal - (subtotal * discountPct / 100);
     val tax: Int = discounted * taxRate / 100;
-    discounted + tax
+    return discounted + tax;
 }
 
 public fn demoCalculation() -> Int effects() {
-    calculateTotal(1000, 2, 5, 10)
+    return calculateTotal(1000, 2, 5, 10);
 }

@@ -2,17 +2,17 @@
 package test.logic;
 
 public fn andTest(a: Bool, b: Bool) -> Bool effects() {
-    a && b
+    return a && b;
 }
 
 public fn orTest(a: Bool, b: Bool) -> Bool effects() {
-    a || b
+    return a || b;
 }
 
 public fn notTest(a: Bool) -> Bool effects() {
-    !a
+    return !a;
 }
 
 public fn complex(a: Bool, b: Bool, c: Bool) -> Bool effects() {
-    (a && b) || (!c)
+    return (a && b) || (!c);
 }

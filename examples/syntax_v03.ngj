@@ -1,4 +1,4 @@
-// v0.3 target example. Current v0.2 compiler migration is pending.
+// v0.3 syntax example
 package example.syntax;
 
 public record Amount(value: Long);
@@ -9,15 +9,15 @@ public enum InputError {
 
 public fn validate(value: Long) -> Result<Amount, InputError> effects() {
     if (value < 0L) {
-        Err(InputError.Negative())
+        return Err(InputError.Negative());
     } else {
-        Ok(Amount(value))
+        return Ok(Amount(value));
     }
 }
 
 public fn checkedValue(value: Long) -> Result<Long, InputError> effects() {
     val amount = validate(value)?;
-    Ok(amount.value)
+    return Ok(amount.value);
 }
 
 public fn incomplete(value: Long) -> Result<Amount, InputError> effects() {

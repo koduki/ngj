@@ -53,9 +53,7 @@ public final class Compiler {
         
         // Phase 2: Name resolution
         var resolver = new NameResolver();
-        for (var unit : units) {
-            resolver.resolve(unit);
-        }
+        resolver.resolveAll(units);
         diagnostics.addAll(resolver.getDiagnostics());
         
         if (hasErrors()) {
@@ -64,9 +62,7 @@ public final class Compiler {
         
         // Phase 3: Type checking
         var typeChecker = new TypeChecker();
-        for (var unit : units) {
-            typeChecker.check(unit);
-        }
+        typeChecker.checkAll(units);
         diagnostics.addAll(typeChecker.getDiagnostics());
         
         // Determine status
@@ -121,10 +117,10 @@ public final class Compiler {
             return new BuildResult(false, diagnostics, null, "Holes present");
         }
         
-        if (!target.equals("java25")) {
+        if (!target.equals("valhalla") && !target.equals("valhalla-compat") && !target.equals("java25")) {
             diagnostics.add(Diagnostic.error(
                 "NGJ-BUILD-002",
-                "Unsupported target: " + target + ". MVP only supports java25",
+                "Unsupported target: " + target + ". Supported targets: valhalla, valhalla-compat, java25",
                 null
             ));
             return new BuildResult(false, diagnostics, null, "Unsupported target");

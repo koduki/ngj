@@ -56,9 +56,25 @@ public final class Java25CodeGenerator {
     
     private String currentModule;
     private Path outputDir = Path.of("build/classes");
+    private final Map<String, RecordDecl> records = new HashMap<>();
+    private final Map<String, DataDecl> datas = new HashMap<>();
+    private final Map<String, EnumDecl> enums = new HashMap<>();
+    private final Map<String, FnDecl> functions = new HashMap<>();
     
     public List<Path> generate(CompilationUnit unit) throws CodeGenException {
         currentModule = unit.modulePath();
+        records.clear();
+        datas.clear();
+        enums.clear();
+        functions.clear();
+        for (var decl : unit.declarations()) {
+            switch (decl) {
+                case RecordDecl r -> records.put(r.name(), r);
+                case DataDecl d -> datas.put(d.name(), d);
+                case EnumDecl e -> enums.put(e.name(), e);
+                case FnDecl f -> functions.put(f.name(), f);
+            }
+        }
         var outputs = new ArrayList<Path>();
         
         try {
@@ -164,11 +180,17 @@ public final class Java25CodeGenerator {
                 case "Long" -> ConstantDescs.CD_long;
                 case "Bool" -> ConstantDescs.CD_boolean;
                 case "String" -> ConstantDescs.CD_String;
+                case "Unit" -> ConstantDescs.CD_void;
+                case "OverflowError", "RangeError", "IndexError" -> ConstantDescs.CD_Object;
                 default -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + simple.name());
             };
             case GenericTypeExpr generic -> switch (generic.name()) {
-                case "Result" -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Result");
-                case "Option" -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option");
+                case "Result" -> enums.containsKey("Result")
+                    ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Result")
+                    : ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry");
+                case "Option" -> enums.containsKey("Option")
+                    ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option")
+                    : ClassDesc.of("java.util.Optional");
                 case "List" -> ClassDesc.of("java.util.List");
                 default -> ConstantDescs.CD_Object;
             };
@@ -176,9 +198,109 @@ public final class Java25CodeGenerator {
         };
     }
     
+    private String inferTypeName(CodeGenContext ctx, Expr expr) {
+        if (expr == null) return "Unit";
+        return switch (expr) {
+            case LiteralExpr lit -> switch (lit.kind()) {
+                case INT -> "Int";
+                case LONG -> "Long";
+                case BOOL -> "Bool";
+                case STRING -> "String";
+                case UNIT -> "Unit";
+            };
+            case IdentExpr ident -> ctx.getLocalType(ident.name());
+            case BinaryExpr bin -> switch (bin.op()) {
+                case ADD, SUB, MUL, DIV, MOD -> inferTypeName(ctx, bin.left());
+                case EQ, NE, LT, LE, GT, GE, AND, OR -> "Bool";
+            };
+            case UnaryExpr un -> switch (un.op()) {
+                case NEG -> inferTypeName(ctx, un.operand());
+                case NOT -> "Bool";
+            };
+            case ParenExpr paren -> inferTypeName(ctx, paren.inner());
+            case IfExpr ifExpr -> {
+                if (ifExpr.thenBranch().tailExpr() != null) {
+                    yield inferTypeName(ctx, ifExpr.thenBranch().tailExpr());
+                } else if (ifExpr.elseBranch() != null) {
+                    yield inferTypeName(ctx, ifExpr.elseBranch());
+                }
+                yield "Unit";
+            }
+            case BlockExpr block -> block.tailExpr() != null ? inferTypeName(ctx, block.tailExpr()) : "Unit";
+            case CallExpr call -> {
+                if (call.callee() instanceof IdentExpr ident) {
+                    var name = ident.name();
+                    yield switch (name) {
+                        case "length" -> "Int";
+                        case "isEmpty", "isSome", "isNone", "isOk", "isErr" -> "Bool";
+                        case "Ok", "Err", "checkedAdd", "checkedSub", "checkedMul", "toResult" -> "Result";
+                        case "Some", "None", "head", "get", "toOption" -> "Option";
+                        case "Nil", "listOf", "Cons" -> "List";
+                        case "getOrElse" -> call.args().size() >= 2 ? inferTypeName(ctx, call.args().get(1)) : "Object";
+                        default -> {
+                            if (functions.containsKey(name)) {
+                                yield getTypeName(functions.get(name).returnType());
+                            }
+                            if (records.containsKey(name) || datas.containsKey(name)) {
+                                yield name;
+                            }
+                            for (var entry : enums.entrySet()) {
+                                for (var v : entry.getValue().variants()) {
+                                    if (v.name().equals(name)) {
+                                        yield entry.getKey();
+                                    }
+                                }
+                            }
+                            yield "Object";
+                        }
+                    };
+                } else if (call.callee() instanceof FieldAccessExpr access && access.object() instanceof IdentExpr enumIdent) {
+                    if (enums.containsKey(enumIdent.name())) {
+                        yield enumIdent.name();
+                    }
+                }
+                yield "Object";
+            }
+            case FieldAccessExpr access -> {
+                var objType = inferTypeName(ctx, access.object());
+                if (records.containsKey(objType)) {
+                    for (var p : records.get(objType).params()) {
+                        if (p.name().equals(access.fieldName())) {
+                            yield getTypeName(p.type());
+                        }
+                    }
+                } else if (datas.containsKey(objType)) {
+                    for (var f : datas.get(objType).fields()) {
+                        if (f.name().equals(access.fieldName())) {
+                            yield getTypeName(f.type());
+                        }
+                    }
+                }
+                yield "Object";
+            }
+            case PropagateExpr prop -> {
+                if (prop.inner() instanceof CallExpr call && call.callee() instanceof IdentExpr ident) {
+                    var name = ident.name();
+                    if (name.equals("checkedAdd") || name.equals("checkedSub") || name.equals("checkedMul")) {
+                        yield "Int";
+                    }
+                    if (functions.containsKey(name) && functions.get(name).returnType() instanceof GenericTypeExpr gen
+                        && !gen.typeArgs().isEmpty()) {
+                        yield getTypeName(gen.typeArgs().get(0));
+                    }
+                }
+                yield "Object";
+            }
+            default -> "Object";
+        };
+    }
+    
     private void generateBlock(CodeGenContext ctx, BlockExpr block) {
         for (var stmt : block.statements()) {
             generateStmt(ctx, stmt);
+            if (ctx.hasReturn) {
+                return;
+            }
         }
         
         if (block.tailExpr() != null) {
@@ -191,7 +313,7 @@ public final class Java25CodeGenerator {
             case ValStmt val -> {
                 generateExpr(ctx, val.initializer());
                 var type = val.explicitType();
-                var typeName = type != null ? getTypeName(type) : "Object";
+                var typeName = type != null ? getTypeName(type) : inferTypeName(ctx, val.initializer());
                 int slot = ctx.allocateLocal(val.name(), typeName);
                 switch (typeName) {
                     case "Long" -> ctx.code.lstore(slot);
@@ -202,7 +324,7 @@ public final class Java25CodeGenerator {
             case VarStmt var -> {
                 generateExpr(ctx, var.initializer());
                 var type = var.explicitType();
-                var typeName = type != null ? getTypeName(type) : "Object";
+                var typeName = type != null ? getTypeName(type) : inferTypeName(ctx, var.initializer());
                 int slot = ctx.allocateLocal(var.name(), typeName);
                 switch (typeName) {
                     case "Long" -> ctx.code.lstore(slot);
@@ -225,7 +347,7 @@ public final class Java25CodeGenerator {
             case LetStmt let -> {
                 generateExpr(ctx, let.initializer());
                 var type = let.explicitType();
-                var typeName = type != null ? getTypeName(type) : "Object";
+                var typeName = type != null ? getTypeName(type) : inferTypeName(ctx, let.initializer());
                 int slot = ctx.allocateLocal(let.name(), typeName);
                 switch (typeName) {
                     case "Long" -> ctx.code.lstore(slot);
@@ -240,14 +362,16 @@ public final class Java25CodeGenerator {
                 if (ret.value() != null) {
                     generateExpr(ctx, ret.value());
                 }
-                var retType = getTypeName(ctx.fn.returnType());
-                switch (retType) {
-                    case "Unit" -> ctx.code.return_();
-                    case "Int", "Bool" -> ctx.code.ireturn();
-                    case "Long" -> ctx.code.lreturn();
-                    default -> ctx.code.areturn();
+                if (!ctx.hasReturn) {
+                    var retType = getTypeName(ctx.fn.returnType());
+                    switch (retType) {
+                        case "Unit" -> ctx.code.return_();
+                        case "Int", "Bool" -> ctx.code.ireturn();
+                        case "Long" -> ctx.code.lreturn();
+                        default -> ctx.code.areturn();
+                    }
+                    ctx.hasReturn = true;
                 }
-                ctx.hasReturn = true;
             }
         }
     }
@@ -405,8 +529,44 @@ public final class Java25CodeGenerator {
             return;
         }
         
+        var leftType = inferTypeName(ctx, binary.left());
         generateExpr(ctx, binary.left());
         generateExpr(ctx, binary.right());
+        
+        if (leftType.equals("Long")) {
+            switch (binary.op()) {
+                case ADD -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "addExact",
+                    MethodTypeDesc.of(ConstantDescs.CD_long, ConstantDescs.CD_long, ConstantDescs.CD_long));
+                case SUB -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "subtractExact",
+                    MethodTypeDesc.of(ConstantDescs.CD_long, ConstantDescs.CD_long, ConstantDescs.CD_long));
+                case MUL -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "multiplyExact",
+                    MethodTypeDesc.of(ConstantDescs.CD_long, ConstantDescs.CD_long, ConstantDescs.CD_long));
+                case DIV -> ctx.code.ldiv();
+                case MOD -> ctx.code.lrem();
+                case EQ -> { ctx.code.lcmp(); generateComparison(ctx, Opcode.IFEQ); }
+                case NE -> { ctx.code.lcmp(); generateComparison(ctx, Opcode.IFNE); }
+                case LT -> { ctx.code.lcmp(); generateComparison(ctx, Opcode.IFLT); }
+                case LE -> { ctx.code.lcmp(); generateComparison(ctx, Opcode.IFLE); }
+                case GT -> { ctx.code.lcmp(); generateComparison(ctx, Opcode.IFGT); }
+                case GE -> { ctx.code.lcmp(); generateComparison(ctx, Opcode.IFGE); }
+                default -> {}
+            }
+            return;
+        }
+        
+        if (!leftType.equals("Int") && !leftType.equals("Bool")) {
+            if (binary.op() == BinaryExpr.BinaryOp.EQ) {
+                ctx.code.invokestatic(ClassDesc.of("java.util.Objects"), "equals",
+                    MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object, ConstantDescs.CD_Object));
+                return;
+            } else if (binary.op() == BinaryExpr.BinaryOp.NE) {
+                ctx.code.invokestatic(ClassDesc.of("java.util.Objects"), "equals",
+                    MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object, ConstantDescs.CD_Object));
+                ctx.code.ldc(1);
+                ctx.code.ixor();
+                return;
+            }
+        }
         
         switch (binary.op()) {
             case ADD -> ctx.code.invokestatic(ClassDesc.of("java.lang.Math"), "addExact", 
@@ -466,10 +626,17 @@ public final class Java25CodeGenerator {
     }
     
     private void generateUnary(CodeGenContext ctx, UnaryExpr unary) {
+        var operandType = inferTypeName(ctx, unary.operand());
         generateExpr(ctx, unary.operand());
         
         switch (unary.op()) {
-            case NEG -> ctx.code.ineg();
+            case NEG -> {
+                if (operandType.equals("Long")) {
+                    ctx.code.lneg();
+                } else {
+                    ctx.code.ineg();
+                }
+            }
             case NOT -> {
                 ctx.code.ldc(1);
                 ctx.code.ixor();
@@ -479,13 +646,32 @@ public final class Java25CodeGenerator {
     
     private void generateIf(CodeGenContext ctx, IfExpr ifExpr) {
         generateExpr(ctx, ifExpr.condition());
-        ctx.code.ifThenElse(Opcode.IFNE,
-            tb -> generateBlock(ctx.withCode(tb), ifExpr.thenBranch()),
-            fb -> {
-                if (ifExpr.elseBranch() != null) {
-                    generateExpr(ctx.withCode(fb), ifExpr.elseBranch());
-                }
-            });
+        var elseLabel = ctx.code.newLabel();
+        var endLabel = ctx.code.newLabel();
+        
+        ctx.code.ifeq(elseLabel);
+        
+        boolean prevReturn = ctx.hasReturn;
+        ctx.hasReturn = false;
+        generateBlock(ctx, ifExpr.thenBranch());
+        boolean thenReturned = ctx.hasReturn;
+        
+        if (ifExpr.elseBranch() != null) {
+            if (!thenReturned) {
+                ctx.code.goto_(endLabel);
+            }
+            ctx.code.labelBinding(elseLabel);
+            ctx.hasReturn = false;
+            generateExpr(ctx, ifExpr.elseBranch());
+            boolean elseReturned = ctx.hasReturn;
+            if (!thenReturned || !elseReturned) {
+                ctx.code.labelBinding(endLabel);
+            }
+            ctx.hasReturn = prevReturn || (thenReturned && elseReturned);
+        } else {
+            ctx.code.labelBinding(elseLabel);
+            ctx.hasReturn = prevReturn;
+        }
     }
     
     private void generateCall(CodeGenContext ctx, CallExpr call) {
@@ -495,7 +681,6 @@ public final class Java25CodeGenerator {
             switch (methodName) {
                 // STDLIB-03: Result constructors - wrap in Optional-like structure
                 case "Ok" -> {
-                    // Create a wrapper representing Ok state
                     ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
                     ctx.code.dup();
                     ctx.code.ldc("Ok");
@@ -559,7 +744,6 @@ public final class Java25CodeGenerator {
                             MethodTypeDesc.of(ClassDesc.of("java.util.List"))
                         );
                     } else {
-                        // Use List.of(Object...) via array
                         ctx.code.ldc(call.args().size());
                         ctx.code.anewarray(ConstantDescs.CD_Object);
                         for (int i = 0; i < call.args().size(); i++) {
@@ -578,7 +762,6 @@ public final class Java25CodeGenerator {
                     return;
                 }
                 case "Cons" -> {
-                    // Create new list with head prepended
                     ctx.code.new_(ClassDesc.of("java.util.ArrayList"));
                     ctx.code.dup();
                     ctx.code.invokespecial(
@@ -595,7 +778,6 @@ public final class Java25CodeGenerator {
                         MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
                     );
                     ctx.code.pop();
-                    // addAll tail
                     ctx.code.dup();
                     generateExpr(ctx, call.args().get(1));
                     ctx.code.invokeinterface(
@@ -630,7 +812,6 @@ public final class Java25CodeGenerator {
                 // STDLIB-08: List operations returning Option<T> (not null)
                 case "head" -> {
                     generateExpr(ctx, call.args().get(0));
-                    // Check if list is empty, return Optional
                     var listSlot = ctx.allocateLocal("$list$" + ctx.nextSlot, "Object");
                     ctx.code.astore(listSlot);
                     ctx.code.aload(listSlot);
@@ -663,7 +844,6 @@ public final class Java25CodeGenerator {
                     return;
                 }
                 case "get" -> {
-                    // get(list, index) -> Optional
                     generateExpr(ctx, call.args().get(0));
                     var listSlot = ctx.allocateLocal("$list$" + ctx.nextSlot, "Object");
                     ctx.code.astore(listSlot);
@@ -671,10 +851,8 @@ public final class Java25CodeGenerator {
                     var indexSlot = ctx.allocateLocal("$idx$" + ctx.nextSlot, "Int");
                     ctx.code.istore(indexSlot);
                     
-                    // Check bounds
                     ctx.code.iload(indexSlot);
                     ctx.code.ldc(0);
-                    var inBounds = ctx.code.newLabel();
                     var outOfBounds = ctx.code.newLabel();
                     var end = ctx.code.newLabel();
                     
@@ -688,7 +866,6 @@ public final class Java25CodeGenerator {
                     );
                     ctx.code.if_icmpge(outOfBounds);
                     
-                    // In bounds: return Some(element)
                     ctx.code.aload(listSlot);
                     ctx.code.iload(indexSlot);
                     ctx.code.invokeinterface(
@@ -703,7 +880,6 @@ public final class Java25CodeGenerator {
                     );
                     ctx.code.goto_(end);
                     
-                    // Out of bounds: return None
                     ctx.code.labelBinding(outOfBounds);
                     ctx.code.invokestatic(
                         ClassDesc.of("java.util.Optional"),
@@ -783,6 +959,7 @@ public final class Java25CodeGenerator {
                     return;
                 }
                 case "getOrElse" -> {
+                    var defaultType = inferTypeName(ctx, call.args().get(1));
                     generateExpr(ctx, call.args().get(0));
                     generateExpr(ctx, call.args().get(1));
                     boxIfPrimitive(ctx, call.args().get(1));
@@ -791,10 +968,10 @@ public final class Java25CodeGenerator {
                         "orElse",
                         MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object)
                     );
+                    unboxIfNeeded(ctx, defaultType);
                     return;
                 }
                 case "toOption" -> {
-                    // Result to Option: Ok -> Some, Err -> None
                     generateExpr(ctx, call.args().get(0));
                     var resSlot = ctx.allocateLocal("$res$" + ctx.nextSlot, "Object");
                     ctx.code.astore(resSlot);
@@ -833,10 +1010,13 @@ public final class Java25CodeGenerator {
                     return;
                 }
                 case "toResult" -> {
-                    // Option to Result: Some -> Ok, None -> Err(error)
                     generateExpr(ctx, call.args().get(0));
                     var optSlot = ctx.allocateLocal("$opt$" + ctx.nextSlot, "Object");
                     ctx.code.astore(optSlot);
+                    generateExpr(ctx, call.args().get(1));
+                    boxIfPrimitive(ctx, call.args().get(1));
+                    var errSlot = ctx.allocateLocal("$err$" + ctx.nextSlot, "Object");
+                    ctx.code.astore(errSlot);
                     ctx.code.aload(optSlot);
                     ctx.code.invokevirtual(
                         ClassDesc.of("java.util.Optional"),
@@ -864,13 +1044,68 @@ public final class Java25CodeGenerator {
                             fb.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
                             fb.dup();
                             fb.ldc("Err");
-                            // Error value is second argument
-                            // We need to evaluate it here but it was already on stack...
-                            // For simplicity, re-evaluate
+                            fb.aload(errSlot);
+                            fb.invokespecial(
+                                ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                                ConstantDescs.INIT_NAME,
+                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                            );
                         }
                     );
-                    // Note: This is simplified; proper implementation would need better stack management
                     return;
+                }
+            }
+            
+            // Record constructor call
+            if (records.containsKey(methodName)) {
+                var rec = records.get(methodName);
+                var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + methodName);
+                ctx.code.new_(classDesc);
+                ctx.code.dup();
+                for (var arg : call.args()) {
+                    generateExpr(ctx, arg);
+                }
+                var paramDescs = rec.params().stream()
+                    .map(p -> typeToClassDesc(p.type()))
+                    .toArray(ClassDesc[]::new);
+                ctx.code.invokespecial(classDesc, ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void, paramDescs));
+                return;
+            }
+            
+            // Data constructor call
+            if (datas.containsKey(methodName)) {
+                var data = datas.get(methodName);
+                var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + methodName);
+                ctx.code.new_(classDesc);
+                ctx.code.dup();
+                for (var arg : call.args()) {
+                    generateExpr(ctx, arg);
+                }
+                var paramDescs = data.fields().stream()
+                    .map(f -> typeToClassDesc(f.type()))
+                    .toArray(ClassDesc[]::new);
+                ctx.code.invokespecial(classDesc, ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void, paramDescs));
+                return;
+            }
+            
+            // Unqualified enum variant constructor call
+            for (var entry : enums.entrySet()) {
+                for (var variant : entry.getValue().variants()) {
+                    if (variant.name().equals(methodName)) {
+                        var variantClassDesc = ClassDesc.ofInternalName(
+                            currentModule.replace('.', '/') + "/" + entry.getKey() + "$" + variant.name());
+                        ctx.code.new_(variantClassDesc);
+                        ctx.code.dup();
+                        for (var arg : call.args()) {
+                            generateExpr(ctx, arg);
+                        }
+                        var paramDescs = variant.fields().stream()
+                            .map(f -> typeToClassDesc(f.type()))
+                            .toArray(ClassDesc[]::new);
+                        ctx.code.invokespecial(variantClassDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void, paramDescs));
+                        return;
+                    }
                 }
             }
             
@@ -879,9 +1114,36 @@ public final class Java25CodeGenerator {
                 generateExpr(ctx, arg);
             }
             var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + methodName + "$Fn");
-            ctx.code.invokestatic(classDesc, "invoke", MethodTypeDesc.of(ConstantDescs.CD_Object));
+            if (functions.containsKey(methodName)) {
+                ctx.code.invokestatic(classDesc, "invoke", buildMethodDescriptor(functions.get(methodName)));
+            } else {
+                ctx.code.invokestatic(classDesc, "invoke", MethodTypeDesc.of(ConstantDescs.CD_Object));
+            }
+        } else if (call.callee() instanceof FieldAccessExpr access && access.object() instanceof IdentExpr enumIdent) {
+            var enumName = enumIdent.name();
+            var variantName = access.fieldName();
+            if (enums.containsKey(enumName)) {
+                for (var variant : enums.get(enumName).variants()) {
+                    if (variant.name().equals(variantName)) {
+                        var variantClassDesc = ClassDesc.ofInternalName(
+                            currentModule.replace('.', '/') + "/" + enumName + "$" + variantName);
+                        ctx.code.new_(variantClassDesc);
+                        ctx.code.dup();
+                        for (var arg : call.args()) {
+                            generateExpr(ctx, arg);
+                        }
+                        var paramDescs = variant.fields().stream()
+                            .map(f -> typeToClassDesc(f.type()))
+                            .toArray(ClassDesc[]::new);
+                        ctx.code.invokespecial(variantClassDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void, paramDescs));
+                        return;
+                    }
+                }
+            }
+            // Built-in error enum variant (e.g., OverflowError.IntOverflow())
+            ctx.code.ldc(variantName);
         } else {
-            // Non-identifier callee
             for (var arg : call.args()) {
                 generateExpr(ctx, arg);
             }
@@ -893,17 +1155,17 @@ public final class Java25CodeGenerator {
      * On success: Ok(result), on overflow: Err(OverflowError.IntOverflow())
      */
     private void generateCheckedArithmetic(CodeGenContext ctx, String mathMethod, String errorVariant) {
-        // Store operands
         var aSlot = ctx.allocateLocal("$a$" + ctx.nextSlot, "Int");
         var bSlot = ctx.allocateLocal("$b$" + ctx.nextSlot, "Int");
         ctx.code.istore(bSlot);
         ctx.code.istore(aSlot);
         
-        // Try the operation
         var tryStart = ctx.code.newLabel();
         var tryEnd = ctx.code.newLabel();
         var catchStart = ctx.code.newLabel();
         var end = ctx.code.newLabel();
+        
+        ctx.code.exceptionCatch(tryStart, tryEnd, catchStart, ClassDesc.of("java.lang.ArithmeticException"));
         
         ctx.code.labelBinding(tryStart);
         ctx.code.iload(aSlot);
@@ -913,7 +1175,6 @@ public final class Java25CodeGenerator {
             mathMethod,
             MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_int, ConstantDescs.CD_int)
         );
-        // Success: wrap in Ok
         ctx.code.invokestatic(
             ClassDesc.of("java.lang.Integer"),
             "valueOf",
@@ -921,7 +1182,6 @@ public final class Java25CodeGenerator {
         );
         ctx.code.labelBinding(tryEnd);
         
-        // Create Ok result
         var resultSlot = ctx.allocateLocal("$result$" + ctx.nextSlot, "Object");
         ctx.code.astore(resultSlot);
         ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
@@ -935,9 +1195,8 @@ public final class Java25CodeGenerator {
         );
         ctx.code.goto_(end);
         
-        // Exception handler: create Err result
         ctx.code.labelBinding(catchStart);
-        ctx.code.pop(); // discard exception
+        ctx.code.pop();
         ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
         ctx.code.dup();
         ctx.code.ldc("Err");
@@ -949,9 +1208,6 @@ public final class Java25CodeGenerator {
         );
         
         ctx.code.labelBinding(end);
-        
-        // Note: Proper exception table would need low-level class file manipulation
-        // For now, we rely on Math.*Exact throwing ArithmeticException on overflow
     }
     
     /**
@@ -959,28 +1215,61 @@ public final class Java25CodeGenerator {
      * STDLIB-01: Value types box transparently at Java boundaries.
      */
     private void boxIfPrimitive(CodeGenContext ctx, Expr expr) {
-        // Simple heuristic: if it's a literal, box it
-        if (expr instanceof LiteralExpr lit) {
-            switch (lit.kind()) {
-                case INT -> ctx.code.invokestatic(
+        var typeName = inferTypeName(ctx, expr);
+        switch (typeName) {
+            case "Int" -> ctx.code.invokestatic(
+                ClassDesc.of("java.lang.Integer"),
+                "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Integer"), ConstantDescs.CD_int)
+            );
+            case "Long" -> ctx.code.invokestatic(
+                ClassDesc.of("java.lang.Long"),
+                "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Long"), ConstantDescs.CD_long)
+            );
+            case "Bool" -> ctx.code.invokestatic(
+                ClassDesc.of("java.lang.Boolean"),
+                "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Boolean"), ConstantDescs.CD_boolean)
+            );
+            default -> {}
+        }
+    }
+    
+    private void unboxIfNeeded(CodeGenContext ctx, String targetTypeName) {
+        switch (targetTypeName) {
+            case "Int" -> {
+                ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
+                ctx.code.invokevirtual(
                     ClassDesc.of("java.lang.Integer"),
-                    "valueOf",
-                    MethodTypeDesc.of(ClassDesc.of("java.lang.Integer"), ConstantDescs.CD_int)
+                    "intValue",
+                    MethodTypeDesc.of(ConstantDescs.CD_int)
                 );
-                case LONG -> ctx.code.invokestatic(
+            }
+            case "Long" -> {
+                ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
+                ctx.code.invokevirtual(
                     ClassDesc.of("java.lang.Long"),
-                    "valueOf",
-                    MethodTypeDesc.of(ClassDesc.of("java.lang.Long"), ConstantDescs.CD_long)
+                    "longValue",
+                    MethodTypeDesc.of(ConstantDescs.CD_long)
                 );
-                case BOOL -> ctx.code.invokestatic(
+            }
+            case "Bool" -> {
+                ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
+                ctx.code.invokevirtual(
                     ClassDesc.of("java.lang.Boolean"),
-                    "valueOf",
-                    MethodTypeDesc.of(ClassDesc.of("java.lang.Boolean"), ConstantDescs.CD_boolean)
+                    "booleanValue",
+                    MethodTypeDesc.of(ConstantDescs.CD_boolean)
                 );
-                default -> {} // String, Unit don't need boxing
+            }
+            default -> {
+                if (records.containsKey(targetTypeName) || datas.containsKey(targetTypeName) || enums.containsKey(targetTypeName)) {
+                    ctx.code.checkcast(ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + targetTypeName));
+                } else if (targetTypeName.equals("String")) {
+                    ctx.code.checkcast(ConstantDescs.CD_String);
+                }
             }
         }
-        // For other expressions, we'd need type info - simplified for now
     }
     
     /**
@@ -988,7 +1277,6 @@ public final class Java25CodeGenerator {
      * Used at Java interop boundaries.
      */
     public static void generateNullToOption(CodeBuilder code) {
-        // If value on stack is null, return Optional.empty(), else Optional.of(value)
         code.dup();
         code.ifThenElse(Opcode.IFNULL,
             tb -> {
@@ -1034,11 +1322,62 @@ public final class Java25CodeGenerator {
     }
     
     private void generatePropagate(CodeGenContext ctx, PropagateExpr prop) {
+        var unwrappedType = inferTypeName(ctx, prop);
         generateExpr(ctx, prop.inner());
+        var resSlot = ctx.allocateLocal("$prop$" + ctx.nextSlot, "Object");
+        ctx.code.astore(resSlot);
+        
+        ctx.code.aload(resSlot);
+        ctx.code.invokevirtual(
+            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+            "getKey",
+            MethodTypeDesc.of(ConstantDescs.CD_Object)
+        );
+        ctx.code.ldc("Err");
+        ctx.code.invokevirtual(
+            ConstantDescs.CD_Object,
+            "equals",
+            MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+        );
+        
+        var okLabel = ctx.code.newLabel();
+        ctx.code.ifeq(okLabel);
+        
+        ctx.code.aload(resSlot);
+        ctx.code.areturn();
+        
+        ctx.code.labelBinding(okLabel);
+        ctx.code.aload(resSlot);
+        ctx.code.invokevirtual(
+            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+            "getValue",
+            MethodTypeDesc.of(ConstantDescs.CD_Object)
+        );
+        unboxIfNeeded(ctx, unwrappedType);
     }
     
     private void generateFieldAccess(CodeGenContext ctx, FieldAccessExpr access) {
+        var objTypeName = inferTypeName(ctx, access.object());
         generateExpr(ctx, access.object());
+        if (records.containsKey(objTypeName)) {
+            var rec = records.get(objTypeName);
+            var ownerDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + objTypeName);
+            for (var param : rec.params()) {
+                if (param.name().equals(access.fieldName())) {
+                    ctx.code.getfield(ownerDesc, access.fieldName(), typeToClassDesc(param.type()));
+                    return;
+                }
+            }
+        } else if (datas.containsKey(objTypeName)) {
+            var data = datas.get(objTypeName);
+            var ownerDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + objTypeName);
+            for (var field : data.fields()) {
+                if (field.name().equals(access.fieldName())) {
+                    ctx.code.getfield(ownerDesc, access.fieldName(), typeToClassDesc(field.type()));
+                    return;
+                }
+            }
+        }
         ctx.code.getfield(ConstantDescs.CD_Object, access.fieldName(), ConstantDescs.CD_Object);
     }
     

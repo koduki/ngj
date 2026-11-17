@@ -50,7 +50,7 @@ public class ValhallaValidationTest {
             
             public fn test() -> Int effects() {
                 val x = null;
-                1
+                return 1;
             }
             """;
         
@@ -67,7 +67,7 @@ public class ValhallaValidationTest {
             package test.null01expr;
             
             public fn test(x: Int) -> Bool effects() {
-                x == null
+                return x == null;
             }
             """;
         
@@ -92,11 +92,11 @@ public class ValhallaValidationTest {
             }
             
             public fn area(s: Shape) -> Int effects() {
-                match (s) {
+                return match (s) {
                     case Circle(r) => { r * r * 3 }
                     case Rectangle(w, h) => { w * h }
                     case Point() => { 0 }
-                }
+                };
             }
             """;
         
@@ -118,9 +118,9 @@ public class ValhallaValidationTest {
             }
             
             public fn describe(s: Status) -> Int effects() {
-                match (s) {
+                return match (s) {
                     case Active() => { 1 }
-                }
+                };
             }
             """;
         
@@ -148,9 +148,9 @@ public class ValhallaValidationTest {
             public enum Color { Red(), Green(), Blue() }
             
             public fn name(c: Color) -> Int effects() {
-                match (c) {
+                return match (c) {
                     case Red() => { 1 }
-                }
+                };
             }
             """;
         
@@ -186,9 +186,9 @@ public class ValhallaValidationTest {
             }
             
             public fn unwrap(o: Outer) -> Int effects() {
-                match (o) {
+                return match (o) {
                     case Wrap(x) => { x }
-                }
+                };
             }
             """;
         
@@ -205,9 +205,9 @@ public class ValhallaValidationTest {
             
             public fn maybe(x: Int) -> Option<Int> effects() {
                 if (x > 0) {
-                    Some(x)
+                    return Some(x);
                 } else {
-                    None()
+                    return None();
                 }
             }
             """;
@@ -223,9 +223,9 @@ public class ValhallaValidationTest {
             
             public fn divide(a: Int, b: Int) -> Result<Int, String> effects() {
                 if (b == 0) {
-                    Err("division by zero")
+                    return Err("division by zero");
                 } else {
-                    Ok(a / b)
+                    return Ok(a / b);
                 }
             }
             """;
@@ -242,7 +242,7 @@ public class ValhallaValidationTest {
             package test.generic01;
             
             public fn sum(nums: List<Int>) -> Int effects() {
-                0
+                return 0;
             }
             """;
         
@@ -256,7 +256,7 @@ public class ValhallaValidationTest {
             package test.generic01opt;
             
             public fn first(opts: List<Option<Int>>) -> Int effects() {
-                0
+                return 0;
             }
             """;
         
@@ -330,7 +330,7 @@ public class ValhallaValidationTest {
             public record Point(x: Int, y: Int);
             
             public fn same(a: Point, b: Point) -> Bool effects() {
-                a == b
+                return a == b;
             }
             """;
         
@@ -346,7 +346,7 @@ public class ValhallaValidationTest {
             package test.value03;
             
             public fn compare(a: Int, b: Int) -> Bool effects() {
-                a == b
+                return a == b;
             }
             """;
         
@@ -360,7 +360,7 @@ public class ValhallaValidationTest {
             package test.value03long;
             
             public fn compare(a: Long, b: Long) -> Bool effects() {
-                a == b
+                return a == b;
             }
             """;
         
@@ -374,7 +374,7 @@ public class ValhallaValidationTest {
             package test.value03bool;
             
             public fn compare(a: Bool, b: Bool) -> Bool effects() {
-                a == b
+                return a == b;
             }
             """;
         

@@ -3,16 +3,16 @@ package test.control;
 
 public fn max(a: Int, b: Int) -> Int effects() {
     if (a > b) {
-        a
+        return a;
     } else {
-        b
+        return b;
     }
 }
 
 public fn abs(n: Int) -> Int effects() {
     if (n < 0) {
-        -n
+        return -n;
     } else {
-        n
+        return n;
     }
 }

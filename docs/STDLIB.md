@@ -163,52 +163,52 @@ Some(1) == Some(2)    // false
 
 ### 3.2 Standard Operations
 
-```
+```scala
 // Map: transform the inner value if present
 fn map<T, U>(opt: Option<T>, f: (T) -> U) -> Option<U> effects() {
-    match (opt) {
-        case Some(v) => { Some(f(v)) }
+    return match (opt) {
+        case Some(v) => { Some(f(v)) },
         case None() => { None() }
-    }
+    };
 }
 
 // FlatMap: chain Option-returning operations
 fn flatMap<T, U>(opt: Option<T>, f: (T) -> Option<U>) -> Option<U> effects() {
-    match (opt) {
-        case Some(v) => { f(v) }
+    return match (opt) {
+        case Some(v) => { f(v) },
         case None() => { None() }
-    }
+    };
 }
 
 // GetOrElse: provide a default value
 fn getOrElse<T>(opt: Option<T>, default: T) -> T effects() {
-    match (opt) {
-        case Some(v) => { v }
+    return match (opt) {
+        case Some(v) => { v },
         case None() => { default }
-    }
+    };
 }
 
 // IsSome / IsNone
 fn isSome<T>(opt: Option<T>) -> Bool effects() {
-    match (opt) {
-        case Some(_) => { true }
+    return match (opt) {
+        case Some(_) => { true },
         case None() => { false }
-    }
+    };
 }
 
 fn isNone<T>(opt: Option<T>) -> Bool effects() {
-    match (opt) {
-        case Some(_) => { false }
+    return match (opt) {
+        case Some(_) => { false },
         case None() => { true }
-    }
+    };
 }
 
 // ToResult: convert to Result
 fn toResult<T, E>(opt: Option<T>, err: E) -> Result<T, E> effects() {
-    match (opt) {
-        case Some(v) => { Ok(v) }
+    return match (opt) {
+        case Some(v) => { Ok(v) },
         case None() => { Err(err) }
-    }
+    };
 }
 ```
 
@@ -216,7 +216,7 @@ fn toResult<T, E>(opt: Option<T>, err: E) -> Result<T, E> effects() {
 
 `Result<T, E>` represents success or failure. It is an **ordinary enum**.
 
-```
+```scala
 public enum Result<T, E> {
     Ok(value: T),
     Err(error: E)
@@ -227,77 +227,77 @@ public enum Result<T, E> {
 
 The `?` operator provides early return on `Err`:
 
-```
+```scala
 fn process(input: String) -> Result<Output, ProcessError> effects() {
     val parsed = parse(input)?;      // If Err, returns Err immediately
     val validated = validate(parsed)?;
-    Ok(transform(validated))
+    return Ok(transform(validated));
 }
 
 // Desugars to:
 fn process(input: String) -> Result<Output, ProcessError> effects() {
     val parsed = match (parse(input)) {
-        case Ok(v) => { v }
-        case Err(e) => { return Err(e) }   // Early return (conceptual)
+        case Ok(v) => { v },
+        case Err(e) => { return Err(e); }   // Early return
     };
     val validated = match (validate(parsed)) {
-        case Ok(v) => { v }
-        case Err(e) => { return Err(e) }
+        case Ok(v) => { v },
+        case Err(e) => { return Err(e); }
     };
-    Ok(transform(validated))
+    return Ok(transform(validated));
 }
 ```
 
-**Important**: `?` is **not** supported on `Option<T>` in v0.3. Use `match` or `toResult` explicitly.
+**Important**: `?` is **not** supported on `Option<T>` in v0.3 (`NGJ-PROP-001`). Use `match` or `toResult` explicitly.
 
 ### 4.2 Standard Operations
 
-```
+```scala
 // Map: transform the success value
 fn map<T, U, E>(res: Result<T, E>, f: (T) -> U) -> Result<U, E> effects() {
-    match (res) {
-        case Ok(v) => { Ok(f(v)) }
+    return match (res) {
+        case Ok(v) => { Ok(f(v)) },
         case Err(e) => { Err(e) }
-    }
+    };
 }
 
 // MapErr: transform the error value
 fn mapErr<T, E, F>(res: Result<T, E>, f: (E) -> F) -> Result<T, F> effects() {
-    match (res) {
-        case Ok(v) => { Ok(v) }
+    return match (res) {
+        case Ok(v) => { Ok(v) },
         case Err(e) => { Err(f(e)) }
-    }
+    };
 }
 
 // FlatMap: chain Result-returning operations
 fn flatMap<T, U, E>(res: Result<T, E>, f: (T) -> Result<U, E>) -> Result<U, E> effects() {
-    match (res) {
-        case Ok(v) => { f(v) }
+    return match (res) {
+        case Ok(v) => { f(v) },
         case Err(e) => { Err(e) }
-    }
+    };
 }
 
 // IsOk / IsErr
 fn isOk<T, E>(res: Result<T, E>) -> Bool effects() {
-    match (res) {
-        case Ok(_) => { true }
+    return match (res) {
+        case Ok(_) => { true },
         case Err(_) => { false }
-    }
+    };
 }
 
 fn isErr<T, E>(res: Result<T, E>) -> Bool effects() {
-    match (res) {
-        case Ok(_) => { false }
+    return match (res) {
+        case Ok(_) => { false },
         case Err(_) => { true }
-    }
+    };
 }
 
 // ToOption: discard error info
 fn toOption<T, E>(res: Result<T, E>) -> Option<T> effects() {
-    match (res) {
-        case Ok(v) => { Some(v) }
+    return match (res) {
+        case Ok(v) => { Some(v) },
         case Err(_) => { None() }
-    }
+    };
 }
 ```
 
@@ -397,12 +397,12 @@ public enum IndexError {
 
 When receiving values from Java that may be null:
 
-```
+```scala
 // Java method: @Nullable User findUser(String id)
 // NGJ adapter generates:
 fn findUser(id: String) -> Option<User> effects(DbRead) {
     val javaResult = JavaAdapter.findUser(id);  // May be null
-    JavaBoundary.nullToOption(javaResult)       // Null -> None(), non-null -> Some(value)
+    return JavaBoundary.nullToOption(javaResult); // Null -> None(), non-null -> Some(value)
 }
 ```
 
