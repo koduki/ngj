@@ -71,9 +71,13 @@ jobs:
     
     - name: Build with toolchain
       run: ./gradlew build
+      env:
+        NGJ_BUILD_JDK_VERSION: "25"
     
     - name: Run tests
       run: ./gradlew test
+      env:
+        NGJ_BUILD_JDK_VERSION: "25"
     
     - name: Upload test results
       uses: actions/upload-artifact@v4
@@ -116,6 +120,8 @@ jobs:
     
     - name: Build compiler JAR
       run: ./gradlew fatJar
+      env:
+        NGJ_BUILD_JDK_VERSION: "25"
     
     - name: Run fixture tests with Valhalla JDK
       run: |

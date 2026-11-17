@@ -35,8 +35,9 @@ val VALHALLA_JDK_BUILD = "24"
 val VALHALLA_JDK_DATE = "2026-11-12"
 
 // BUILD_JDK_VERSION for compiling, VALHALLA_JDK_VERSION for runtime
-// Use available JDK version (21+) for local builds; CI uses JDK 28
-val BUILD_JDK_VERSION = System.getenv("NGJ_BUILD_JDK_VERSION")?.toIntOrNull() ?: 21
+// JDK 22+ required for java.lang.classfile API
+// CI uses JDK 25 (toolchain), local builds can override with NGJ_BUILD_JDK_VERSION
+val BUILD_JDK_VERSION = System.getenv("NGJ_BUILD_JDK_VERSION")?.toIntOrNull() ?: 25
 
 subprojects {
     apply(plugin = "java")
