@@ -121,14 +121,19 @@ public final class Compiler {
             return new BuildResult(false, diagnostics, null, "Holes present");
         }
         
-        if (!target.equals("java25")) {
+        if (!target.equals("valhalla") && !target.equals("java25")) {
             diagnostics.add(Diagnostic.error(
                 "NGJ-BUILD-002",
-                "Unsupported target: " + target + ". MVP only supports java25",
+                "Unsupported target: " + target + ". Supported targets: valhalla (default), java25 (legacy)",
                 null
             ));
             return new BuildResult(false, diagnostics, null, "Unsupported target");
         }
+        
+        // Note: Both targets use the same code generator. 
+        // The difference is in class file version and JVM features used.
+        // valhalla = JDK 28 with value classes (JEP 401)
+        // java25 = JDK 25 compatibility mode (deprecated)
         
         // Phase 4: Code generation
         try {
