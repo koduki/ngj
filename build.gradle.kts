@@ -34,9 +34,10 @@ val VALHALLA_JDK_VERSION = 28
 val VALHALLA_JDK_BUILD = "24"
 val VALHALLA_JDK_DATE = "2026-11-12"
 
-// BUILD_JDK_VERSION for compiling, VALHALLA_JDK_VERSION for runtime
-// JDK 22+ required for java.lang.classfile API
-// CI uses JDK 25 (toolchain), local builds can override with NGJ_BUILD_JDK_VERSION
+// BUILD_JDK_VERSION for compiling (requires JDK 22+ for java.lang.classfile API)
+// VALHALLA_JDK_VERSION (28) for runtime with JEP 401 Value Objects
+// CI uses JDK 25 (toolchain) for compilation, JDK 28 EA for runtime tests
+// Local builds can override with NGJ_BUILD_JDK_VERSION environment variable
 val BUILD_JDK_VERSION = System.getenv("NGJ_BUILD_JDK_VERSION")?.toIntOrNull() ?: 25
 
 subprojects {
@@ -74,11 +75,14 @@ subprojects {
         useJUnitPlatform()
         // Enable preview features for tests
         jvmArgs("--enable-preview")
-        // Skip JDK version check for tests (CI uses JDK 28)
+        // Skip JDK version check for tests (build JDK may differ from runtime target)
         environment("NGJ_SKIP_JDK_CHECK", "true")
-        // Set class file version for generated code to match test runtime
-        // JDK 25 = class file version 69
-        environment("NGJ_RUNTIME_CLASS_VERSION", (BUILD_JDK_VERSION + 44).toString())
+        // Set class file version for generated code
+        // JDK 28 = class file version 72 (target runtime for Valhalla JEP 401)
+        // The runtime tests verify loading on JDK 28 with --enable-preview
+        val targetClassVersion = System.getenv("NGJ_RUNTIME_CLASS_VERSION")?.toIntOrNull()
+            ?: 72  // Default to JDK 28 class file version
+        environment("NGJ_RUNTIME_CLASS_VERSION", targetClassVersion.toString())
         // Detailed test output for AI loop diagnostics
         testLogging {
             events("passed", "skipped", "failed")

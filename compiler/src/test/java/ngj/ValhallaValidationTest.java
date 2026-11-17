@@ -293,14 +293,30 @@ public class ValhallaValidationTest {
         
         assertFalse(outputs.isEmpty(), "Should generate class files");
         
-        // Read the class file and verify it doesn't have ACC_IDENTITY
+        // Read the class file and verify format
         var classFile = outputs.get(0);
         var bytes = Files.readAllBytes(classFile);
         
-        // Class file format: magic (4) + minor (2) + major (2) + ...
-        // Access flags are at offset after constant pool
-        // For a simple check, we verify the file was generated
-        assertTrue(bytes.length > 0, "Class file should not be empty");
+        // Verify class file has valid structure
+        assertTrue(bytes.length > 8, "Class file should have header");
+        
+        // Magic number: 0xCAFEBABE
+        assertEquals((byte) 0xCA, bytes[0], "Invalid magic byte 0");
+        assertEquals((byte) 0xFE, bytes[1], "Invalid magic byte 1");
+        assertEquals((byte) 0xBA, bytes[2], "Invalid magic byte 2");
+        assertEquals((byte) 0xBE, bytes[3], "Invalid magic byte 3");
+        
+        // Minor version (bytes 4-5) - should be 65535 for preview
+        int minorVersion = ((bytes[4] & 0xFF) << 8) | (bytes[5] & 0xFF);
+        assertEquals(65535, minorVersion, 
+            "Minor version should be 65535 for preview features (JEP 401)");
+        
+        // Major version (bytes 6-7) - should be 72 for JDK 28
+        int majorVersion = ((bytes[6] & 0xFF) << 8) | (bytes[7] & 0xFF);
+        int expectedVersion = Integer.parseInt(
+            System.getenv().getOrDefault("NGJ_RUNTIME_CLASS_VERSION", "72"));
+        assertEquals(expectedVersion, majorVersion, 
+            "Major version should match target JDK");
     }
     
     // ========== VALUE-02: == compares by field values ==========
