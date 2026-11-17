@@ -6,6 +6,12 @@ public enum TokenType {
     RECORD, ENUM, EFFECTS, FOR, YIELD, WHILE,
     TRUE, FALSE,
     
+    // Valhalla foundation keywords
+    IDENTITY, CLASS,
+    
+    // Reserved keyword that must be rejected (NULL-01)
+    NULL,
+    
     // Legacy v0.2 keywords (for migration diagnostics)
     MODULE, PUB, DATA, LET, RETURN, MUT,
     

@@ -78,6 +78,34 @@ public record Diagnostic(
         );
     }
     
+    /**
+     * ENUM-02: Create exhaustiveness error with missing variant details for AI fix loop.
+     * The related info contains the missing variants for structured diagnostic output.
+     */
+    public static Diagnostic exhaustivenessError(String id, String message, SourceSpan span, 
+            String enumTypeName, List<String> missingVariants) {
+        var related = missingVariants.stream()
+            .map(v -> new RelatedInfo("missing_variant", enumTypeName + "." + v))
+            .toList();
+        
+        return new Diagnostic(
+            id,
+            Severity.ERROR,
+            Certainty.DEFINITE,
+            message,
+            span,
+            enumTypeName,
+            null,
+            null,
+            related,
+            List.of(new Suggestion(
+                "add_missing_cases",
+                "Add match arms for: " + String.join(", ", missingVariants),
+                "machine_applicable"
+            ))
+        );
+    }
+    
     public String toJson() {
         var relatedJson = related.isEmpty() ? "" :
             related.stream()

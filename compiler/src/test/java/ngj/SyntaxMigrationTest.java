@@ -501,6 +501,8 @@ class SyntaxMigrationTest {
     
     @Test
     void enumMatch_exhaustive_valid() throws Exception {
+        // Per EBNF spec: variant = IDENT "(" [ parameters ] ")"
+        // Variants and constructor patterns always have parentheses
         var source = """
             package test.exhaustive;
             
@@ -521,6 +523,7 @@ class SyntaxMigrationTest {
     
     @Test
     void enumMatch_nonExhaustive_error() throws Exception {
+        // Per EBNF spec: variant = IDENT "(" [ parameters ] ")"
         var source = """
             package test.nonexhaustive;
             
@@ -543,6 +546,7 @@ class SyntaxMigrationTest {
     
     @Test
     void enumMatch_withWildcard_valid() throws Exception {
+        // Per EBNF spec: variant = IDENT "(" [ parameters ] ")"
         var source = """
             package test.wildcard;
             

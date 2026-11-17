@@ -1,5 +1,6 @@
 // Match completion test for AI pilot evaluation
 // Tests understanding of exhaustive matching
+// Per EBNF spec: variant = IDENT "(" [ parameters ] ")"
 package pilot.match_complete;
 
 public enum Color {

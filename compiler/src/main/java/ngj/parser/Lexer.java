@@ -35,6 +35,11 @@ public final class Lexer {
         Map.entry("while", TokenType.WHILE),
         Map.entry("true", TokenType.TRUE),
         Map.entry("false", TokenType.FALSE),
+        // Valhalla foundation keywords
+        Map.entry("identity", TokenType.IDENTITY),
+        Map.entry("class", TokenType.CLASS),
+        // null is a reserved keyword that must be rejected (NULL-01)
+        Map.entry("null", TokenType.NULL),
         // Legacy v0.2 keywords (for migration diagnostics)
         Map.entry("module", TokenType.MODULE),
         Map.entry("pub", TokenType.PUB),
