@@ -447,7 +447,7 @@ class SyntaxMigrationTest {
         var result = check(source);
         assertFalse(result.isValid());
         assertTrue(result.errors().stream()
-            .anyMatch(e -> e.id().equals("NGJ-TYPE-022")),
+            .anyMatch(e -> e.id().equals("NGJ-TYPE-026")),
             "for over non-List should error: " + result.errors());
     }
     
