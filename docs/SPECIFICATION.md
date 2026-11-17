@@ -1,8 +1,8 @@
 # NGJ — Concept & Language Specification
 
 > Draft v0.3 / 2026-11-17
-> Status: v0.3 target specification. An initial v0.2 compiler exists; migration and conformance checks are pending.
-> Baseline: Java 25 class files; optional, pinned Valhalla and Native Image backends.
+> Status: v0.3 target specification. An initial v0.2 compiler exists (Java 25 baseline); Valhalla基盤への移行は保留中。
+> Baseline: Valhalla対応JDK（JDK 28 EA + `--enable-preview`）。Valhallaはオプションのバックエンドではなく、言語設計の基盤である。
 
 ## 1. 目的・適用範囲
 
@@ -10,14 +10,48 @@ NGJは、AIエージェントが生成・修正することを第一級の利用
 
 ### 1.1 設計原則
 
-1. **Value first:** 不変の値と、同一性・状態・寿命を持つリソースを分離する。Valhallaを最適化先とするが、意味論はVMの配置方式に依存させない。
+1. **Value first (Valhalla foundation):** 不変の値と、同一性・状態・寿命を持つリソースを分離する。Project Valhallaのvalue classesを言語設計の基盤とし、プリミティブ型とユーザー定義値型を統一する。NGJにおける`Int`/`Long`/`Bool`等はvalue型であり、boxed/primitive の二重性をユーザーに見せない。VMによるフラット化・スカラ化は性能最適化であり、言語の意味論は値の等価性と不変性に基づく。
 2. **Colorless structured concurrency:** `scope` / `fork` と仮想スレッドによって、`async/await`なしの直接的な記述を提供する。
 3. **Checkable authority:** 型・Effect・Capabilityで、実行可能な操作と対象を表す。安全性をソース中の自己申告に依存させない。
 4. **Compiler as an agent interface:** 型付き穴、部分プログラム検査、構造化診断、意味に基づく文脈取得をコンパイラの公開機能とする。
 5. **Observable and verifiable behavior:** OTel/JFR、契約、反例、I/O再実行を接続する。観測と保証を区別する。
 6. **Static interop and AOT:** NGJ自身は実行時リフレクションに依存せず、Java境界とバックエンドの要件をビルド時に検査する。
 
-AIを言語ランタイムやコンパイラの必須依存にはしない。同じソース・依存・ツールチェーンからのビルドにLLM呼び出しは不要。エージェント専用構文やプロンプトDSL、任意の依存型、完全な自動証明はv0.2の必須要件ではない。
+AIを言語ランタイムやコンパイラの必須依存にはしない。同じソース・依存・ツールチェーンからのビルドにLLM呼び出しは不要。エージェント専用構文やプロンプトDSL、任意の依存型、完全な自動証明はv0.3の必須要件ではない。
+
+### 1.3 Valhalla基盤 — 型システムの根幹
+
+NGJはProject Valhallaのvalue classesを言語設計の**基盤**とする。これはオプションの最適化バックエンドではなく、型システムと標準ライブラリの根幹である。
+
+**設計原則:**
+- **Value型がデフォルト:** すべてのユーザー定義型はvalue型として設計する。同一性（identity）は明示的に必要な場合のみ宣言する
+- **Primitive/Boxed分離の廃止:** `Int`/`Long`/`Bool`等はvalue型であり、ユーザーにprimitive/boxedの二重性を見せない
+- **nullの廃止:** コア言語に`null`リテラルは存在しない。不在は`Option<T>`で表現する
+- **値等価性がデフォルト:** `==`はすべてのvalue型でフィールド値による等価性比較
+- **ジェネリクスはvalue型を含む:** `List<Int>`は言語レベルで保証された機能であり、実装の最適化状況に依存しない
+
+**Identity型が必要な場面:**
+- `resource`: 寿命・所有権・クリーンアップを持つ型
+- `actor`: 隔離された可変状態を持つ型
+- 明示的な`identity`宣言: 可変性、同期、参照比較が必要な場合
+- Java境界: Java側identity objectとの相互運用
+
+**実装状況（2026年11月時点）:**
+
+| 言語機能 | 仕様上の扱い | JVM実装基盤 | 状態 |
+|---------|-------------|------------|------|
+| Value型デフォルト | 必須 | JEP 401 Value Objects | JDK 28 Preview |
+| Null廃止 / Option | 必須 | JEP draft 8316779 Null-Restricted Types | Draft |
+| Primitive統一 | 必須 | JEP 402 Enhanced Primitive Boxing | Draft |
+| ジェネリック特殊化 | 意味論保証、性能は実装依存 | Parametric JVM | 研究段階 |
+
+**JDKピン方針:**
+- 開発時は JDK 28 EA + `--enable-preview` を必須とする
+- 仕様はJDKの現状に妥協せず理想を記述し、実装がそれを追う
+- JVM機能の不足部分はコンパイラ側で補完（ランタイムチェック、ラッパー生成等）
+
+**リスクと移行:**
+詳細は本文書末尾の「オープンクエスチョンとリスク」節を参照。
 
 ### 1.2 文書の読み方と保証範囲
 
@@ -54,31 +88,406 @@ v0.3の正規構文は[EBNF.md](EBNF.md)、既存compilerからの移行は[SYNT
 
 `?name`はprimary式の穴、`expr?`は後置伝播。伝播先は最も内側の関数またはlambdaである。普通のblock/if/match/while/build/scopeは伝播先を作らず、forkは子タスクの関数境界を作る。for callback内の伝播規則は5.4節に従う。
 
-### 2.2 値・同一性・不透明型
+### 2.2 値型・同一性型・不透明型
+
+NGJの型システムは**value型をデフォルト**とする。同一性（identity）は明示的に必要な場合のみ宣言する。
+
+#### 2.2.1 Value型（デフォルト）
 
 | 宣言 | 意味 | 制約 |
-|---|---|---|
-| `record` | 不変の積型、構造的等価性 | 全フィールドが不変。生の可変Java参照を格納しない |
-| `enum` | 閉じた直和型 | パターン分岐を網羅させる |
-| `resource` | 寿命・所有権を持つ同一性オブジェクト | affine、暗黙コピー禁止 |
-| `actor` | 隔離した可変状態とメッセージ処理 | 状態への直接外部アクセス禁止 |
-| `opaque record` | package外から表現・コンストラクターを隠す値 | 公開された検証済み生成関数だけが構築可能 |
+|------|------|------|
+| `data` | 不変の積型 | 全フィールドが不変。同一性なし。構造的等価性 |
+| `record` | dataの簡潔形式 | フィールド名から自動導出。dataと同等 |
+| `enum` | 閉じた直和型 | 各バリアントもvalue型。パターン分岐を網羅 |
+| `opaque data` | 表現を隠す値型 | module外からコンストラクタ不可視 |
 
-`==`は値の等価性。`===`は同一性のある型でのみ使用できる。`record`内の参照も安全な不変表現でなければならず、`final`フィールドだけでは深い不変性の証拠にならない。
+Value型の性質:
+- **不変:** 生成後にフィールドを変更できない
+- **同一性なし:** `System.identityHashCode`、`synchronized`、参照アドレス比較は不可
+- **構造的等価性:** `==`はフィールド値による比較。`data Point { x: Int, y: Int }`で`Point(1,2) == Point(1,2)`は`true`
+- **コピー自由:** 値のコピーは意味論的に区別できない
+- **ジェネリクス可能:** `List<Point>`、`Option<Int>`等で使用可能
+
+#### 2.2.2 Identity型（明示宣言）
+
+| 宣言 | 意味 | 制約 |
+|------|------|------|
+| `identity class` | 同一性を持つクラス | 可変フィールド許可。参照比較可能 |
+| `resource` | 寿命・所有権付き同一性オブジェクト | affine。暗黙コピー禁止。cleanup必須 |
+| `actor` | 隔離された可変状態 | メッセージ経由のみアクセス |
+
+Identity型が必要な場面:
+- **可変状態:** フィールドの再代入が必要
+- **同期:** `synchronized`ブロックのロック対象
+- **参照比較:** 同じオブジェクトであることを識別
+- **外部リソース:** ファイルハンドル、DB接続、ネットワークソケット
+
+#### 2.2.3 等価性意味論
+
+| 型の種類 | `==` の意味 | `===` の可否 |
+|---------|------------|-------------|
+| Value型 | フィールド値による等価性（再帰的） | 使用不可（コンパイルエラー） |
+| Identity型 | 参照同一性 | 使用可能（`==`と同義） |
+
+Value型の`==`はフィールドを再帰的に比較する。フィールドがvalue型なら値比較、identity型なら参照比較。
+
+```
+data Person { name: String, age: Int }
+Person("Alice", 30) == Person("Alice", 30)  // true（値等価）
+
+identity class Counter { var count: Int }
+let c1 = Counter(0)
+let c2 = Counter(0)
+c1 == c2   // false（異なるインスタンス）
+c1 === c1  // true（同一インスタンス）
+```
+
+`data`内の参照も安全な不変表現でなければならず、identity型フィールドを持つ場合はそのフィールドへの参照が外部で変更されないことを保証する設計が必要。
 
 `Copy`は複製しても寿命・権限・消費制約を破らない型の性質、`Send`は所有権を別タスクへ移せる性質、`Share`は共有借用を並行使用できる性質。コンパイラがフィールドから導出し、アプリ側の無検査な宣言は禁止する。`Copy`は物理的なメモリコピーを必須としない。メソッド呼び出しのreceiverは宣言された`self`モードに従って自動借用できるが、通常の関数引数の借用は`&`で明示する。
 
 不透明型の構築権限とCapabilityを合わせることで、`Verified<T, Source>`を外部入力やキャストから偽造できなくする。出典ラベルは出典の事実を表し、データ内容の真実性を証明しない。
 
-### 2.3 数値・失敗・不在
+### 2.3 数値型・失敗・不在
 
-- `Int`は符号付き32bit、`Long`は符号付き64bit、`Byte`は符号なし8bit。通常の整数演算はオーバーフローを検出し、タスクfaultにする。必要な回復は`checkedAdd`等の`Result` APIで記述する。wrap/saturateは明示APIのみ。
-- `Result<T,E>`と`Option<T>`を正規の失敗・不在表現とする。v0.1の代替候補`T | E`は採用しない。
-- `?`は`Err(e)`を現在の関数へ伝播する。異なるエラー型には明示的なmatchまたはmapErrによる変換を必要とする。Optionへの?は提供せず、matchまたはResultへの明示変換を使う。式文にはUnit型を要求する。Resultを破棄する場合もmatch等で明示的に扱う。
-- NGJには`null`リテラルとユーザーの`throw`構文を提供しない。ただしVM障害、契約違反、オーバーフロー、ランタイム不変条件違反は存在する。
-- 回復可能なドメインエラーは`Result`、協調キャンセルは`Cancelled`、プログラミング上のfaultはタスク失敗として区別する。OOM等のVM致命障害の回復やcleanup成功は保証しない。
+#### 2.3.1 数値型はvalue型
 
-`Result`の値型化は最適化機会であり、全ケースの非ボクシング・無割当を意味しない。
+NGJの数値型はすべてvalue型である。Javaのprimitive/boxed二重性は**存在しない**。
+
+| NGJ型 | 意味 | 等価性 |
+|-------|------|--------|
+| `Int` | 符号付き32bit整数 | 値比較 |
+| `Long` | 符号付き64bit整数 | 値比較 |
+| `Bool` | 真偽値 | 値比較 |
+| `Byte` | 符号なし8bit | 値比較 |
+| `Float` | 32bit浮動小数 | 値比較（NaN == NaN は false） |
+| `Double` | 64bit浮動小数 | 値比較（NaN == NaN は false） |
+
+```
+Int(5) == Int(5)      // true
+let x: Int = 5
+let y: Int = 5
+x == y                // true（常に値比較）
+
+// ジェネリクスで自然に使用
+let nums: List<Int> = List.of(1, 2, 3)
+let opt: Option<Int> = Some(42)
+```
+
+**boxing/unboxingの概念は言語に存在しない。** `List<Int>`は`List<Integer>`へのboxingではなく、言語レベルで保証された値型のコレクションである。JVMレベルでの表現（ヒープ割当の有無）は実装詳細であり、言語意味論に影響しない。
+
+**整数演算とオーバーフロー:**
+通常の整数演算はオーバーフローを検出し、タスクfaultにする。回復が必要な場合は`checkedAdd`等の`Result` APIで記述する。wrap/saturateは明示APIのみ。
+
+#### 2.3.2 Null廃止とOption
+
+**NGJコア言語に`null`は存在しない。**
+
+- `null`リテラルは提供しない
+- 参照型の「何もない」状態は`Option<T>`で表現する
+- `throw`構文も提供しない（`Result`を使用）
+
+```
+// 不在の表現
+fn findUser(id: UserId) -> Option<User> ! { DbRead }
+
+// 使用側
+match findUser(id) {
+    Some(user) => processUser(user),
+    None => handleNotFound()
+}
+```
+
+**`Option<T>`と`Result<T,E>`はvalue型:**
+- `Some(x)`と`None`は値として扱われる
+- `Ok(x)`と`Err(e)`も同様
+- フラット化・スカラ化の対象（JVM最適化が可能な場合）
+
+#### 2.3.3 Java境界でのnull
+
+Java APIとの境界でのみnullが出現する可能性がある。
+
+| Java側 | NGJ側での扱い |
+|--------|--------------|
+| `@Nullable T` | `Option<T>` |
+| `@NonNull T` | `T`（nullならfault） |
+| nullability不明 | `Option<T>`として防御的に扱うか、アダプターで明示指定 |
+
+Java側から受け取ったnullは即座に`None`へ変換される。NGJ側から返すnullは存在しない（`Option`の`None`はJava側で適切な表現に変換）。
+
+#### 2.3.4 失敗表現
+
+`Result<T,E>`と`Option<T>`は標準ライブラリのenum型であり、特別なビルトインではない（`?`演算子のルールを除く）。定義は2.4節を参照。
+
+- `?`は`Err(e)`を現在の関数へ伝播する。異なるエラー型には明示的な`mapErr`を必要とする
+- 失敗する値の黙殺はエラーとし、意図的な破棄には理由付きの明示操作を要する
+- 回復可能なドメインエラーは`Result`、協調キャンセルは`Cancelled`、プログラミング上のfaultはタスク失敗として区別する
+
+### 2.4 Enum — 代数的データ型
+
+NGJの`enum`は**sealed algebraic data type（密封代数的データ型）**であり、ペイロードを持つバリアント（直和型）をサポートする。Rust/Swiftのenum、またはJavaのsealed interface + recordsに相当する。
+
+#### 2.4.1 基本構文
+
+```
+// ペイロードなしバリアント（古典的enum）
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+
+// ペイロード付きバリアント（代数的データ型）
+enum Shape {
+    Circle { radius: Float },
+    Rectangle { width: Float, height: Float },
+    Point  // ペイロードなしも混在可能
+}
+
+// ジェネリックenum
+enum Option<T> {
+    Some { value: T },
+    None
+}
+
+enum Result<T, E> {
+    Ok { value: T },
+    Err { error: E }
+}
+```
+
+#### 2.4.2 Enumの性質
+
+**すべてのenumとそのバリアントはvalue型である:**
+- 同一性なし（identity-free）
+- 不変
+- `==`はバリアント種別とペイロードの値比較
+- ジェネリクスで自然に使用可能
+
+```
+let s1 = Shape.Circle { radius: 5.0 }
+let s2 = Shape.Circle { radius: 5.0 }
+s1 == s2  // true（値等価）
+
+let opt1: Option<Int> = Some { value: 42 }
+let opt2: Option<Int> = Some { value: 42 }
+opt1 == opt2  // true
+```
+
+**バリアントは型ではない:**
+`Shape.Circle`は`Shape`型の値を構築する構文であり、独立した型ではない。`Shape`型の変数のみが存在する。
+
+#### 2.4.3 パターンマッチング
+
+`match`式はenumの網羅的分岐を提供する。**網羅性検査は言語の中核保証**であり、欠落バリアントは正確な診断で報告される。
+
+```
+fn area(shape: Shape) -> Float ! {} {
+    match shape {
+        Circle { radius } => 3.14159 * radius * radius,
+        Rectangle { width, height } => width * height,
+        Point => 0.0
+    }
+}
+```
+
+**網羅性検査:**
+- 全バリアントを網羅しなければコンパイルエラー
+- 欠落バリアント名を診断に含める（AIフィックスループに重要）
+- `_`ワイルドカードで残り全部をキャッチ可能（ただし将来のバリアント追加で網羅漏れリスク）
+
+```
+// エラー例: 'Point' variant not covered in match expression
+fn broken_area(shape: Shape) -> Float ! {} {
+    match shape {
+        Circle { radius } => 3.14159 * radius * radius,
+        Rectangle { width, height } => width * height
+        // Point が欠落 → コンパイルエラー
+    }
+}
+```
+
+**ネストパターンと分解:**
+
+```
+enum Expr {
+    Literal { value: Int },
+    Add { left: Expr, right: Expr },
+    Mul { left: Expr, right: Expr }
+}
+
+fn eval(expr: Expr) -> Int ! {} {
+    match expr {
+        Literal { value } => value,
+        Add { left: Literal { value: a }, right: Literal { value: b } } => a + b,
+        Add { left, right } => eval(left) + eval(right),
+        Mul { left, right } => eval(left) * eval(right)
+    }
+}
+```
+
+**ガード条件:**
+
+```
+fn describe(n: Int) -> String ! {} {
+    match n {
+        x if x < 0 => "negative",
+        0 => "zero",
+        x if x < 10 => "small positive",
+        _ => "large positive"
+    }
+}
+```
+
+#### 2.4.4 標準ライブラリのOption/Result
+
+`Option`と`Result`は通常のジェネリックenumであり、特別なビルトイン型ではない。
+
+```
+// 標準ライブラリでの定義（概念）
+package std
+
+public enum Option<T> {
+    Some { value: T },
+    None
+}
+
+public enum Result<T, E> {
+    Ok { value: T },
+    Err { error: E }
+}
+```
+
+**`?`演算子のルール:**
+
+`?`演算子は`Result`と`Option`に対して特別な伝播動作を持つ。これは構文糖であり、型の特別扱いではない。
+
+```
+// expr? の展開（Resultの場合）
+match expr {
+    Ok { value } => value,
+    Err { error } => return Err { error }
+}
+
+// expr? の展開（Optionの場合）
+match expr {
+    Some { value } => value,
+    None => return None
+}
+```
+
+`?`は以下の条件で使用可能:
+- 式の型が`Result<T, E>`で、囲む関数の戻り値型が`Result<U, E>`（同じE）
+- 式の型が`Option<T>`で、囲む関数の戻り値型が`Option<U>`
+- 異なる`E`への変換は明示的な`mapErr`を要求
+
+#### 2.4.5 ジェネリックEnum
+
+Enumは型パラメータを持てる。
+
+```
+enum Either<L, R> {
+    Left { value: L },
+    Right { value: R }
+}
+
+enum Tree<T> {
+    Leaf { value: T },
+    Node { left: Tree<T>, right: Tree<T> }
+}
+```
+
+**再帰的enum:**
+再帰的なenumは言語でサポートされる。JVM表現では参照を使用するが、言語意味論は値型として扱う。
+
+```
+enum List<T> {
+    Cons { head: T, tail: List<T> },
+    Nil
+}
+```
+
+#### 2.4.6 JVM表現
+
+Enumはsealed hierarchyのvalue classesとして出力される。
+
+```
+// NGJ
+enum Shape {
+    Circle { radius: Float },
+    Rectangle { width: Float, height: Float },
+    Point
+}
+
+// JVM出力（概念）
+public sealed value interface Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {
+}
+
+public final value class Shape.Circle implements Shape {
+    private final float radius;
+    // ...
+}
+
+public final value class Shape.Rectangle implements Shape {
+    private final float width;
+    private final float height;
+    // ...
+}
+
+public final value class Shape.Point implements Shape {
+    // singleton-like
+}
+```
+
+**JVM表現の詳細:**
+- 基底型はsealed value interface
+- 各バリアントはvalue class（permits句で列挙）
+- ペイロードなしバリアントは最適化でシングルトン化可能
+- パターンマッチはinstanceofとキャストに展開
+
+#### 2.4.7 Java相互運用
+
+**NGJ enumをJavaから使用:**
+- Javaからはsealed interfaceとして見える
+- pattern matching（Java 21+）で分岐可能
+- value class意味論はJDK 28 + preview必須
+
+**Java sealed型をNGJで使用:**
+- Java sealed interface + recordsはNGJ enumとして扱える
+- アダプターでマッピングを定義
+- permits句に含まれないサブタイプがあればエラー
+
+```
+// Javaのsealed型
+public sealed interface JShape permits JCircle, JRectangle {}
+public record JCircle(double radius) implements JShape {}
+public record JRectangle(double w, double h) implements JShape {}
+
+// NGJでの使用（アダプター経由）
+@java_enum_adapter(JShape)
+enum Shape {
+    Circle { radius: Float } = JCircle,
+    Rectangle { width: Float, height: Float } = JRectangle
+}
+```
+
+#### 2.4.8 Data/Record との関係
+
+`data`と`record`は単一バリアントのenumの糖衣構文と考えることができる。
+
+```
+// これは...
+data Point { x: Int, y: Int }
+
+// 概念的にこれと等価
+enum Point {
+    Point { x: Int, y: Int }
+}
+// ただしPointは直接構築可能: Point { x: 1, y: 2 }
+```
+
+実際には`data`/`record`は単独のvalue classとして出力され、enumのsealed hierarchy構造は持たない。しかし意味論（value型、不変、構造的等価性）は同一である。
 
 ## 3. 所有権・借用・freeze・メモリ
 
@@ -309,44 +718,183 @@ Class-File APIによる走査は既知のreflection、Unsafe、native、dynamic 
 ```text
 Source -> lossless syntax + holes -> name/type/effect/ownership checks
        -> typed IR + contracts + source map -> backend lowering
-       -> .class/.jar + ABI manifest + interop/reachability metadata
-       -> JVM or separately validated Native Image build
+       -> .class/.jar (value classes) + ABI manifest + interop/reachability metadata
+       -> Valhalla-enabled JVM or AOT build
 ```
 
 Pratt parser等で式を解析し、Java標準`java.lang.classfile` APIで直接class fileを生成する。Javaソースへのtranspileは必須経路にしない。
 
 型・Effect・所有権・公開契約は共通IRで検査し、バックエンド切替で意味論を変えない。ABI manifestには型/Effect/所有権署名とschema versionを含める。
 
+**Valhalla基盤のプロファイル:**
+
 | target/profile | データ表現 | 前提・制限 |
 |---|---|---|
-| `java25` | final class + 閉じたADT表現 | 基本コンパイラの必須backend。通常の割当あり |
-| `valhalla` | 対応VMのvalue class表現 | JDK build/preview/class-file仕様をlock。未対応なら明示エラー |
-| `native-image` | java25等の対応出力からAOT | 別build profile。JDK、GraalVM、OS/arch、metadata、JFR等を個別検証 |
+| `valhalla` (基本) | value class + sealed hierarchy | JDK 28 EA + `--enable-preview`を必須とする。data/record/enumはvalue class出力 |
+| `valhalla-compat` | identity class fallback | Valhalla未対応環境向け。value意味論は維持するが、JVM最適化なし。移行・テスト用 |
+| `leyden` | valhalla + AOT cache | Project Leyden AOTキャッシュ。Valhalla + Leyden両方のサポート状況を検証 |
+| `native-image` | valhalla出力からAOT | GraalVM Native Image。現時点ではvalue classサポートは実験段階 |
 
-Loom/ScopedValue/StructuredTaskScopeの利用可否・preview flagsはprofileに記録し、使用JDKでのAPI差分はruntime adapterに閉じる。Java 25のclass-file生成がpreview APIなしの実行を意味するわけではない。Valhallaのflagsや配置規則を将来の全JDKに固定しない。LeydenとNative Imageも同一機能として扱わない。Project Leyden AOTとnative-imageを統一的に扱うAOTレベル設計については[AOT設計方向](AOT.md)を参照。
+**AOT互換性の現状（2026年11月時点）:**
 
-### 10.2 特殊化と性能
+| AOTレベル | Valhalla互換 | 状態 |
+|-----------|-------------|------|
+| JIT (通常JVM) | ✅ 完全対応 | JDK 28 EA + preview |
+| Leyden AOT cache | ⚠️ 未検証 | Leyden自体がJDK 28で出荷予定（JEP 544）だが、value classとの組み合わせは未検証 |
+| Native Image | ❌ 未サポート | SubstrateVMはvalue classを使用しない。preview機能を避けてnative imageを生成 |
 
-参照型ジェネリクスの共有と、選択的なプリミティブ/値型特殊化を採用する。小型値型128bit以下は初期heuristic候補であり、ABI・レイアウト保証ではない。特殊化数・コードサイズにbudgetを設け、超過時の共有表現fallbackを診断する。
+**AOTレベル劣化とエラー:**
+- `--aot=leyden`指定時にLeyden/Valhalla組み合わせが未サポートなら、明示エラーまたは`valhalla`へのfallbackを警告付きで提示
+- `--aot=native`指定時にvalue classサポートがなければ、`valhalla-compat`出力からのnative-imageビルドを試行するか、明示エラー
+- 意味論は全AOTレベルで同一を維持。性能特性のみが異なる
 
-公開ABIはbackend別manifestで固定し、特殊化された内部名を公開APIとして露出しない。共有表現でボクシングする場合は許容し、allocation reportに表示する。VMによるflattening、scalar replacement、vectorizationは測定すべき最適化であり、型の意味論ではない。
+Loom/ScopedValue/StructuredTaskScopeの利用可否・preview flagsはprofileに記録し、使用JDKでのAPI差分はruntime adapterに閉じる。Valhallaのflagsや配置規則を将来の全JDKに固定せず、JDK更新時に再検証する。
 
-`--emit-layout-report`は判明している配置・特殊化・潜在的割当と未知部分を出力する候補機能。将来の`noalloc`属性は、静的に検証可能な部分集合のみに限定し、未証明の全経路に付けてはならない。
+Project Leyden AOTとnative-imageを統一的に扱うAOTレベル設計については[AOT設計方向](AOT.md)を参照。
+
+### 10.2 ジェネリクスと特殊化
+
+#### 10.2.1 ジェネリクスはvalue型を含む（言語保証）
+
+NGJのジェネリクスはvalue型を第一級でサポートする。これは**言語レベルの保証**であり、JVM実装の最適化状況に依存しない。
+
+```
+// すべて有効なNGJコード
+let ints: List<Int> = List.of(1, 2, 3)
+let points: List<Point> = List.of(Point(0, 0), Point(1, 1))
+let results: List<Result<Int, Error>> = ...
+let nested: Option<Option<Int>> = Some(Some(42))
+```
+
+**Javaとの違い:**
+- Javaではprimitive型はジェネリクスに使用不可（`List<int>`はエラー）
+- NGJでは`Int`はvalue型であり、`List<Int>`は自然に記述可能
+- boxing/unboxingの概念は言語に存在しない
+
+#### 10.2.2 性能は実装依存（最適化機会）
+
+言語意味論とJVM性能最適化を分離する。
+
+| 機能 | 言語意味論 | JVM最適化（2026年11月時点） |
+|------|-----------|---------------------------|
+| `data Point { x: Int, y: Int }` | value型、構造的等価性 | ✅ フラット化対象（64bit以下） |
+| `Option<Point>` | value型enum | ⚠️ サイズ・ネスト深度による |
+| `List<Int>` | Int値のコレクション | ⚠️ ヒープ割当（Parametric JVM待ち） |
+| `List<Point>` | Point値のコレクション | ⚠️ ヒープ割当（Parametric JVM待ち） |
+
+**実装状況（リスク節に詳細）:**
+- Parametric JVM（ジェネリック特殊化）は研究段階
+- JITスカラ化はwarmup後のみ有効
+- 64bit超のvalue classフラット化は限定的
+
+#### 10.2.3 特殊化ヒューリスティック
+
+将来のParametric JVM出荷時に備えた設計:
+- 参照型ジェネリクスの共有と、値型特殊化を想定
+- 特殊化数・コードサイズにbudgetを設け、超過時は共有表現fallback
+- 公開ABIは特殊化された内部名を露出しない
+
+`--emit-layout-report`は配置・特殊化・割当情報を出力する候補機能。
+
+**性能無条件保証の禁止:**
+「全割当がゼロ」「全ジェネリクスがフラット化」等の無条件な性能保証は行わない。言語は意味論を保証し、性能は実測で評価する。
 
 ## 11. 実装段階と未決事項
 
 詳細な完了条件は[VALIDATION.md](VALIDATION.md)を参照する。
 
-1. **Phase 1:** fn/record/enum/Result/Option、package、最小型検査、java25出力、Typed Holes、構造化診断、型文脈検索。空のeffects()を検査し、未実装の強制機能を黙って受理しない。
+**Valhallaは基盤であり、Phase 4ではない。** 以下のフェーズはValhalla対応JDK（JDK 28 EA + preview）を前提とする。
+
+1. **Phase 1:** fn/data/enum（代数的データ型）/Result/Option、module、最小型検査、**Valhalla value class出力**、Typed Holes、構造化診断、型文脈検索、**match網羅性検査**。Effect宣言を保存し、未実装の強制機能を黙って受理しない。
 2. **Phase 2:** Effect/Capability、所有権・freeze、Bytes/Arena、Java adapterの信頼境界、restricted build。小さい意味論モデルとnegative testsを先に用意する。
 3. **Phase 3:** scope/fork/Channel/actor、Typestate、契約・property tests、明示的情報フロー、OTel/JFR、逐次I/O replay。
-4. **Phase 4:** Valhalla、選択的特殊化、Native Image互換性行列、限定的証明器、AI生成の比較実験。
+4. **Phase 4:** AOTレベル統合（Leyden/native-image互換性行列）、ジェネリック特殊化最適化、限定的証明器、AI生成の比較実験。
 
 AOTレベル（JIT/Leyden/native-image）の統一的なUXとProject Leyden対応については[AOT設計方向](AOT.md)を参照。Phase 4以降の実装計画として位置づける。
 
-未決事項: システム機能の拡張EBNF、効果多相性の一般化範囲、actor supervisionの拡張、非字句借用、任意handler、暗黙情報フロー、並行replay、証明器の具体選定。未決機能を利用するソースは`unsupported_feature`として拒否し、実装済み保証と混在させない。
+未決事項: 効果多相性の一般化範囲、actor supervisionの拡張、非字句借用、任意handler、暗黙情報フロー、並行replay、証明器の具体選定。未決機能を利用するソースは`unsupported_feature`として拒否し、実装済み保証と混在させない。
 
-## 12. v0.1からの変更
+**MVPコンパイラの移行:**
+現在のMVPコンパイラはJava 25ベースライン向けに実装されている。Valhalla基盤への移行には以下が必要:
+- 型検査器: value型/identity型の区別、enum網羅性検査
+- コード生成: value class出力（`value`修飾子、sealed hierarchy）
+- CI: JDK 28 EA + `--enable-preview`へのピン
+- テスト: value意味論（`==`の値比較）の検証
+
+詳細は[MVP_COVERAGE.md](MVP_COVERAGE.md)の移行ノートを参照。
+
+未決事項: 効果多相性の一般化範囲、actor supervisionの拡張、非字句借用、任意handler、暗黙情報フロー、並行replay、証明器の具体選定。未決機能を利用するソースは`unsupported_feature`として拒否し、実装済み保証と混在させない。
+
+## 12. オープンクエスチョンとリスク
+
+### 12.1 JDK/Valhalla関連リスク
+
+| リスク | 影響 | 緩和策 |
+|--------|------|--------|
+| JDK 28 preview変更 | ソース非互換の可能性 | マイナーバージョンで追従。意味論は維持 |
+| JEP 401がfinalにならない | value class出力が使用不可 | valhalla-compat fallback（identity classで意味論維持） |
+| Null-Restricted Types (JEP 8316779) 遅延 | Java境界でのnull扱いに制約 | Option変換をコンパイラ側で生成 |
+| Parametric JVM 長期遅延 | ジェネリック性能最適化なし | 言語意味論は影響なし。性能は許容 |
+
+### 12.2 ツールチェーン/CI関連リスク
+
+| リスク | 影響 | 緩和策 |
+|--------|------|--------|
+| Gradle/Maven JDK 28 EA対応遅延 | ビルド困難 | toolchain指定、直接javac呼び出し |
+| GraalVM Native Image Valhalla未対応 | native AOT使用不可 | valhalla-compat出力からnative-image、または明示エラー |
+| Project Leyden + Valhalla組み合わせ未検証 | leyden AOT使用不可 | JIT fallback、または明示エラー |
+| IDE/LSP JDK 28 preview対応 | 開発体験低下 | CLI中心のワークフロー維持 |
+
+### 12.3 設計上の未決事項
+
+| 項目 | 状態 | 方針 |
+|------|------|------|
+| identity型の詳細構文 | 未確定 | `identity class`暫定。フィードバック後確定 |
+| Java sealed型の自動マッピング | 未確定 | アダプター経由を基本。自動推論は後続 |
+| 再帰的enumの最大深度 | 未確定 | スタックオーバーフロー回避策を検討 |
+| パターンマッチのor-pattern | 未確定 | `Circle { r } | Point => ...`の構文検討中 |
+
+### 12.4 移行パス
+
+現在のJava 25ベースMVPから Valhalla基盤への移行:
+
+1. **即座に可能:** 仕様改訂、設計文書更新
+2. **JDK 28 EA利用可能後:** CI移行、コンパイラ出力変更
+3. **JDK 28 GA後（2027年3月予定）:** 本番利用開始
+4. **preview卒業後:** 安定版としてリリース
+
+## 13. v0.2からの変更（v0.3）
+
+### 13.1 Valhalla基盤への移行
+
+- **Valhallaを基盤に:** オプションのバックエンドから言語設計の根幹へ。Phase 4から全フェーズの前提へ移動
+- **Value型デフォルト:** data/record/enumはすべてvalue型（identity-free）。identity型は明示宣言のみ
+- **Primitive統一:** Int/Long/Bool等はvalue型。boxed/primitive二重性を廃止
+- **Null廃止:** コア言語から`null`を排除。不在は`Option<T>`のみ
+
+### 13.2 Enum代数的データ型
+
+- **Enumをsealed ADTに:** ペイロード付きバリアント（直和型）をサポート
+- **Result/Optionを通常enum化:** 特別なビルトインから標準ライブラリのenumへ（`?`ルールは維持）
+- **パターンマッチング強化:** ネスト・分解パターン、ガード条件
+- **網羅性検査:** 欠落バリアントの正確な診断（AIフィックスループに重要）
+
+### 13.3 ジェネリクスとJVM表現
+
+- **ジェネリクスはvalue型を含む:** `List<Int>`は言語保証。性能最適化は実装依存
+- **JVM表現明確化:** enumはsealed hierarchy of value classes
+- **AOT互換性:** Leyden/native-imageとの互換性状況を明示
+
+### 13.4 文書構成
+
+- **1.3節追加:** Valhalla基盤とJDKピン方針
+- **2.2節再構成:** Value型/Identity型の明確な分離
+- **2.4節追加:** Enum代数的データ型の完全仕様
+- **10節更新:** Valhalla基盤のプロファイル、AOT互換性
+- **11節更新:** フェーズ再定義（Valhalla基盤前提）
+- **12節追加:** オープンクエスチョンとリスク
+
+## 14. v0.1からの変更（v0.2）
 
 - AIによる生成・修正を言語設計の目的に追加し、検査器の外部APIを仕様化。
 - `Result`に統一し、union代替・一律Option化・自己申告AOT検証を削除。

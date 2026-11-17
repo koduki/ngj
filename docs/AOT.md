@@ -2,14 +2,18 @@
 
 > Status: 設計方向。実装は将来のフェーズ。
 > 本文書は言語仕様v0.3以降の拡張計画であり、MVP要件ではない。
+> Valhalla基盤との整合性: Refs #7, [SPECIFICATION.md](SPECIFICATION.md) 1.3節
 
 ## 1. 設計思想
 
 NGJは最新のJVMツールチェーンを前提とし、レガシー互換性の制約を負わない。AIエージェント時代に最適化された言語設計を維持しつつ、起動性能・配布形式・実行特性の多様なニーズに対応する。
 
+**Valhalla基盤:** NGJ v0.3はProject Valhalla value classesを言語設計の基盤とする（[SPECIFICATION.md](SPECIFICATION.md) 1.3節参照）。AOT設計はこのValhalla基盤を前提とし、value classの意味論を全AOTレベルで維持する。
+
 対象とする最新ツールチェーン：
 
-- **Project Leyden AOT** (JDK 24-25+): AOTキャッシュ、事前クラスロード・リンク、メソッドプロファイリング
+- **JDK 28 EA + `--enable-preview`**: Valhalla value classes（JEP 401）の必須基盤
+- **Project Leyden AOT** (JDK 28+): AOTキャッシュ、事前クラスロード・リンク、メソッドプロファイリング
 - **GraalVM native-image**: ネイティブバイナリへのAOTコンパイル
 
 NGJの言語・標準ライブラリは、これらのAOT技術を制約なく活用できる**closed-world friendly**な設計を維持する。
@@ -94,22 +98,37 @@ NGJ標準ライブラリは以下を保証する：
 
 フラグ名は既存の`--target`（バックエンド選択）との関係を明確にする必要がある。`valhalla`バックエンドとの組み合わせも考慮する。
 
-### 4.2 CI行列
+### 4.2 Valhalla + AOT互換性（実装状況・リスク）
+
+**現状（2026年11月時点）:** Valhalla value classes（JEP 401）とAOT技術の組み合わせは未検証または未サポートの段階にある。これは実装状況であり、言語意味論の妥協理由ではない。
+
+| AOTレベル | Valhalla互換 | 状態・リスク |
+|-----------|-------------|-------------|
+| `jit` (通常JVM) | ✅ 完全対応 | JDK 28 EA + `--enable-preview`で動作 |
+| `leyden` | ⚠️ 未検証 | Leyden自体がJDK 28で出荷予定（JEP 544）だが、value classとの組み合わせは未検証。Leyden AOTキャッシュがvalue class layoutを正しく扱うか要検証 |
+| `native` | ❌ 未サポート | SubstrateVM（GraalVM Native Image）はvalue classを使用しない。preview機能を避けてnative imageを生成する設計（[Graal on the Road to Valhalla](https://epub.jku.at/download/pdf/11912841.pdf)参照） |
+
+**意味論への影響なし:** AOTレベルでvalue classが利用不可能な場合でも、言語の意味論（value型のデフォルト、構造的等価性、null廃止）は変更しない。コンパイラが以下の対応を行う:
+- `--aot=leyden`でLeyden/Valhalla組み合わせが未サポートなら、明示エラーまたはJIT fallbackを警告付きで提示
+- `--aot=native`でvalue classサポートがなければ、`valhalla-compat`モード（identity classで意味論維持）からのnative-imageビルドを試行するか、明示エラー
+
+### 4.3 CI行列
 
 AOTレベル × バックエンド × OS/archの組み合わせでCI行列が爆発する可能性がある。段階的な導入戦略：
 
-1. Phase 1: `jit` + `java25`のみ（MVP）
-2. Phase 2: `native`をLinux/amd64で追加
-3. Phase 3: `leyden`をJDK 25 GAで追加
-4. Phase 4: 全組み合わせの互換性行列
+1. Phase 1: `jit` + `valhalla`（JDK 28 EA + preview）— Valhalla基盤MVP
+2. Phase 2: `native`をLinux/amd64で追加（valhalla-compat経由）
+3. Phase 3: `leyden`をJDK 28 GA + Valhalla組み合わせ検証後に追加
+4. Phase 4: 全組み合わせの互換性行列、Valhalla GA後の最適化
 
-### 4.3 GraalVMバージョンとJava 25の整合
+### 4.4 GraalVMバージョンとJDK 28の整合
 
-- Java 25のGA時期とGraalVM for JDK 25のリリース時期
-- Leyden AOT機能のJDK 25での成熟度
+- JDK 28 GA（2027年3月予定）とGraalVM for JDK 28のリリース時期
+- GraalVM JITのValhalla対応（進行中）とNative Image（SubstrateVM）対応（未定）の区別
+- Leyden AOT機能のJDK 28での成熟度とvalue class対応状況
 - 必要なGraalVMバージョンの固定方針
 
-### 4.4 CLI JSONでのAOTレベル報告
+### 4.5 CLI JSONでのAOTレベル報告
 
 `ngjc build`のJSON出力にAOTレベル情報を含める形式：
 
@@ -117,15 +136,18 @@ AOTレベル × バックエンド × OS/archの組み合わせでCI行列が爆
 {
   "schema_version": "ngj.build/1",
   "aot_level": "leyden",
+  "valhalla_mode": "native",
   "aot_details": {
     "cache_path": "build/leyden-cache",
-    "jdk_version": "25",
-    "leyden_features": ["class-loading", "method-profiling"]
+    "jdk_version": "28",
+    "preview_enabled": true,
+    "leyden_features": ["class-loading", "method-profiling"],
+    "valhalla_compat_fallback": false
   }
 }
 ```
 
-### 4.5 Leyden機能の段階的採用
+### 4.6 Leyden機能の段階的採用
 
 Project Leydenは複数の機能を段階的に提供する予定：
 
@@ -133,14 +155,16 @@ Project Leydenは複数の機能を段階的に提供する予定：
 - AOTクラスロード・リンク
 - プロファイルに基づくAOTコンパイル
 
-どの機能をどの時点で採用するかは、JDKリリースの安定性を見て決定する。
+どの機能をどの時点で採用するかは、JDKリリースの安定性とValhalla value classとの互換性検証結果を見て決定する。
 
 ## 5. 関連文書
 
-- [言語仕様](SPECIFICATION.md): 1.1節の原則6（Static interop and AOT）、9.2節（Strict AOTとunsafe）、10節（バックエンド）
-- [検証計画](VALIDATION.md): TARGET-01（バックエンド間の意味論一致）、Native Image互換性試験
-- [MVP Coverage](MVP_COVERAGE.md): Native Image/Valhallaは明示的にMVP外
+- [言語仕様](SPECIFICATION.md): 1.3節（Valhalla基盤）、10節（バックエンド・AOT互換性）、12節（リスク）
+- [検証計画](VALIDATION.md): TARGET-01/02（バックエンド間の意味論一致）、VALUE-*（value型検証）
+- [MVP Coverage](MVP_COVERAGE.md): Valhalla移行チェックリスト
+- [Research basis](RESEARCH.md): Valhalla JEP/論文の出典
 
 ## 6. 変更履歴
 
 - 2026-11-17: 初版作成。post-MVP/post-v0.3の設計方向として文書化。
+- 2026-11-17: Valhalla基盤との整合性更新。AOT互換性の実装状況・リスクを追記。
