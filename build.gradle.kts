@@ -83,6 +83,17 @@ subprojects {
         val targetClassVersion = System.getenv("NGJ_RUNTIME_CLASS_VERSION")?.toIntOrNull()
             ?: 72  // Default to JDK 28 class file version
         environment("NGJ_RUNTIME_CLASS_VERSION", targetClassVersion.toString())
+        
+        // Allow setting test JVM version via property (for CI JDK 28 tests)
+        val testJavaVersion = project.findProperty("testJavaVersion")?.toString()?.toIntOrNull()
+        if (testJavaVersion != null && testJavaVersion >= 28) {
+            val jdk28Home = System.getenv("JAVA_HOME_28")
+            if (jdk28Home != null) {
+                executable = "$jdk28Home/bin/java"
+                jvmArgs("--enable-preview")
+            }
+        }
+        
         // Detailed test output for AI loop diagnostics
         testLogging {
             events("passed", "skipped", "failed")

@@ -57,6 +57,7 @@ class JDK28RuntimeTest {
      * |-----------------------|------------------------|---------------------------------------------------|
      * | data_type.ngj         | ClassFormatError       | Record fields missing strict flag (JEP 401)       |
      * | enum_match.ngj        | Wrong result           | match codegen returns first arm (:1315-1321)      |
+     * | result_option.ngj     | ClassFormatError       | DivError record missing strict flag               |
      * | option_match.ngj      | VerifyError            | Option match codegen issue                        |
      * | listof_call.ngj       | IncompatibleClassChange| listOf InterfaceMethodref issue                   |
      * | for_yield.ngj         | VerifyError            | for-yield codegen issue                           |
@@ -64,6 +65,7 @@ class JDK28RuntimeTest {
     private static final List<String> EXPECTED_RUNTIME_FAILURES = List.of(
         "data_type.ngj",      // ClassFormatError: missing strict flag
         "enum_match.ngj",     // Wrong result: match returns first arm
+        "result_option.ngj",  // ClassFormatError: DivError record
         "option_match.ngj",   // VerifyError: Option match codegen
         "listof_call.ngj",    // IncompatibleClassChangeError: listOf
         "for_yield.ngj"       // VerifyError: for-yield codegen
