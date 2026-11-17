@@ -1675,8 +1675,23 @@ public final class Java25CodeGenerator {
             generateExpr(ctx, field.value());
         }
         
-        var paramTypes = new ClassDesc[ctor.fields().size()];
-        Arrays.fill(paramTypes, ConstantDescs.CD_Object);
+        // Look up the actual constructor parameter types from the record/data declaration
+        ClassDesc[] paramTypes;
+        if (records.containsKey(ctor.typePath())) {
+            var rec = records.get(ctor.typePath());
+            paramTypes = rec.params().stream()
+                .map(p -> typeToClassDesc(p.type()))
+                .toArray(ClassDesc[]::new);
+        } else if (datas.containsKey(ctor.typePath())) {
+            var data = datas.get(ctor.typePath());
+            paramTypes = data.fields().stream()
+                .map(f -> typeToClassDesc(f.type()))
+                .toArray(ClassDesc[]::new);
+        } else {
+            // Fallback to Object for unknown types
+            paramTypes = new ClassDesc[ctor.fields().size()];
+            Arrays.fill(paramTypes, ConstantDescs.CD_Object);
+        }
         var ctorDesc = MethodTypeDesc.of(ConstantDescs.CD_void, paramTypes);
         
         ctx.code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
