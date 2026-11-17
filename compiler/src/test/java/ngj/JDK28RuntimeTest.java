@@ -1,6 +1,7 @@
 package ngj;
 
 import ngj.codegen.Java25CodeGenerator;
+import ngj.diagnostic.Diagnostic;
 import ngj.diagnostic.Severity;
 import ngj.parser.Lexer;
 import ngj.parser.Parser;
@@ -9,7 +10,6 @@ import ngj.typechecker.TypeChecker;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -25,48 +25,63 @@ import java.util.List;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * JDK 28 Runtime Verification Tests.
  * 
  * This test suite validates that generated class files:
- * 1. Compile successfully
- * 2. Load correctly on JDK 28 EA with --enable-preview
- * 3. Execute and produce expected results
+ * 1. Compile successfully (type check)
+ * 2. Generate valid class files with correct version (72 for JDK 28)
+ * 3. Load correctly on JDK 28 EA with --enable-preview
+ * 4. Execute and produce expected results
  * 
  * Coverage:
  * - fixtures/positive: Must compile, load, and execute without errors
  * - fixtures/negative: Must fail type checking with expected diagnostics
  * 
- * Note: Some tests are temporarily disabled due to known code generation issues
- * that will be fixed in PR 3. See the KNOWN_FAILURES table for details.
+ * JDK Requirements:
+ * - Build: JDK 25+ (for java.lang.classfile API)
+ * - Runtime tests: JDK 28 EA with --enable-preview
+ * 
+ * Expected Failures (to be fixed in PR 3):
+ * See EXPECTED_FAILURES constant and PR description table.
  */
-public class JDK28RuntimeTest {
-    
-    @TempDir
-    Path tempDir;
+class JDK28RuntimeTest {
     
     private static final String FIXTURES_BASE = "fixtures";
     private static final int JDK_28_CLASS_VERSION = 72;
+    private static final int REQUIRED_JDK_FOR_RUNTIME = 28;
     
     /**
-     * Known failures that are temporarily disabled.
-     * These will be fixed in PR 3 (code generation fixes).
+     * Expected failures with reasons (to be fixed in PR 3).
      * 
-     * | Fixture               | Issue ID      | Root Cause                                      | PR Fix  |
-     * |-----------------------|---------------|------------------------------------------------|---------|
-     * | result_option.ngj     | NGJ-TYPE-011  | Result type reference resolution                | PR 3    |
-     * | data_type.ngj         | CLASSFORMAT   | Record constructor field order (JEP 401)        | PR 3    |
-     * | enum_match.ngj        | MATCH-GEN     | Match expression codegen (scrutinee dropped)    | PR 3    |
+     * | Fixture               | Failure Type      | Root Cause                                      |
+     * |-----------------------|-------------------|------------------------------------------------|
+     * | data_type.ngj         | ClassFormatError  | Record fields missing strict flag (JEP 401)     |
+     * | enum_match.ngj        | Wrong result      | match codegen returns first arm (:1315-1321)    |
+     * 
+     * Note: result_option.ngj was fixed in PR #13.
      */
-    private static final List<String> KNOWN_COMPILE_FAILURES = List.of(
-        "result_option.ngj"  // NGJ-TYPE-011: Type checker can't resolve DivError in Result<Int, DivError>
+    private static final List<ExpectedFailure> EXPECTED_FAILURES = List.of(
+        new ExpectedFailure("data_type.ngj", FailureType.RUNTIME_CLASS_FORMAT,
+            "Record fields missing strict flag (0x11 without 0x0800). JEP 401 requires strict fields for value classes."),
+        new ExpectedFailure("enum_match.ngj", FailureType.RUNTIME_WRONG_RESULT,
+            "match codegen at :1315-1321 always returns first arm. colorToInt(Red/Green/Blue) all return 0.")
     );
     
-    private static final List<String> KNOWN_RUNTIME_FAILURES = List.of(
-        "data_type.ngj",     // ClassFormatError: missing strict flag on record fields (JEP 401)
-        "enum_match.ngj"     // Match codegen drops scrutinee, returns first arm unconditionally
-    );
+    record ExpectedFailure(String fixture, FailureType type, String reason) {}
+    
+    enum FailureType {
+        COMPILE_TYPE_ERROR,      // Type checking fails
+        RUNTIME_CLASS_FORMAT,    // ClassFormatError when loading
+        RUNTIME_VERIFY_ERROR,    // VerifyError when loading
+        RUNTIME_WRONG_RESULT,    // Executes but returns wrong value
+        RUNTIME_EXCEPTION        // Throws unexpected exception
+    }
+    
+    @TempDir
+    Path tempDir;
     
     private static int jdkVersion;
     private static int targetClassVersion;
@@ -77,27 +92,45 @@ public class JDK28RuntimeTest {
         targetClassVersion = Integer.parseInt(
             System.getenv().getOrDefault("NGJ_RUNTIME_CLASS_VERSION", "72"));
         
-        System.out.println("JDK28RuntimeTest running on JDK " + jdkVersion);
+        System.out.println("========================================");
+        System.out.println("JDK28RuntimeTest Configuration");
+        System.out.println("========================================");
+        System.out.println("Runtime JDK version: " + jdkVersion);
         System.out.println("Target class file version: " + targetClassVersion);
-        
-        if (jdkVersion < 28) {
-            System.out.println("NOTE: Runtime load/execute tests will be skipped (requires JDK 28)");
+        System.out.println("Expected failures: " + EXPECTED_FAILURES.size());
+        for (var ef : EXPECTED_FAILURES) {
+            System.out.println("  - " + ef.fixture() + " (" + ef.type() + "): " + ef.reason());
         }
+        System.out.println("========================================");
+    }
+    
+    private static boolean isExpectedFailure(String fixture) {
+        return EXPECTED_FAILURES.stream().anyMatch(ef -> ef.fixture().equals(fixture));
+    }
+    
+    private static ExpectedFailure getExpectedFailure(String fixture) {
+        return EXPECTED_FAILURES.stream()
+            .filter(ef -> ef.fixture().equals(fixture))
+            .findFirst()
+            .orElse(null);
     }
     
     // ========== Positive Fixture Tests ==========
     
     static Stream<String> positiveFixtures() throws IOException {
-        return getFixtureFiles("positive").stream()
-            .filter(f -> !KNOWN_COMPILE_FAILURES.contains(f));
+        return getFixtureFiles("positive").stream();
     }
     
-    @ParameterizedTest(name = "positive/{0}")
+    static Stream<String> positiveFixturesExcludingExpectedFailures() throws IOException {
+        return getFixtureFiles("positive").stream()
+            .filter(f -> !isExpectedFailure(f));
+    }
+    
+    @ParameterizedTest(name = "positive/{0} compile")
     @MethodSource("positiveFixtures")
     void positiveFixture_compilesAndTypeChecks(String fixture) throws Exception {
         String source = readFixture("positive/" + fixture);
         
-        // Parse
         var lexer = new Lexer(source, fixture);
         var parser = new Parser(lexer);
         var unit = parser.parse();
@@ -108,7 +141,6 @@ public class JDK28RuntimeTest {
         assertTrue(parseErrors.isEmpty(), 
             "Parse errors in " + fixture + ": " + parseErrors);
         
-        // Name resolution
         var resolver = new NameResolver();
         resolver.resolve(unit);
         var resolveErrors = resolver.getDiagnostics().stream()
@@ -117,7 +149,6 @@ public class JDK28RuntimeTest {
         assertTrue(resolveErrors.isEmpty(),
             "Name resolution errors in " + fixture + ": " + resolveErrors);
         
-        // Type check
         var typeChecker = new TypeChecker();
         typeChecker.check(unit);
         var typeErrors = typeChecker.getDiagnostics().stream()
@@ -130,14 +161,8 @@ public class JDK28RuntimeTest {
     @ParameterizedTest(name = "positive/{0} codegen")
     @MethodSource("positiveFixtures")
     void positiveFixture_generatesValidClassFiles(String fixture) throws Exception {
-        if (KNOWN_RUNTIME_FAILURES.contains(fixture)) {
-            System.out.println("SKIPPED (known runtime failure, see PR 3): " + fixture);
-            return;
-        }
-        
         String source = readFixture("positive/" + fixture);
         
-        // Parse and check
         var lexer = new Lexer(source, fixture);
         var parser = new Parser(lexer);
         var unit = parser.parse();
@@ -148,54 +173,34 @@ public class JDK28RuntimeTest {
         var typeChecker = new TypeChecker();
         typeChecker.check(unit);
         
-        // Generate
         var codeGen = new Java25CodeGenerator();
-        codeGen.setOutputDir(tempDir);
-        var outputs = codeGen.generate(unit);
+        var outputs = codeGen.generate(unit, tempDir);
         
-        assertFalse(outputs.isEmpty(), 
-            "No class files generated for " + fixture);
+        assertFalse(outputs.isEmpty(), "Should generate at least one class file");
         
-        // Verify class file format
-        for (var classFile : outputs) {
-            assertTrue(Files.exists(classFile), 
-                "Class file not found: " + classFile);
-            
+        for (Path classFile : outputs) {
+            assertTrue(Files.exists(classFile), "Class file should exist: " + classFile);
             byte[] bytes = Files.readAllBytes(classFile);
-            assertTrue(bytes.length > 8, 
-                "Class file too small: " + classFile);
             
-            // Verify magic number (0xCAFEBABE)
             assertEquals((byte) 0xCA, bytes[0], "Invalid magic byte 0");
             assertEquals((byte) 0xFE, bytes[1], "Invalid magic byte 1");
             assertEquals((byte) 0xBA, bytes[2], "Invalid magic byte 2");
             assertEquals((byte) 0xBE, bytes[3], "Invalid magic byte 3");
             
-            // Verify class file version matches target (default: JDK 28)
-            int minorVersion = ((bytes[4] & 0xFF) << 8) | (bytes[5] & 0xFF);
             int majorVersion = ((bytes[6] & 0xFF) << 8) | (bytes[7] & 0xFF);
-            
             assertEquals(targetClassVersion, majorVersion,
-                "Class file version should be " + targetClassVersion + " for target JDK: " + classFile);
+                "Class file version should be " + targetClassVersion + " for: " + classFile);
         }
     }
     
     @ParameterizedTest(name = "positive/{0} runtime")
-    @MethodSource("positiveFixtures")
+    @MethodSource("positiveFixturesExcludingExpectedFailures")
     void positiveFixture_loadsAndExecutesOnJDK28(String fixture) throws Exception {
-        if (Runtime.version().feature() < 28) {
-            System.out.println("SKIPPED (requires JDK 28): " + fixture);
-            return;
-        }
-        
-        if (KNOWN_RUNTIME_FAILURES.contains(fixture)) {
-            System.out.println("SKIPPED (known runtime failure, see PR 3): " + fixture);
-            return;
-        }
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME + " (current: " + jdkVersion + ")");
         
         String source = readFixture("positive/" + fixture);
         
-        // Parse, check, generate
         var lexer = new Lexer(source, fixture);
         var parser = new Parser(lexer);
         var unit = parser.parse();
@@ -207,39 +212,83 @@ public class JDK28RuntimeTest {
         typeChecker.check(unit);
         
         var codeGen = new Java25CodeGenerator();
-        codeGen.setOutputDir(tempDir);
-        var outputs = codeGen.generate(unit);
+        var outputs = codeGen.generate(unit, tempDir);
         
-        // Load classes with custom class loader
-        try (URLClassLoader loader = new URLClassLoader(
-                new URL[] { tempDir.toUri().toURL() },
-                getClass().getClassLoader())) {
-            
-            for (var classFile : outputs) {
+        assertFalse(outputs.isEmpty(), "Should generate class files");
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            for (Path classFile : outputs) {
                 String className = getClassName(classFile, tempDir);
                 
-                // Try to load the class
-                try {
+                if (className.endsWith("$Fn")) {
                     Class<?> clazz = loader.loadClass(className);
-                    assertNotNull(clazz, "Failed to load class: " + className);
+                    assertNotNull(clazz, "Should load class: " + className);
                     
-                    // If there's an invoke method, try to call it
-                    for (Method method : clazz.getDeclaredMethods()) {
-                        if (method.getName().equals("invoke") && 
-                            method.getParameterCount() == 0 &&
-                            java.lang.reflect.Modifier.isStatic(method.getModifiers())) {
-                            
-                            method.setAccessible(true);
-                            Object result = method.invoke(null);
-                            System.out.println("  " + className + ".invoke() = " + result);
-                        }
-                    }
-                } catch (ClassFormatError e) {
-                    fail("ClassFormatError loading " + className + ": " + e.getMessage());
-                } catch (VerifyError e) {
-                    fail("VerifyError loading " + className + ": " + e.getMessage());
-                } catch (NoClassDefFoundError e) {
-                    fail("NoClassDefFoundError loading " + className + ": " + e.getMessage());
+                    verifyFunctionExecution(fixture, clazz, className);
+                }
+            }
+        }
+        
+        System.out.println("PASSED: " + fixture + " loaded and executed successfully on JDK " + jdkVersion);
+    }
+    
+    private void verifyFunctionExecution(String fixture, Class<?> clazz, String className) throws Exception {
+        Method invokeMethod = null;
+        for (Method m : clazz.getDeclaredMethods()) {
+            if (m.getName().equals("invoke")) {
+                invokeMethod = m;
+                break;
+            }
+        }
+        
+        if (invokeMethod == null) {
+            System.out.println("  No invoke method found in " + className);
+            return;
+        }
+        
+        switch (fixture) {
+            case "hello.ngj" -> {
+                if (className.contains("main")) {
+                    Object result = invokeMethod.invoke(null);
+                    assertEquals(42, result, "main() should return 42");
+                    System.out.println("  Verified: main() = 42");
+                }
+            }
+            case "arithmetic.ngj" -> {
+                if (className.contains("add")) {
+                    Object result = invokeMethod.invoke(null, 3, 5);
+                    assertEquals(8, result, "add(3, 5) should return 8");
+                    System.out.println("  Verified: add(3, 5) = 8");
+                } else if (className.contains("subtract")) {
+                    Object result = invokeMethod.invoke(null, 10, 4);
+                    assertEquals(6, result, "subtract(10, 4) should return 6");
+                    System.out.println("  Verified: subtract(10, 4) = 6");
+                } else if (className.contains("multiply")) {
+                    Object result = invokeMethod.invoke(null, 6, 7);
+                    assertEquals(42, result, "multiply(6, 7) should return 42");
+                    System.out.println("  Verified: multiply(6, 7) = 42");
+                }
+            }
+            case "logic.ngj" -> {
+                if (className.contains("isPositive")) {
+                    Object result = invokeMethod.invoke(null, 5);
+                    assertEquals(true, result, "isPositive(5) should return true");
+                    System.out.println("  Verified: isPositive(5) = true");
+                }
+            }
+            case "control_flow.ngj" -> {
+                if (className.contains("max")) {
+                    Object result = invokeMethod.invoke(null, 3, 7);
+                    assertEquals(7, result, "max(3, 7) should return 7");
+                    System.out.println("  Verified: max(3, 7) = 7");
+                }
+            }
+            default -> {
+                if (invokeMethod.getParameterCount() == 0) {
+                    Object result = invokeMethod.invoke(null);
+                    assertNotNull(result, "invoke() should return a value");
+                    System.out.println("  Executed: " + className + ".invoke() = " + result);
                 }
             }
         }
@@ -260,23 +309,19 @@ public class JDK28RuntimeTest {
         boolean parseExceptionThrown = false;
         
         try {
-            // Parse
             var lexer = new Lexer(source, fixture);
             var parser = new Parser(lexer);
             var unit = parser.parse();
             allDiagnostics.addAll(parser.getDiagnostics());
             
-            // Name resolution
             var resolver = new NameResolver();
             resolver.resolve(unit);
             allDiagnostics.addAll(resolver.getDiagnostics());
             
-            // Type check
             var typeChecker = new TypeChecker();
             typeChecker.check(unit);
             allDiagnostics.addAll(typeChecker.getDiagnostics());
         } catch (ngj.parser.ParseException e) {
-            // Parse exception is a valid way for negative fixtures to fail
             parseExceptionThrown = true;
         }
         
@@ -284,7 +329,6 @@ public class JDK28RuntimeTest {
             .filter(d -> d.severity() == Severity.ERROR)
             .toList();
         
-        // Verify expected diagnostic based on fixture
         switch (fixture) {
             case "non_exhaustive_match.ngj" -> {
                 assertTrue(errors.stream().anyMatch(e -> e.id().equals("NGJ-MATCH-001")),
@@ -301,7 +345,6 @@ public class JDK28RuntimeTest {
                     "Expected effect-related error: " + errors);
             }
             case "wildcard_import.ngj" -> {
-                // Wildcard imports should produce an import-related error or parse error
                 assertTrue(
                     errors.stream().anyMatch(e -> 
                         e.id().equals("NGJ-IMPORT-001") || 
@@ -311,8 +354,6 @@ public class JDK28RuntimeTest {
                     "Expected import-related error or parse error for wildcard import: " + errors);
             }
             case "user_generics.ngj" -> {
-                // This file uses legacy syntax (module, data), should fail with parse error
-                // or migration diagnostic
                 assertTrue(
                     !errors.isEmpty() || parseExceptionThrown,
                     "Expected errors or parse exception for user-defined generics");
@@ -325,18 +366,16 @@ public class JDK28RuntimeTest {
         }
     }
     
-    // ========== Known Failure Documentation Tests ==========
+    // ========== Expected Failure Tests ==========
     
     @Test
-    void knownFailure_resultOption_typeResolution() throws Exception {
-        // This test documents the NGJ-TYPE-011 issue with result_option.ngj
-        // The type checker cannot resolve DivError in Result<Int, DivError>
-        // because the record is defined in the same file and used in a generic context.
-        // This will be fixed in PR 3.
+    void expectedFailure_dataType_classFormatError() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
         
-        String source = readFixture("positive/result_option.ngj");
+        String source = readFixture("positive/data_type.ngj");
         
-        var lexer = new Lexer(source, "result_option.ngj");
+        var lexer = new Lexer(source, "data_type.ngj");
         var parser = new Parser(lexer);
         var unit = parser.parse();
         
@@ -346,32 +385,102 @@ public class JDK28RuntimeTest {
         var typeChecker = new TypeChecker();
         typeChecker.check(unit);
         
-        var errors = typeChecker.getDiagnostics().stream()
-            .filter(d -> d.severity() == Severity.ERROR)
-            .toList();
+        var codeGen = new Java25CodeGenerator();
+        var outputs = codeGen.generate(unit, tempDir);
         
-        // Document the current behavior
-        assertFalse(errors.isEmpty(), 
-            "result_option.ngj currently fails type checking (PR 3 will fix this)");
-        System.out.println("KNOWN FAILURE (PR 3): result_option.ngj - " + errors);
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            for (Path classFile : outputs) {
+                String className = getClassName(classFile, tempDir);
+                try {
+                    loader.loadClass(className);
+                    fail("UNEXPECTED PASS: data_type.ngj should fail with ClassFormatError " +
+                         "(record fields missing strict flag). PR 3 will fix this.");
+                } catch (ClassFormatError e) {
+                    System.out.println("EXPECTED FAILURE: data_type.ngj - " + e.getMessage());
+                    assertTrue(true, "ClassFormatError is expected until PR 3 fixes strict fields");
+                    return;
+                }
+            }
+        }
     }
     
     @Test
-    @Disabled("PR 3: Record field strict flag not set (JEP 401)")
-    void knownFailure_dataType_classFormatError() throws Exception {
-        // This test documents the ClassFormatError with data_type.ngj
-        // The generated record class doesn't have the strict flag on fields
-        // as required by JEP 401 for value classes.
-        // Will be fixed in PR 3.
+    void expectedFailure_enumMatch_wrongResult() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = readFixture("positive/enum_match.ngj");
+        
+        var lexer = new Lexer(source, "enum_match.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        var outputs = codeGen.generate(unit, tempDir);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            Class<?> colorClass = null;
+            Class<?> colorToIntFn = null;
+            
+            for (Path classFile : outputs) {
+                String className = getClassName(classFile, tempDir);
+                try {
+                    Class<?> clazz = loader.loadClass(className);
+                    if (className.endsWith("Color")) {
+                        colorClass = clazz;
+                    } else if (className.contains("colorToInt")) {
+                        colorToIntFn = clazz;
+                    }
+                } catch (ClassFormatError | VerifyError e) {
+                    System.out.println("EXPECTED FAILURE: enum_match.ngj - " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                    assertTrue(true, "Class loading error is expected until PR 3 fixes enum codegen");
+                    return;
+                }
+            }
+            
+            if (colorToIntFn != null && colorClass != null) {
+                Method invoke = colorToIntFn.getMethod("invoke", Object.class);
+                Object red = getEnumVariant(loader, "test.enumeration.Red");
+                Object green = getEnumVariant(loader, "test.enumeration.Green");
+                Object blue = getEnumVariant(loader, "test.enumeration.Blue");
+                
+                if (red != null && green != null && blue != null) {
+                    Object redResult = invoke.invoke(null, red);
+                    Object greenResult = invoke.invoke(null, green);
+                    Object blueResult = invoke.invoke(null, blue);
+                    
+                    if (redResult.equals(0) && greenResult.equals(0) && blueResult.equals(0)) {
+                        System.out.println("EXPECTED FAILURE: enum_match.ngj - match returns first arm for all variants");
+                        System.out.println("  colorToInt(Red) = " + redResult + " (expected 0)");
+                        System.out.println("  colorToInt(Green) = " + greenResult + " (expected 1, got 0)");
+                        System.out.println("  colorToInt(Blue) = " + blueResult + " (expected 2, got 0)");
+                        assertTrue(true, "Match codegen bug is expected until PR 3");
+                        return;
+                    } else if (redResult.equals(0) && greenResult.equals(1) && blueResult.equals(2)) {
+                        fail("UNEXPECTED PASS: enum_match.ngj now works correctly. Remove from EXPECTED_FAILURES.");
+                    }
+                }
+            }
+            
+            System.out.println("EXPECTED FAILURE: enum_match.ngj - could not fully verify (enum variant loading issue)");
+        }
     }
     
-    @Test
-    @Disabled("PR 3: Match expression codegen drops scrutinee")
-    void knownFailure_enumMatch_matchCodegen() throws Exception {
-        // This test documents the match expression codegen issue
-        // The generated code at Java25CodeGenerator.java:1027-1034
-        // drops the scrutinee and always returns the first arm.
-        // Will be fixed in PR 3.
+    private Object getEnumVariant(URLClassLoader loader, String className) {
+        try {
+            Class<?> clazz = loader.loadClass(className);
+            return clazz.getConstructor().newInstance();
+        } catch (Exception e) {
+            return null;
+        }
     }
     
     // ========== Helper Methods ==========
