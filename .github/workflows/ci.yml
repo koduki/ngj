@@ -244,16 +244,8 @@ jobs:
         COMPILER_JAR=$(ls compiler/build/libs/compiler-*-all.jar)
         mkdir -p build/jdk28-runtime
         
-        # Expected failures (to be fixed in PR 3)
-        # | Fixture            | Issue                                    |
-        # |--------------------|------------------------------------------|
-        # | data_type.ngj      | ClassFormatError (missing strict flag)   |
-        # | enum_match.ngj     | match returns first arm for all variants |
-        # | result_option.ngj  | ClassFormatError (DivError record)       |
-        # | option_match.ngj   | VerifyError (Option match codegen)       |
-        # | for_yield.ngj      | VerifyError (for-yield codegen)          |
-        # | listof_call.ngj    | IncompatibleClassChangeError             |
-        EXPECTED_RUNTIME_FAILURES="data_type.ngj enum_match.ngj result_option.ngj option_match.ngj for_yield.ngj listof_call.ngj"
+        # All fixtures should pass - expected failures have been fixed in this PR
+        EXPECTED_RUNTIME_FAILURES=""
         
         PASS=0
         FAIL=0
