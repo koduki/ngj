@@ -129,6 +129,7 @@ public final class Compiler {
         // Phase 4: Code generation
         try {
             var generator = new Java25CodeGenerator();
+            generator.setTarget(target);
             var outputFiles = new ArrayList<Path>();
             
             for (var unit : checkResult.units()) {

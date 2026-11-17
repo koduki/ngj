@@ -781,7 +781,7 @@ public final class Parser {
         if (match(TokenType.NULL)) {
             diagnostics.add(Diagnostic.error(
                 "NGJ-NULL-001",
-                "null literal is not allowed in NGJ. Use Option<T> with None for absence.",
+                "null literal is not allowed in NGJ. Use Option<T> with None() for absence.",
                 previous.span()
             ));
             return new IdentExpr("__null_error__", span(start, previous.span().endByte()));

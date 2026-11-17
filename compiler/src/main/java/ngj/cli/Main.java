@@ -266,16 +266,19 @@ public final class Main {
     }
     
     private static boolean isPreviewEnabled() {
-        // Check if preview features are enabled by looking for preview-specific behavior
-        // The simplest check is to see if Objects.hasIdentity exists (JEP 401 addition)
-        try {
-            java.util.Objects.class.getMethod("hasIdentity", Object.class);
-            return true;
-        } catch (NoSuchMethodException e) {
-            // Method doesn't exist - preview may not be enabled or not JDK 28+
-            // For older JDKs with NGJ_SKIP_JDK_CHECK, return true
-            return "true".equals(System.getenv("NGJ_SKIP_JDK_CHECK"));
+        // Check if preview features are enabled by looking at JVM arguments
+        // The --enable-preview flag is required for compiling/running value class code
+        var runtimeMxBean = java.lang.management.ManagementFactory.getRuntimeMXBean();
+        var inputArgs = runtimeMxBean.getInputArguments();
+        
+        for (String arg : inputArgs) {
+            if (arg.equals("--enable-preview")) {
+                return true;
+            }
         }
+        
+        // Also check for NGJ_SKIP_JDK_CHECK for testing
+        return "true".equals(System.getenv("NGJ_SKIP_JDK_CHECK"));
     }
     
     private record JdkCheckResult(boolean isValid, String errorMessage) {}

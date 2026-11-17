@@ -4,7 +4,6 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
 
 # =============================================================================
 # Valhalla JDK Configuration
@@ -125,20 +124,39 @@ jobs:
     - name: Verify runtime tests actually ran (not skipped)
       run: |
         echo "=== Verifying JDK 28 Runtime Tests Executed ==="
-        if [ ! -f compiler/build/reports/tests/test/index.html ]; then
-          echo "ERROR: Test report not found"
+        
+        # Parse JUnit XML files for accurate counts (Gradle 9.9.1 compatible)
+        XML_DIR="compiler/build/test-results/test"
+        if [ ! -d "$XML_DIR" ]; then
+          echo "ERROR: JUnit XML results not found at $XML_DIR"
           exit 1
         fi
         
-        # Count passed and skipped tests
-        PASSED=$(grep -o 'passed"' compiler/build/reports/tests/test/index.html 2>/dev/null | wc -l || echo 0)
-        SKIPPED=$(grep -o 'skipped"' compiler/build/reports/tests/test/index.html 2>/dev/null | wc -l || echo 0)
-        FAILED=$(grep -o 'failed"' compiler/build/reports/tests/test/index.html 2>/dev/null | wc -l || echo 0)
+        # Count from JUnit XML: testsuite attributes
+        TESTS=0
+        FAILURES=0
+        SKIPPED=0
         
-        echo "Test results:"
+        for xml in "$XML_DIR"/*.xml; do
+          if [ -f "$xml" ]; then
+            # Extract counts from testsuite element
+            t=$(grep -oP 'tests="\K[0-9]+' "$xml" | head -1 || echo 0)
+            f=$(grep -oP 'failures="\K[0-9]+' "$xml" | head -1 || echo 0)
+            e=$(grep -oP 'errors="\K[0-9]+' "$xml" | head -1 || echo 0)
+            s=$(grep -oP 'skipped="\K[0-9]+' "$xml" | head -1 || echo 0)
+            TESTS=$((TESTS + t))
+            FAILURES=$((FAILURES + f + e))
+            SKIPPED=$((SKIPPED + s))
+          fi
+        done
+        
+        PASSED=$((TESTS - FAILURES - SKIPPED))
+        
+        echo "Test results (from JUnit XML):"
+        echo "  Total: $TESTS"
         echo "  Passed: $PASSED"
         echo "  Skipped: $SKIPPED"
-        echo "  Failed: $FAILED"
+        echo "  Failed: $FAILURES"
         
         # Fail if no tests passed (they were all skipped)
         if [ "$PASSED" -eq 0 ]; then
@@ -148,8 +166,8 @@ jobs:
         fi
         
         # Fail if any tests failed
-        if [ "$FAILED" -gt 0 ]; then
-          echo "ERROR: $FAILED test(s) failed"
+        if [ "$FAILURES" -gt 0 ]; then
+          echo "ERROR: $FAILURES test(s) failed"
           exit 1
         fi
         
@@ -273,16 +291,8 @@ jobs:
         COMPILER_JAR=$(ls compiler/build/libs/compiler-*-all.jar)
         mkdir -p build/jdk28-runtime
         
-        # Expected failures (to be fixed in PR 3)
-        # | Fixture            | Issue                                    |
-        # |--------------------|------------------------------------------|
-        # | data_type.ngj      | ClassFormatError (missing strict flag)   |
-        # | enum_match.ngj     | match returns first arm for all variants |
-        # | result_option.ngj  | ClassFormatError (DivError record)       |
-        # | option_match.ngj   | VerifyError (Option match codegen)       |
-        # | for_yield.ngj      | VerifyError (for-yield codegen)          |
-        # | listof_call.ngj    | IncompatibleClassChangeError             |
-        EXPECTED_RUNTIME_FAILURES="data_type.ngj enum_match.ngj result_option.ngj option_match.ngj for_yield.ngj listof_call.ngj"
+        # All fixtures should pass - expected failures have been fixed in this PR
+        EXPECTED_RUNTIME_FAILURES=""
         
         PASS=0
         FAIL=0
@@ -343,7 +353,7 @@ jobs:
                 URL[] urls = { Path.of(args[0]).toUri().toURL() };
                 try (URLClassLoader loader = new URLClassLoader(urls)) {
                     for (int i = 1; i < args.length; i++) {
-                        Class<?> c = loader.loadClass(args[i]);
+                        Class<?> c = Class.forName(args[i], true, loader);
                         System.out.println("Loaded: " + c.getName());
                     }
                 }

@@ -1008,7 +1008,7 @@ public final class TypeChecker {
             }
         } else if (iterableType != null) {
             diagnostics.add(Diagnostic.error(
-                "NGJ-TYPE-022",
+                "NGJ-TYPE-026",
                 "for loop requires List type, got: " + iterableType,
                 forExpr.iterable().span()
             ));
