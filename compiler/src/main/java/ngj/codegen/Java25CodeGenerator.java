@@ -38,6 +38,10 @@ public final class Java25CodeGenerator {
     // Value classes do NOT have this flag
     private static final int ACC_IDENTITY = 0x0020;
     
+    // ACC_STRICT flag (0x0800) for value class fields (JEP 401)
+    // Fields in value classes must be strict to ensure they are initialized before use
+    private static final int ACC_STRICT = 0x0800;
+    
     // Preview minor version flag for JEP 401 Value Objects
     private static final int PREVIEW_MINOR_VERSION = 65535;
     
@@ -1685,7 +1689,8 @@ public final class Java25CodeGenerator {
             
             for (var param : record.params()) {
                 var fieldDesc = typeToClassDesc(param.type());
-                classBuilder.withField(param.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL);
+                // JEP 401: Value class fields must be strict (initialized before use)
+                classBuilder.withField(param.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL | ACC_STRICT);
             }
             
             var ctorParamTypes = record.params().stream()
@@ -1888,9 +1893,10 @@ public final class Java25CodeGenerator {
                     classBuilder.withSuperclass(baseClassDesc);
                     
                     // Add fields for variant payload
+                    // JEP 401: Value class fields must be strict (initialized before use)
                     for (var field : variantFields) {
                         var fieldDesc = typeToClassDesc(field.type());
-                        classBuilder.withField(field.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL);
+                        classBuilder.withField(field.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL | ACC_STRICT);
                     }
                     
                     // Constructor
