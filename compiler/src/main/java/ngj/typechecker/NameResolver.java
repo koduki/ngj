@@ -36,23 +36,56 @@ public final class NameResolver {
     }
     
     private void registerBuiltins() {
-        // Built-in types
+        // Built-in value types (STDLIB-01)
         globalSymbols.put("Int", new Symbol("Int", Symbol.Kind.TYPE, true));
         globalSymbols.put("Long", new Symbol("Long", Symbol.Kind.TYPE, true));
         globalSymbols.put("Bool", new Symbol("Bool", Symbol.Kind.TYPE, true));
+        globalSymbols.put("Byte", new Symbol("Byte", Symbol.Kind.TYPE, true));
+        globalSymbols.put("Float", new Symbol("Float", Symbol.Kind.TYPE, true));
+        globalSymbols.put("Double", new Symbol("Double", Symbol.Kind.TYPE, true));
         globalSymbols.put("String", new Symbol("String", Symbol.Kind.TYPE, true));
         globalSymbols.put("Unit", new Symbol("Unit", Symbol.Kind.TYPE, true));
+        
+        // Generic types (STDLIB-02, STDLIB-03, STDLIB-04)
         globalSymbols.put("Result", new Symbol("Result", Symbol.Kind.TYPE, true));
         globalSymbols.put("Option", new Symbol("Option", Symbol.Kind.TYPE, true));
         globalSymbols.put("List", new Symbol("List", Symbol.Kind.TYPE, true));
         
-        // Built-in constructors
+        // Standard error types (STDLIB-07)
+        globalSymbols.put("OverflowError", new Symbol("OverflowError", Symbol.Kind.TYPE, true));
+        globalSymbols.put("RangeError", new Symbol("RangeError", Symbol.Kind.TYPE, true));
+        globalSymbols.put("IndexError", new Symbol("IndexError", Symbol.Kind.TYPE, true));
+        
+        // Built-in constructors (STDLIB-02, STDLIB-03)
         globalSymbols.put("Ok", new Symbol("Ok", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("Err", new Symbol("Err", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("Some", new Symbol("Some", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("None", new Symbol("None", Symbol.Kind.CONSTRUCTOR, true));
+        
+        // List constructors (STDLIB-04)
         globalSymbols.put("Nil", new Symbol("Nil", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("Cons", new Symbol("Cons", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("listOf", new Symbol("listOf", Symbol.Kind.FUNCTION, true));
+        
+        // Checked arithmetic functions (STDLIB-07)
+        globalSymbols.put("checkedAdd", new Symbol("checkedAdd", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("checkedSub", new Symbol("checkedSub", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("checkedMul", new Symbol("checkedMul", Symbol.Kind.FUNCTION, true));
+        
+        // List operations (STDLIB-08)
+        globalSymbols.put("head", new Symbol("head", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("get", new Symbol("get", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("length", new Symbol("length", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("isEmpty", new Symbol("isEmpty", Symbol.Kind.FUNCTION, true));
+        
+        // Option/Result utility functions
+        globalSymbols.put("isSome", new Symbol("isSome", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("isNone", new Symbol("isNone", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("isOk", new Symbol("isOk", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("isErr", new Symbol("isErr", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("getOrElse", new Symbol("getOrElse", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("toOption", new Symbol("toOption", Symbol.Kind.FUNCTION, true));
+        globalSymbols.put("toResult", new Symbol("toResult", Symbol.Kind.FUNCTION, true));
     }
     
     private void registerTopLevel(TopLevelDecl decl) {
