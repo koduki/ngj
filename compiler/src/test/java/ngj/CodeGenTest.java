@@ -243,6 +243,20 @@ class CodeGenTest {
             return null;
         }
         
+        // Find the first function class ($Fn suffix), skipping runtime classes
+        for (var output : outputs) {
+            if (output.toString().endsWith("$Fn.class")) {
+                return Files.readAllBytes(output);
+            }
+        }
+        
+        // If no function class, return the first non-runtime class
+        for (var output : outputs) {
+            if (!output.toString().contains("ngj/runtime/")) {
+                return Files.readAllBytes(output);
+            }
+        }
+        
         return Files.readAllBytes(outputs.get(0));
     }
     
