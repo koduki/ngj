@@ -463,9 +463,18 @@ public final class Java25CodeGenerator {
         generateBlock(ctx, forExpr.body());
         
         if (forExpr.hasYield()) {
+            // Box primitive values for adding to list
+            if (forExpr.body().tailExpr() != null) {
+                boxIfPrimitive(ctx, forExpr.body().tailExpr());
+            }
+            
+            // Store the yield result in a temp variable
+            int yieldSlot = ctx.allocateLocal("$yield$" + ctx.nextSlot, "Object");
+            ctx.code.astore(yieldSlot);
+            
             // Add result to list
             ctx.code.aload(resultListSlot);
-            ctx.code.swap();
+            ctx.code.aload(yieldSlot);
             ctx.code.invokeinterface(
                 ClassDesc.of("java.util.List"),
                 "add",
