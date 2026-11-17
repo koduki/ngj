@@ -353,7 +353,7 @@ jobs:
                 URL[] urls = { Path.of(args[0]).toUri().toURL() };
                 try (URLClassLoader loader = new URLClassLoader(urls)) {
                     for (int i = 1; i < args.length; i++) {
-                        Class<?> c = loader.loadClass(args[i]);
+                        Class<?> c = Class.forName(args[i], true, loader);
                         System.out.println("Loaded: " + c.getName());
                     }
                 }

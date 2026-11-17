@@ -248,7 +248,7 @@ fn process(input: String) -> Result<Output, ProcessError> effects() {
 }
 ```
 
-**Important**: `?` is **not** supported on `Option<T>` in v0.3 (`NGJ-TYPE-020`). Use `match` or `toResult` explicitly.
+**Important**: `?` is **not** supported on `Option<T>` in v0.3 (`NGJ-PROP-001`). Use `match` or `toResult` explicitly.
 
 ### 4.2 Standard Operations
 

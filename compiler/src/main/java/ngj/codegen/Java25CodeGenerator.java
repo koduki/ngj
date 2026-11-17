@@ -73,6 +73,13 @@ public final class Java25CodeGenerator {
         this.target = target;
     }
     
+    private String moduleInternalName(String simpleName) {
+        if (currentModule == null || currentModule.isEmpty()) {
+            return simpleName;
+        }
+        return currentModule.replace('.', '/') + "/" + simpleName;
+    }
+
     /**
      * Build a ClassHierarchyResolver that knows about ngj.runtime classes and user-defined enums.
      * This is needed for ClassFile API to compute stack frames when branches join with different types.
@@ -101,37 +108,38 @@ public final class Java25CodeGenerator {
         for (var entry : enums.entrySet()) {
             var enumName = entry.getKey();
             var enumDecl = entry.getValue();
-            var enumBase = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + enumName);
+            var enumBase = ClassDesc.ofInternalName(moduleInternalName(enumName));
             hierarchy.put(enumBase, ConstantDescs.CD_Object);
             
             for (var variant : enumDecl.variants()) {
                 var variantClass = ClassDesc.ofInternalName(
-                    currentModule.replace('.', '/') + "/" + enumName + "$" + variant.name());
+                    moduleInternalName(enumName + "$" + variant.name()));
                 hierarchy.put(variantClass, enumBase);
             }
         }
         
-        // User-defined records and data types
+        // User-defined records, data types, and function wrapper classes
         for (var name : records.keySet()) {
-            var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + name);
-            hierarchy.put(classDesc, ConstantDescs.CD_Object);
+            hierarchy.put(ClassDesc.ofInternalName(moduleInternalName(name)), ConstantDescs.CD_Object);
         }
         for (var name : datas.keySet()) {
-            var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + name);
-            hierarchy.put(classDesc, ConstantDescs.CD_Object);
+            hierarchy.put(ClassDesc.ofInternalName(moduleInternalName(name)), ConstantDescs.CD_Object);
+        }
+        for (var name : functions.keySet()) {
+            hierarchy.put(ClassDesc.ofInternalName(moduleInternalName(name + "$Fn")), ConstantDescs.CD_Object);
         }
         
-        // Create resolver that checks our hierarchy first, then falls back to system
-        return ClassHierarchyResolver.ofResourceParsing(
-            ClassLoader.getSystemClassLoader()
-        ).orElse(desc -> {
+        // Check generated hierarchy first, then fall back to JDK/system classes
+        ClassHierarchyResolver customResolver = desc -> {
             var superclass = hierarchy.get(desc);
             if (superclass != null) {
                 return ClassHierarchyResolver.ClassHierarchyInfo.ofClass(superclass);
             }
-            // Unknown class - assume Object as superclass
-            return ClassHierarchyResolver.ClassHierarchyInfo.ofClass(ConstantDescs.CD_Object);
-        });
+            return null;
+        };
+        return customResolver
+            .orElse(ClassHierarchyResolver.ofResourceParsing(ClassLoader.getSystemClassLoader()))
+            .orElse(_ -> ClassHierarchyResolver.ClassHierarchyInfo.ofClass(ConstantDescs.CD_Object));
     }
     
     /**
@@ -240,7 +248,9 @@ public final class Java25CodeGenerator {
         var classFile = classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             // Sealed abstract class
-            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            classBuilder.withFlags(isValueClassTarget()
+                ? (ACC_PUBLIC | ACC_ABSTRACT)
+                : (ACC_PUBLIC | ACC_ABSTRACT | ACC_IDENTITY));
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
             // PermittedSubclasses attribute for sealed hierarchy
@@ -357,7 +367,9 @@ public final class Java25CodeGenerator {
         var classFile = classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             // Sealed abstract class
-            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            classBuilder.withFlags(isValueClassTarget()
+                ? (ACC_PUBLIC | ACC_ABSTRACT)
+                : (ACC_PUBLIC | ACC_ABSTRACT | ACC_IDENTITY));
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
             // PermittedSubclasses attribute for sealed hierarchy
@@ -503,7 +515,7 @@ public final class Java25CodeGenerator {
     }
     
     private byte[] generateFunction(FnDecl fn) {
-        var className = currentModule.replace('.', '/') + "/" + fn.name() + "$Fn";
+        var className = moduleInternalName(fn.name() + "$Fn");
         var classDesc = ClassDesc.ofInternalName(className);
         
         return classFileBuilder().build(classDesc, classBuilder -> {
@@ -554,6 +566,7 @@ public final class Java25CodeGenerator {
     }
     
     private ClassDesc typeToClassDesc(TypeExpr type) {
+        if (type == null) return ConstantDescs.CD_Object;
         return switch (type) {
             case SimpleTypeExpr simple -> switch (simple.name()) {
                 case "Int" -> ConstantDescs.CD_int;
@@ -561,15 +574,22 @@ public final class Java25CodeGenerator {
                 case "Bool" -> ConstantDescs.CD_boolean;
                 case "String" -> ConstantDescs.CD_String;
                 case "Unit" -> ConstantDescs.CD_void;
-                case "OverflowError", "RangeError", "IndexError" -> ConstantDescs.CD_Object;
-                default -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + simple.name());
+                case "OverflowError", "RangeError", "IndexError", "Object", "_" -> ConstantDescs.CD_Object;
+                case "List" -> ClassDesc.of("java.util.List");
+                case "Option" -> enums.containsKey("Option")
+                    ? ClassDesc.ofInternalName(moduleInternalName("Option"))
+                    : ClassDesc.ofInternalName("ngj/runtime/Option");
+                case "Result" -> enums.containsKey("Result")
+                    ? ClassDesc.ofInternalName(moduleInternalName("Result"))
+                    : ClassDesc.ofInternalName("ngj/runtime/Result");
+                default -> ClassDesc.ofInternalName(moduleInternalName(simple.name()));
             };
             case GenericTypeExpr generic -> switch (generic.name()) {
                 case "Result" -> enums.containsKey("Result")
-                    ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Result")
+                    ? ClassDesc.ofInternalName(moduleInternalName("Result"))
                     : ClassDesc.ofInternalName("ngj/runtime/Result");
                 case "Option" -> enums.containsKey("Option")
-                    ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option")
+                    ? ClassDesc.ofInternalName(moduleInternalName("Option"))
                     : ClassDesc.ofInternalName("ngj/runtime/Option");
                 case "List" -> ClassDesc.of("java.util.List");
                 default -> ConstantDescs.CD_Object;
@@ -577,168 +597,426 @@ public final class Java25CodeGenerator {
             case UnitTypeExpr _ -> ConstantDescs.CD_void;
         };
     }
-    
-    private String inferTypeName(CodeGenContext ctx, Expr expr) {
-        if (expr == null) return "Unit";
+
+    private static final TypeExpr OBJECT_TYPE = new SimpleTypeExpr("Object", null);
+    private static final TypeExpr WILDCARD_TYPE = new SimpleTypeExpr("_", null);
+
+    private static TypeExpr simpleType(String name) {
+        return new SimpleTypeExpr(name, null);
+    }
+
+    private static TypeExpr unitType() {
+        return new UnitTypeExpr(null);
+    }
+
+    private static TypeExpr genericType(String name, TypeExpr... args) {
+        return new GenericTypeExpr(name, List.of(args), null);
+    }
+
+    private boolean isUnknownType(TypeExpr type) {
+        if (type == null) return true;
+        var name = getTypeName(type);
+        return name.equals("_") || name.equals("Object");
+    }
+
+    private TypeExpr mergeTypeExpr(TypeExpr a, TypeExpr b) {
+        if (a == null) return b != null ? b : OBJECT_TYPE;
+        if (b == null) return a;
+
+        if (isUnknownType(a) && !isUnknownType(b)) return b;
+        if (isUnknownType(b) && !isUnknownType(a)) return a;
+
+        if (a instanceof GenericTypeExpr ga && b instanceof GenericTypeExpr gb && ga.name().equals(gb.name())) {
+            int maxArgs = Math.max(ga.typeArgs().size(), gb.typeArgs().size());
+            if (maxArgs == 0) return ga;
+            var mergedArgs = new ArrayList<TypeExpr>(maxArgs);
+            for (int i = 0; i < maxArgs; i++) {
+                var argA = i < ga.typeArgs().size() ? ga.typeArgs().get(i) : WILDCARD_TYPE;
+                var argB = i < gb.typeArgs().size() ? gb.typeArgs().get(i) : WILDCARD_TYPE;
+                mergedArgs.add(mergeTypeExpr(argA, argB));
+            }
+            return new GenericTypeExpr(ga.name(), mergedArgs, null);
+        }
+
+        if (a instanceof GenericTypeExpr && !(b instanceof GenericTypeExpr) && getTypeName(a).equals(getTypeName(b))) {
+            return a;
+        }
+        if (b instanceof GenericTypeExpr && !(a instanceof GenericTypeExpr) && getTypeName(a).equals(getTypeName(b))) {
+            return b;
+        }
+
+        return a;
+    }
+
+    private boolean blockDiverges(BlockExpr block) {
+        if (block.tailExpr() != null) {
+            return exprDiverges(block.tailExpr());
+        }
+        for (var stmt : block.statements()) {
+            if (stmt instanceof ReturnStmt) {
+                return true;
+            }
+            if (stmt instanceof ExprStmt es && exprDiverges(es.expr())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean exprDiverges(Expr expr) {
+        return switch (expr) {
+            case BlockExpr b -> blockDiverges(b);
+            case IfExpr i -> i.elseBranch() != null && blockDiverges(i.thenBranch()) && exprDiverges(i.elseBranch());
+            case MatchExpr m -> !m.arms().isEmpty() && m.arms().stream().allMatch(a -> exprDiverges(a.body()));
+            case ParenExpr p -> exprDiverges(p.inner());
+            default -> false;
+        };
+    }
+
+    private void bindPatternTypeExprs(Map<String, TypeExpr> env, Pattern pattern, TypeExpr scrutineeType) {
+        if (pattern == null) return;
+        switch (pattern) {
+            case WildcardPattern _, LiteralPattern _ -> {}
+            case BindingPattern binding -> env.put(binding.name(), scrutineeType != null ? scrutineeType : OBJECT_TYPE);
+            case ConstructorPattern ctor -> {
+                var typePath = ctor.typePath();
+                String shortVariantName = typePath.contains(".")
+                    ? typePath.substring(typePath.lastIndexOf('.') + 1)
+                    : typePath;
+                boolean isRuntimeOption = !enums.containsKey("Option")
+                    && (shortVariantName.equals("Some") || shortVariantName.equals("None"));
+                boolean isRuntimeResult = !enums.containsKey("Result")
+                    && (shortVariantName.equals("Ok") || shortVariantName.equals("Err"));
+                boolean isRuntimeAdt = isRuntimeOption || isRuntimeResult;
+
+                for (int i = 0; i < ctor.fields().size(); i++) {
+                    var field = ctor.fields().get(i);
+                    TypeExpr fieldType;
+                    if (isRuntimeAdt) {
+                        fieldType = getResultOptionFieldTypeExpr(scrutineeType, shortVariantName);
+                    } else {
+                        var actualFieldName = resolveVariantFieldName(typePath, field.name(), i);
+                        fieldType = lookupEnumVariantFieldTypeExpr(typePath, actualFieldName);
+                    }
+                    if (field.pattern() != null) {
+                        bindPatternTypeExprs(env, field.pattern(), fieldType);
+                    } else {
+                        env.put(field.name(), fieldType);
+                    }
+                }
+            }
+        }
+    }
+
+    private TypeExpr inferTypeExpr(CodeGenContext ctx, Expr expr) {
+        return inferTypeExpr(ctx.localTypeExprs, expr);
+    }
+
+    private TypeExpr inferTypeExpr(Map<String, TypeExpr> env, Expr expr) {
+        if (expr == null) return unitType();
         return switch (expr) {
             case LiteralExpr lit -> switch (lit.kind()) {
-                case INT -> "Int";
-                case LONG -> "Long";
-                case BOOL -> "Bool";
-                case STRING -> "String";
-                case UNIT -> "Unit";
+                case INT -> simpleType("Int");
+                case LONG -> simpleType("Long");
+                case BOOL -> simpleType("Bool");
+                case STRING -> simpleType("String");
+                case UNIT -> unitType();
             };
-            case IdentExpr ident -> ctx.getLocalType(ident.name());
+            case IdentExpr ident -> env.getOrDefault(ident.name(), OBJECT_TYPE);
             case BinaryExpr bin -> switch (bin.op()) {
-                case ADD, SUB, MUL, DIV, MOD -> inferTypeName(ctx, bin.left());
-                case EQ, NE, LT, LE, GT, GE, AND, OR -> "Bool";
+                case ADD, SUB, MUL, DIV, MOD -> inferTypeExpr(env, bin.left());
+                case EQ, NE, LT, LE, GT, GE, AND, OR -> simpleType("Bool");
             };
             case UnaryExpr un -> switch (un.op()) {
-                case NEG -> inferTypeName(ctx, un.operand());
-                case NOT -> "Bool";
+                case NEG -> inferTypeExpr(env, un.operand());
+                case NOT -> simpleType("Bool");
             };
-            case ParenExpr paren -> inferTypeName(ctx, paren.inner());
-            case IfExpr ifExpr -> {
-                if (ifExpr.thenBranch().tailExpr() != null) {
-                    yield inferTypeName(ctx, ifExpr.thenBranch().tailExpr());
-                } else if (ifExpr.elseBranch() != null) {
-                    yield inferTypeName(ctx, ifExpr.elseBranch());
+            case ParenExpr paren -> inferTypeExpr(env, paren.inner());
+            case BlockExpr block -> {
+                if (block.tailExpr() == null) {
+                    yield unitType();
                 }
-                yield "Unit";
+                Map<String, TypeExpr> blockEnv = env;
+                if (!block.statements().isEmpty()) {
+                    var mutableEnv = new HashMap<>(env);
+                    for (var stmt : block.statements()) {
+                        switch (stmt) {
+                            case ValStmt val -> {
+                                var initType = inferTypeExpr(mutableEnv, val.initializer());
+                                var varType = val.explicitType() != null
+                                    ? mergeTypeExpr(val.explicitType(), initType)
+                                    : initType;
+                                mutableEnv.put(val.name(), varType);
+                            }
+                            case VarStmt varStmt -> {
+                                var initType = inferTypeExpr(mutableEnv, varStmt.initializer());
+                                var varType = varStmt.explicitType() != null
+                                    ? mergeTypeExpr(varStmt.explicitType(), initType)
+                                    : initType;
+                                mutableEnv.put(varStmt.name(), varType);
+                            }
+                            case LetStmt letStmt -> {
+                                var initType = inferTypeExpr(mutableEnv, letStmt.initializer());
+                                var varType = letStmt.explicitType() != null
+                                    ? mergeTypeExpr(letStmt.explicitType(), initType)
+                                    : initType;
+                                mutableEnv.put(letStmt.name(), varType);
+                            }
+                            default -> {}
+                        }
+                    }
+                    blockEnv = mutableEnv;
+                }
+                yield inferTypeExpr(blockEnv, block.tailExpr());
             }
-            case BlockExpr block -> block.tailExpr() != null ? inferTypeName(ctx, block.tailExpr()) : "Unit";
+            case IfExpr ifExpr -> {
+                if (ifExpr.elseBranch() == null) {
+                    yield unitType();
+                }
+                TypeExpr thenType = blockDiverges(ifExpr.thenBranch()) ? null : inferTypeExpr(env, ifExpr.thenBranch());
+                TypeExpr elseType = exprDiverges(ifExpr.elseBranch()) ? null : inferTypeExpr(env, ifExpr.elseBranch());
+                if (thenType != null && elseType != null) {
+                    yield mergeTypeExpr(thenType, elseType);
+                }
+                if (thenType != null) {
+                    yield thenType;
+                }
+                if (elseType != null) {
+                    yield elseType;
+                }
+                yield unitType();
+            }
+            case MatchExpr matchExpr -> {
+                var scrutType = inferTypeExpr(env, matchExpr.scrutinee());
+                TypeExpr resultType = null;
+                for (var arm : matchExpr.arms()) {
+                    if (exprDiverges(arm.body())) {
+                        continue;
+                    }
+                    Map<String, TypeExpr> armEnv = env;
+                    if (!(arm.pattern() instanceof WildcardPattern) && !(arm.pattern() instanceof LiteralPattern)) {
+                        var mutableArmEnv = new HashMap<>(env);
+                        bindPatternTypeExprs(mutableArmEnv, arm.pattern(), scrutType);
+                        armEnv = mutableArmEnv;
+                    }
+                    var armType = inferTypeExpr(armEnv, arm.body());
+                    resultType = (resultType == null) ? armType : mergeTypeExpr(resultType, armType);
+                }
+                yield resultType != null ? resultType : unitType();
+            }
+            case ConstructorExpr ctor -> simpleType(ctor.typePath());
             case CallExpr call -> {
                 if (call.callee() instanceof IdentExpr ident) {
                     var name = ident.name();
                     yield switch (name) {
-                        case "length" -> "Int";
-                        case "isEmpty", "isSome", "isNone", "isOk", "isErr" -> "Bool";
-                        case "Ok", "Err", "checkedAdd", "checkedSub", "checkedMul", "toResult" -> "Result";
-                        case "Some", "None", "head", "get", "toOption" -> "Option";
-                        case "Nil", "listOf", "Cons" -> "List";
-                        case "getOrElse" -> call.args().size() >= 2 ? inferTypeName(ctx, call.args().get(1)) : "Object";
+                        case "length" -> simpleType("Int");
+                        case "isEmpty", "isSome", "isNone", "isOk", "isErr" -> simpleType("Bool");
+                        case "Ok" -> call.args().isEmpty()
+                            ? simpleType("Result")
+                            : genericType("Result", inferTypeExpr(env, call.args().get(0)), WILDCARD_TYPE);
+                        case "Err" -> call.args().isEmpty()
+                            ? simpleType("Result")
+                            : genericType("Result", WILDCARD_TYPE, inferTypeExpr(env, call.args().get(0)));
+                        case "checkedAdd", "checkedSub", "checkedMul" ->
+                            genericType("Result", simpleType("Int"), simpleType("OverflowError"));
+                        case "toResult" -> {
+                            TypeExpr okType = WILDCARD_TYPE;
+                            if (!call.args().isEmpty()
+                                && inferTypeExpr(env, call.args().get(0)) instanceof GenericTypeExpr gen
+                                && gen.name().equals("Option") && !gen.typeArgs().isEmpty()) {
+                                okType = gen.typeArgs().get(0);
+                            }
+                            TypeExpr errType = call.args().size() >= 2
+                                ? inferTypeExpr(env, call.args().get(1))
+                                : WILDCARD_TYPE;
+                            yield genericType("Result", okType, errType);
+                        }
+                        case "Some" -> call.args().isEmpty()
+                            ? simpleType("Option")
+                            : genericType("Option", inferTypeExpr(env, call.args().get(0)));
+                        case "None" -> genericType("Option", WILDCARD_TYPE);
+                        case "head", "get" -> {
+                            if (!call.args().isEmpty()
+                                && inferTypeExpr(env, call.args().get(0)) instanceof GenericTypeExpr gen
+                                && gen.name().equals("List") && !gen.typeArgs().isEmpty()) {
+                                yield genericType("Option", gen.typeArgs().get(0));
+                            }
+                            yield genericType("Option", WILDCARD_TYPE);
+                        }
+                        case "toOption" -> {
+                            if (!call.args().isEmpty()
+                                && inferTypeExpr(env, call.args().get(0)) instanceof GenericTypeExpr gen
+                                && gen.name().equals("Result") && !gen.typeArgs().isEmpty()) {
+                                yield genericType("Option", gen.typeArgs().get(0));
+                            }
+                            yield genericType("Option", WILDCARD_TYPE);
+                        }
+                        case "getOrElse" -> {
+                            TypeExpr optInner = null;
+                            if (!call.args().isEmpty()
+                                && inferTypeExpr(env, call.args().get(0)) instanceof GenericTypeExpr gen
+                                && gen.name().equals("Option") && !gen.typeArgs().isEmpty()) {
+                                optInner = gen.typeArgs().get(0);
+                            }
+                            TypeExpr defType = call.args().size() >= 2 ? inferTypeExpr(env, call.args().get(1)) : null;
+                            yield mergeTypeExpr(optInner, defType);
+                        }
+                        case "Nil" -> genericType("List", WILDCARD_TYPE);
+                        case "listOf" -> {
+                            if (call.args().isEmpty()) {
+                                yield genericType("List", WILDCARD_TYPE);
+                            }
+                            TypeExpr elemType = null;
+                            for (var arg : call.args()) {
+                                var argType = inferTypeExpr(env, arg);
+                                elemType = (elemType == null) ? argType : mergeTypeExpr(elemType, argType);
+                            }
+                            yield genericType("List", elemType != null ? elemType : WILDCARD_TYPE);
+                        }
+                        case "Cons" -> {
+                            TypeExpr elemType = call.args().isEmpty()
+                                ? WILDCARD_TYPE
+                                : inferTypeExpr(env, call.args().get(0));
+                            if (isUnknownType(elemType) && call.args().size() >= 2
+                                && inferTypeExpr(env, call.args().get(1)) instanceof GenericTypeExpr tailGen
+                                && tailGen.name().equals("List") && !tailGen.typeArgs().isEmpty()) {
+                                elemType = tailGen.typeArgs().get(0);
+                            }
+                            yield genericType("List", elemType);
+                        }
                         default -> {
                             if (functions.containsKey(name)) {
-                                yield getTypeName(functions.get(name).returnType());
+                                yield functions.get(name).returnType();
                             }
                             if (records.containsKey(name) || datas.containsKey(name)) {
-                                yield name;
+                                yield simpleType(name);
                             }
                             for (var entry : enums.entrySet()) {
                                 for (var v : entry.getValue().variants()) {
                                     if (v.name().equals(name)) {
-                                        yield entry.getKey();
+                                        yield simpleType(entry.getKey());
                                     }
                                 }
                             }
-                            yield "Object";
+                            yield OBJECT_TYPE;
                         }
                     };
                 } else if (call.callee() instanceof FieldAccessExpr access && access.object() instanceof IdentExpr enumIdent) {
                     if (enums.containsKey(enumIdent.name())) {
-                        yield enumIdent.name();
+                        yield simpleType(enumIdent.name());
                     }
                 }
-                yield "Object";
+                yield OBJECT_TYPE;
             }
             case FieldAccessExpr access -> {
-                var objType = inferTypeName(ctx, access.object());
+                var objType = getTypeName(inferTypeExpr(env, access.object()));
                 if (records.containsKey(objType)) {
                     for (var p : records.get(objType).params()) {
                         if (p.name().equals(access.fieldName())) {
-                            yield getTypeName(p.type());
+                            yield p.type();
                         }
                     }
                 } else if (datas.containsKey(objType)) {
                     for (var f : datas.get(objType).fields()) {
                         if (f.name().equals(access.fieldName())) {
-                            yield getTypeName(f.type());
+                            yield f.type();
                         }
                     }
                 }
-                yield "Object";
+                yield OBJECT_TYPE;
             }
             case PropagateExpr prop -> {
-                if (prop.inner() instanceof CallExpr call && call.callee() instanceof IdentExpr ident) {
-                    var name = ident.name();
-                    if (name.equals("checkedAdd") || name.equals("checkedSub") || name.equals("checkedMul")) {
-                        yield "Int";
-                    }
-                    if (functions.containsKey(name) && functions.get(name).returnType() instanceof GenericTypeExpr gen
-                        && !gen.typeArgs().isEmpty()) {
-                        yield getTypeName(gen.typeArgs().get(0));
-                    }
+                var innerType = inferTypeExpr(env, prop.inner());
+                if (innerType instanceof GenericTypeExpr gen && gen.name().equals("Result") && !gen.typeArgs().isEmpty()) {
+                    yield gen.typeArgs().get(0);
                 }
-                yield "Object";
+                yield OBJECT_TYPE;
             }
-            default -> "Object";
+            case ForExpr forExpr -> {
+                if (!forExpr.hasYield()) {
+                    yield unitType();
+                }
+                TypeExpr elemType = OBJECT_TYPE;
+                if (inferTypeExpr(env, forExpr.iterable()) instanceof GenericTypeExpr gen
+                    && gen.name().equals("List") && !gen.typeArgs().isEmpty()) {
+                    elemType = gen.typeArgs().get(0);
+                }
+                var loopEnv = new HashMap<>(env);
+                loopEnv.put(forExpr.varName(), elemType);
+                var yieldedType = inferTypeExpr(loopEnv, forExpr.body());
+                yield genericType("List", yieldedType);
+            }
+            case WhileExpr _ -> unitType();
+            default -> OBJECT_TYPE;
         };
     }
-    
+
+    private String inferTypeName(CodeGenContext ctx, Expr expr) {
+        if (expr == null) return "Unit";
+        return getTypeName(inferTypeExpr(ctx, expr));
+    }
+
     /**
-     * Infer the element type from a collection expression.
-     * For List<Int>, returns "Int". For unknown types, returns "Object".
+     * Infer the element TypeExpr from a collection expression.
+     * For List<Int>, returns Int. For unknown types, returns Object.
      */
-    private String inferElementType(CodeGenContext ctx, Expr iterableExpr) {
-        // Check if it's an identifier referencing a parameter with known List type
-        if (iterableExpr instanceof IdentExpr ident) {
-            // Look up the parameter in the function signature
-            for (var param : ctx.fn.params()) {
-                if (param.name().equals(ident.name())) {
-                    if (param.type() instanceof GenericTypeExpr gen) {
-                        if (gen.name().equals("List") && !gen.typeArgs().isEmpty()) {
-                            return getTypeName(gen.typeArgs().get(0));
-                        }
-                    }
-                    break;
-                }
-            }
+    private TypeExpr inferElementTypeExpr(CodeGenContext ctx, Expr iterableExpr) {
+        var iterableType = inferTypeExpr(ctx, iterableExpr);
+        if (iterableType instanceof GenericTypeExpr gen && gen.name().equals("List") && !gen.typeArgs().isEmpty()) {
+            return gen.typeArgs().get(0);
         }
-        // Check if it's a call that returns List
-        if (iterableExpr instanceof CallExpr call && call.callee() instanceof IdentExpr ident) {
-            if (functions.containsKey(ident.name())) {
-                var fn = functions.get(ident.name());
-                if (fn.returnType() instanceof GenericTypeExpr gen) {
-                    if (gen.name().equals("List") && !gen.typeArgs().isEmpty()) {
-                        return getTypeName(gen.typeArgs().get(0));
-                    }
-                }
-            }
-        }
-        return "Object";
+        return OBJECT_TYPE;
     }
-    
+
     private void generateBlock(CodeGenContext ctx, BlockExpr block) {
-        for (var stmt : block.statements()) {
-            generateStmt(ctx, stmt);
-            if (ctx.hasReturn) {
-                return;
+        var savedLocals = new HashMap<>(ctx.locals);
+        var savedTypes = new HashMap<>(ctx.localTypes);
+        var savedTypeExprs = new HashMap<>(ctx.localTypeExprs);
+        try {
+            for (var stmt : block.statements()) {
+                generateStmt(ctx, stmt);
+                if (ctx.hasReturn) {
+                    return;
+                }
             }
-        }
-        
-        if (block.tailExpr() != null) {
-            generateExpr(ctx, block.tailExpr());
+
+            if (block.tailExpr() != null) {
+                generateExpr(ctx, block.tailExpr());
+            }
+        } finally {
+            ctx.locals.clear();
+            ctx.locals.putAll(savedLocals);
+            ctx.localTypes.clear();
+            ctx.localTypes.putAll(savedTypes);
+            ctx.localTypeExprs.clear();
+            ctx.localTypeExprs.putAll(savedTypeExprs);
         }
     }
-    
+
     private void generateStmt(CodeGenContext ctx, Statement stmt) {
         switch (stmt) {
             case ValStmt val -> {
+                var initType = inferTypeExpr(ctx, val.initializer());
+                var varType = val.explicitType() != null
+                    ? mergeTypeExpr(val.explicitType(), initType)
+                    : initType;
+                var typeName = getTypeName(varType);
                 generateExpr(ctx, val.initializer());
-                var type = val.explicitType();
-                var typeName = type != null ? getTypeName(type) : inferTypeName(ctx, val.initializer());
-                int slot = ctx.allocateLocal(val.name(), typeName);
+                int slot = ctx.allocateLocal(val.name(), varType);
                 switch (typeName) {
                     case "Long" -> ctx.code.lstore(slot);
                     case "Int", "Bool" -> ctx.code.istore(slot);
                     default -> ctx.code.astore(slot);
                 }
             }
-            case VarStmt var -> {
-                generateExpr(ctx, var.initializer());
-                var type = var.explicitType();
-                var typeName = type != null ? getTypeName(type) : inferTypeName(ctx, var.initializer());
-                int slot = ctx.allocateLocal(var.name(), typeName);
+            case VarStmt varStmt -> {
+                var initType = inferTypeExpr(ctx, varStmt.initializer());
+                var varType = varStmt.explicitType() != null
+                    ? mergeTypeExpr(varStmt.explicitType(), initType)
+                    : initType;
+                var typeName = getTypeName(varType);
+                generateExpr(ctx, varStmt.initializer());
+                int slot = ctx.allocateLocal(varStmt.name(), varType);
                 switch (typeName) {
                     case "Long" -> ctx.code.lstore(slot);
                     case "Int", "Bool" -> ctx.code.istore(slot);
@@ -757,11 +1035,14 @@ public final class Java25CodeGenerator {
                     }
                 }
             }
-            case LetStmt let -> {
-                generateExpr(ctx, let.initializer());
-                var type = let.explicitType();
-                var typeName = type != null ? getTypeName(type) : inferTypeName(ctx, let.initializer());
-                int slot = ctx.allocateLocal(let.name(), typeName);
+            case LetStmt letStmt -> {
+                var initType = inferTypeExpr(ctx, letStmt.initializer());
+                var varType = letStmt.explicitType() != null
+                    ? mergeTypeExpr(letStmt.explicitType(), initType)
+                    : initType;
+                var typeName = getTypeName(varType);
+                generateExpr(ctx, letStmt.initializer());
+                int slot = ctx.allocateLocal(letStmt.name(), varType);
                 switch (typeName) {
                     case "Long" -> ctx.code.lstore(slot);
                     case "Int", "Bool" -> ctx.code.istore(slot);
@@ -788,7 +1069,7 @@ public final class Java25CodeGenerator {
             }
         }
     }
-    
+
     private void generateExpr(CodeGenContext ctx, Expr expr) {
         switch (expr) {
             case LiteralExpr lit -> generateLiteral(ctx, lit);
@@ -809,18 +1090,19 @@ public final class Java25CodeGenerator {
             case HoleExpr hole -> throw new IllegalStateException("Hole in codegen: ?" + hole.name());
         }
     }
-    
+
     private void generateFor(CodeGenContext ctx, ForExpr forExpr) {
         // Infer element type from iterable
-        var elementType = inferElementType(ctx, forExpr.iterable());
-        
+        var elementTypeExpr = inferElementTypeExpr(ctx, forExpr.iterable());
+        var elementType = getTypeName(elementTypeExpr);
+
         // Generate iterable expression (should be List)
         generateExpr(ctx, forExpr.iterable());
-        
+
         // Store the list in a temp local
         int listSlot = ctx.allocateLocal("$list$" + ctx.nextSlot, "Object");
         ctx.code.astore(listSlot);
-        
+
         // Get iterator: list.iterator()
         ctx.code.aload(listSlot);
         ctx.code.invokeinterface(
@@ -830,7 +1112,7 @@ public final class Java25CodeGenerator {
         );
         int iterSlot = ctx.allocateLocal("$iter$" + ctx.nextSlot, "Object");
         ctx.code.astore(iterSlot);
-        
+
         // For yield: create result list
         int resultListSlot = -1;
         if (forExpr.hasYield()) {
@@ -844,12 +1126,12 @@ public final class Java25CodeGenerator {
             resultListSlot = ctx.allocateLocal("$result$" + ctx.nextSlot, "Object");
             ctx.code.astore(resultListSlot);
         }
-        
+
         var loopStart = ctx.code.newLabel();
         var loopEnd = ctx.code.newLabel();
-        
+
         ctx.code.labelBinding(loopStart);
-        
+
         // Check hasNext()
         ctx.code.aload(iterSlot);
         ctx.code.invokeinterface(
@@ -858,7 +1140,7 @@ public final class Java25CodeGenerator {
             MethodTypeDesc.of(ConstantDescs.CD_boolean)
         );
         ctx.code.ifeq(loopEnd);
-        
+
         // Get next element
         ctx.code.aload(iterSlot);
         ctx.code.invokeinterface(
@@ -866,73 +1148,87 @@ public final class Java25CodeGenerator {
             "next",
             MethodTypeDesc.of(ConstantDescs.CD_Object)
         );
-        
-        // Unbox primitive element types
-        int elemSlot;
-        switch (elementType) {
-            case "Int" -> {
-                ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
-                ctx.code.invokevirtual(
-                    ClassDesc.of("java.lang.Integer"),
-                    "intValue",
-                    MethodTypeDesc.of(ConstantDescs.CD_int)
+
+        var savedLocals = new HashMap<>(ctx.locals);
+        var savedTypes = new HashMap<>(ctx.localTypes);
+        var savedTypeExprs = new HashMap<>(ctx.localTypeExprs);
+        try {
+            // Unbox primitive or cast reference element types
+            int elemSlot;
+            switch (elementType) {
+                case "Int" -> {
+                    ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
+                    ctx.code.invokevirtual(
+                        ClassDesc.of("java.lang.Integer"),
+                        "intValue",
+                        MethodTypeDesc.of(ConstantDescs.CD_int)
+                    );
+                    elemSlot = ctx.allocateLocal(forExpr.varName(), elementTypeExpr);
+                    ctx.code.istore(elemSlot);
+                }
+                case "Long" -> {
+                    ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
+                    ctx.code.invokevirtual(
+                        ClassDesc.of("java.lang.Long"),
+                        "longValue",
+                        MethodTypeDesc.of(ConstantDescs.CD_long)
+                    );
+                    elemSlot = ctx.allocateLocal(forExpr.varName(), elementTypeExpr);
+                    ctx.code.lstore(elemSlot);
+                }
+                case "Bool" -> {
+                    ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
+                    ctx.code.invokevirtual(
+                        ClassDesc.of("java.lang.Boolean"),
+                        "booleanValue",
+                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
+                    );
+                    elemSlot = ctx.allocateLocal(forExpr.varName(), elementTypeExpr);
+                    ctx.code.istore(elemSlot);
+                }
+                default -> {
+                    castReferenceIfNeeded(ctx, elementType);
+                    elemSlot = ctx.allocateLocal(forExpr.varName(), elementTypeExpr);
+                    ctx.code.astore(elemSlot);
+                }
+            }
+
+            // Infer yield expression type before block scopes pop locals
+            String yieldTypeName = forExpr.hasYield() ? getTypeName(inferTypeExpr(ctx, forExpr.body())) : "Unit";
+
+            // Generate body
+            generateBlock(ctx, forExpr.body());
+
+            if (forExpr.hasYield()) {
+                // Box primitive values for adding to list
+                boxPrimitiveType(ctx, yieldTypeName);
+
+                // Store the yield result in a temp variable
+                int yieldSlot = ctx.allocateLocal("$yield$" + ctx.nextSlot, "Object");
+                ctx.code.astore(yieldSlot);
+
+                // Add result to list
+                ctx.code.aload(resultListSlot);
+                ctx.code.aload(yieldSlot);
+                ctx.code.invokeinterface(
+                    ClassDesc.of("java.util.List"),
+                    "add",
+                    MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
                 );
-                elemSlot = ctx.allocateLocal(forExpr.varName(), "Int");
-                ctx.code.istore(elemSlot);
+                ctx.code.pop(); // discard boolean result
             }
-            case "Long" -> {
-                ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
-                ctx.code.invokevirtual(
-                    ClassDesc.of("java.lang.Long"),
-                    "longValue",
-                    MethodTypeDesc.of(ConstantDescs.CD_long)
-                );
-                elemSlot = ctx.allocateLocal(forExpr.varName(), "Long");
-                ctx.code.lstore(elemSlot);
-            }
-            case "Bool" -> {
-                ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
-                ctx.code.invokevirtual(
-                    ClassDesc.of("java.lang.Boolean"),
-                    "booleanValue",
-                    MethodTypeDesc.of(ConstantDescs.CD_boolean)
-                );
-                elemSlot = ctx.allocateLocal(forExpr.varName(), "Bool");
-                ctx.code.istore(elemSlot);
-            }
-            default -> {
-                elemSlot = ctx.allocateLocal(forExpr.varName(), elementType);
-                ctx.code.astore(elemSlot);
-            }
+        } finally {
+            ctx.locals.clear();
+            ctx.locals.putAll(savedLocals);
+            ctx.localTypes.clear();
+            ctx.localTypes.putAll(savedTypes);
+            ctx.localTypeExprs.clear();
+            ctx.localTypeExprs.putAll(savedTypeExprs);
         }
-        
-        // Generate body
-        generateBlock(ctx, forExpr.body());
-        
-        if (forExpr.hasYield()) {
-            // Box primitive values for adding to list
-            if (forExpr.body().tailExpr() != null) {
-                boxIfPrimitive(ctx, forExpr.body().tailExpr());
-            }
-            
-            // Store the yield result in a temp variable
-            int yieldSlot = ctx.allocateLocal("$yield$" + ctx.nextSlot, "Object");
-            ctx.code.astore(yieldSlot);
-            
-            // Add result to list
-            ctx.code.aload(resultListSlot);
-            ctx.code.aload(yieldSlot);
-            ctx.code.invokeinterface(
-                ClassDesc.of("java.util.List"),
-                "add",
-                MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
-            );
-            ctx.code.pop(); // discard boolean result
-        }
-        
+
         ctx.code.goto_(loopStart);
         ctx.code.labelBinding(loopEnd);
-        
+
         if (forExpr.hasYield()) {
             // Push unmodifiable result list as return value
             ctx.code.aload(resultListSlot);
@@ -1268,6 +1564,11 @@ public final class Java25CodeGenerator {
                         MethodTypeDesc.of(ConstantDescs.CD_boolean, ClassDesc.of("java.util.Collection"))
                     );
                     ctx.code.pop();
+                    ctx.code.invokestatic(
+                        ClassDesc.of("java.util.Collections"),
+                        "unmodifiableList",
+                        MethodTypeDesc.of(ClassDesc.of("java.util.List"), ClassDesc.of("java.util.List"))
+                    );
                     return;
                 }
                 
@@ -1427,7 +1728,13 @@ public final class Java25CodeGenerator {
                     return;
                 }
                 case "getOrElse" -> {
-                    var defaultType = inferTypeName(ctx, call.args().get(1));
+                    var optType = inferTypeExpr(ctx, call.args().get(0));
+                    TypeExpr optInner = (optType instanceof GenericTypeExpr gen
+                        && gen.name().equals("Option")
+                        && !gen.typeArgs().isEmpty())
+                        ? gen.typeArgs().get(0)
+                        : null;
+                    var valueType = getTypeName(mergeTypeExpr(optInner, inferTypeExpr(ctx, call.args().get(1))));
                     generateExpr(ctx, call.args().get(0));
                     var optSlot = ctx.allocateLocal("$opt$" + ctx.nextSlot, "Object");
                     ctx.code.astore(optSlot);
@@ -1446,7 +1753,7 @@ public final class Java25CodeGenerator {
                         },
                         fb -> fb.aload(defSlot)
                     );
-                    unboxIfNeeded(ctx, defaultType);
+                    unboxIfNeeded(ctx, valueType);
                     return;
                 }
                 case "toOption" -> {
@@ -1523,7 +1830,7 @@ public final class Java25CodeGenerator {
             // Record constructor call
             if (records.containsKey(methodName)) {
                 var rec = records.get(methodName);
-                var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + methodName);
+                var classDesc = ClassDesc.ofInternalName(moduleInternalName(methodName));
                 ctx.code.new_(classDesc);
                 ctx.code.dup();
                 for (var arg : call.args()) {
@@ -1539,7 +1846,7 @@ public final class Java25CodeGenerator {
             // Data constructor call
             if (datas.containsKey(methodName)) {
                 var data = datas.get(methodName);
-                var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + methodName);
+                var classDesc = ClassDesc.ofInternalName(moduleInternalName(methodName));
                 ctx.code.new_(classDesc);
                 ctx.code.dup();
                 for (var arg : call.args()) {
@@ -1557,7 +1864,7 @@ public final class Java25CodeGenerator {
                 for (var variant : entry.getValue().variants()) {
                     if (variant.name().equals(methodName)) {
                         var variantClassDesc = ClassDesc.ofInternalName(
-                            currentModule.replace('.', '/') + "/" + entry.getKey() + "$" + variant.name());
+                            moduleInternalName(entry.getKey() + "$" + variant.name()));
                         ctx.code.new_(variantClassDesc);
                         ctx.code.dup();
                         for (var arg : call.args()) {
@@ -1577,7 +1884,7 @@ public final class Java25CodeGenerator {
             for (var arg : call.args()) {
                 generateExpr(ctx, arg);
             }
-            var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + methodName + "$Fn");
+            var classDesc = ClassDesc.ofInternalName(moduleInternalName(methodName + "$Fn"));
             if (functions.containsKey(methodName)) {
                 ctx.code.invokestatic(classDesc, "invoke", buildMethodDescriptor(functions.get(methodName)));
             } else {
@@ -1590,7 +1897,7 @@ public final class Java25CodeGenerator {
                 for (var variant : enums.get(enumName).variants()) {
                     if (variant.name().equals(variantName)) {
                         var variantClassDesc = ClassDesc.ofInternalName(
-                            currentModule.replace('.', '/') + "/" + enumName + "$" + variantName);
+                            moduleInternalName(enumName + "$" + variantName));
                         ctx.code.new_(variantClassDesc);
                         ctx.code.dup();
                         for (var arg : call.args()) {
@@ -1679,7 +1986,10 @@ public final class Java25CodeGenerator {
      * STDLIB-01: Value types box transparently at Java boundaries.
      */
     private void boxIfPrimitive(CodeGenContext ctx, Expr expr) {
-        var typeName = inferTypeName(ctx, expr);
+        boxPrimitiveType(ctx, inferTypeName(ctx, expr));
+    }
+
+    private void boxPrimitiveType(CodeGenContext ctx, String typeName) {
         switch (typeName) {
             case "Int" -> ctx.code.invokestatic(
                 ClassDesc.of("java.lang.Integer"),
@@ -1697,6 +2007,32 @@ public final class Java25CodeGenerator {
                 MethodTypeDesc.of(ClassDesc.of("java.lang.Boolean"), ConstantDescs.CD_boolean)
             );
             default -> {}
+        }
+    }
+
+    private void castReferenceIfNeeded(CodeGenContext ctx, String targetTypeName) {
+        if (targetTypeName == null) {
+            return;
+        }
+        switch (targetTypeName) {
+            case "Int", "Long", "Bool", "Unit", "Object", "_", "OverflowError", "RangeError", "IndexError" -> {}
+            case "String" -> ctx.code.checkcast(ConstantDescs.CD_String);
+            case "List" -> ctx.code.checkcast(ClassDesc.of("java.util.List"));
+            case "Option" -> ctx.code.checkcast(
+                enums.containsKey("Option")
+                    ? ClassDesc.ofInternalName(moduleInternalName("Option"))
+                    : ClassDesc.ofInternalName("ngj/runtime/Option"));
+            case "Result" -> ctx.code.checkcast(
+                enums.containsKey("Result")
+                    ? ClassDesc.ofInternalName(moduleInternalName("Result"))
+                    : ClassDesc.ofInternalName("ngj/runtime/Result"));
+            default -> {
+                if (records.containsKey(targetTypeName)
+                    || datas.containsKey(targetTypeName)
+                    || enums.containsKey(targetTypeName)) {
+                    ctx.code.checkcast(ClassDesc.ofInternalName(moduleInternalName(targetTypeName)));
+                }
+            }
         }
     }
     
@@ -1726,13 +2062,7 @@ public final class Java25CodeGenerator {
                     MethodTypeDesc.of(ConstantDescs.CD_boolean)
                 );
             }
-            default -> {
-                if (records.containsKey(targetTypeName) || datas.containsKey(targetTypeName) || enums.containsKey(targetTypeName)) {
-                    ctx.code.checkcast(ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + targetTypeName));
-                } else if (targetTypeName.equals("String")) {
-                    ctx.code.checkcast(ConstantDescs.CD_String);
-                }
-            }
+            default -> castReferenceIfNeeded(ctx, targetTypeName);
         }
     }
     
@@ -1770,7 +2100,7 @@ public final class Java25CodeGenerator {
     }
     
     private void generateConstructor(CodeGenContext ctx, ConstructorExpr ctor) {
-        var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + ctor.typePath());
+        var classDesc = ClassDesc.ofInternalName(moduleInternalName(ctor.typePath()));
         
         ctx.code.new_(classDesc);
         ctx.code.dup();
@@ -1802,329 +2132,378 @@ public final class Java25CodeGenerator {
     }
     
     private void generateMatch(CodeGenContext ctx, MatchExpr matchExpr) {
-        // Evaluate scrutinee and store in local variable
+        // Infer full scrutinee TypeExpr before codegen
+        TypeExpr scrutineeTypeExpr = inferTypeExpr(ctx, matchExpr.scrutinee());
+        String scrutineeType = getTypeName(scrutineeTypeExpr);
+
+        // Evaluate scrutinee, box if primitive, and store in local variable
         generateExpr(ctx, matchExpr.scrutinee());
-        var scrutineeSlot = ctx.allocateLocal("$match$scrutinee", "Object");
+        boxPrimitiveType(ctx, scrutineeType);
+        var scrutineeSlot = ctx.allocateLocal("$match$scrutinee$" + ctx.nextSlot, "Object");
         ctx.code.astore(scrutineeSlot);
-        
-        // Infer scrutinee type for Option/Result field type resolution
-        String scrutineeType = inferTypeName(ctx, matchExpr.scrutinee());
-        String innerType = inferGenericInnerType(ctx, matchExpr.scrutinee());
-        
+
         var endLabel = ctx.code.newLabel();
         var arms = matchExpr.arms();
-        
-        // Track next arm labels for conditional patterns
+
+        // Track next arm labels and return coverage across arms
         Label nextArmLabel = null;
-        
+        boolean prevReturn = ctx.hasReturn;
+        boolean allArmsReturned = true;
+
         for (int i = 0; i < arms.size(); i++) {
             var arm = arms.get(i);
             var pattern = arm.pattern();
             var isLastArm = (i == arms.size() - 1);
-            
+
             // Bind previous arm's fallthrough label if any
             if (nextArmLabel != null) {
                 ctx.code.labelBinding(nextArmLabel);
                 nextArmLabel = null;
             }
-            
+
+            ctx.hasReturn = false;
+
             switch (pattern) {
-                case WildcardPattern _ -> {
-                    // Wildcard matches everything - just evaluate body
-                    generateExpr(ctx, arm.body());
-                    if (!isLastArm) {
-                        ctx.code.goto_(endLabel);
-                    }
-                }
-                
+                case WildcardPattern _ -> generateExpr(ctx, arm.body());
+
                 case BindingPattern binding -> {
-                    // Bind scrutinee to variable and evaluate body
-                    ctx.code.aload(scrutineeSlot);
-                    var bindSlot = ctx.allocateLocal(binding.name(), scrutineeType);
-                    ctx.code.astore(bindSlot);
-                    generateExpr(ctx, arm.body());
-                    if (!isLastArm) {
-                        ctx.code.goto_(endLabel);
+                    var savedLocals = new HashMap<>(ctx.locals);
+                    var savedTypes = new HashMap<>(ctx.localTypes);
+                    var savedTypeExprs = new HashMap<>(ctx.localTypeExprs);
+                    try {
+                        ctx.code.aload(scrutineeSlot);
+                        unboxIfNeeded(ctx, scrutineeType);
+                        var bindSlot = ctx.allocateLocal(binding.name(), scrutineeTypeExpr);
+                        switch (scrutineeType) {
+                            case "Long" -> ctx.code.lstore(bindSlot);
+                            case "Int", "Bool" -> ctx.code.istore(bindSlot);
+                            default -> ctx.code.astore(bindSlot);
+                        }
+                        generateExpr(ctx, arm.body());
+                    } finally {
+                        ctx.locals.clear();
+                        ctx.locals.putAll(savedLocals);
+                        ctx.localTypes.clear();
+                        ctx.localTypes.putAll(savedTypes);
+                        ctx.localTypeExprs.clear();
+                        ctx.localTypeExprs.putAll(savedTypeExprs);
                     }
                 }
-                
+
                 case LiteralPattern literal -> {
-                    // Compare with literal value
                     if (!isLastArm) {
                         nextArmLabel = ctx.code.newLabel();
                     }
                     ctx.code.aload(scrutineeSlot);
                     generateExpr(ctx, literal.literal());
-                    // Box primitive if needed for equals comparison
                     boxIfNeeded(ctx, literal.literal());
-                    ctx.code.invokevirtual(
-                        ConstantDescs.CD_Object,
+                    ctx.code.invokestatic(
+                        ClassDesc.of("java.util.Objects"),
                         "equals",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
                     );
                     if (!isLastArm) {
                         ctx.code.ifeq(nextArmLabel);
                     } else {
-                        // Last arm - pop the boolean and proceed (exhaustive match assumed)
                         ctx.code.pop();
                     }
                     generateExpr(ctx, arm.body());
-                    if (!isLastArm) {
-                        ctx.code.goto_(endLabel);
-                    }
                 }
-                
+
                 case ConstructorPattern ctor -> {
-                    // Check instanceof variant class and extract fields
-                    var typePath = ctor.typePath();
-                    
-                    // Get the short variant name (e.g., "Ok", "Err", "Some", "None")
-                    String shortVariantName = typePath.contains(".") 
-                        ? typePath.substring(typePath.lastIndexOf('.') + 1)
-                        : typePath;
-                    
-                    // Resolve variant class - could be EnumName.Variant or just Variant
-                    ClassDesc variantClass = resolveVariantClass(ctx, typePath);
-                    
                     if (!isLastArm) {
                         nextArmLabel = ctx.code.newLabel();
-                        ctx.code.aload(scrutineeSlot);
-                        ctx.code.instanceOf(variantClass);
-                        ctx.code.ifeq(nextArmLabel);
                     }
-                    // For last arm, we assume exhaustive match and don't need to check
-                    
-                    // Extract fields from variant
-                    if (!ctor.fields().isEmpty()) {
-                        ctx.code.aload(scrutineeSlot);
-                        ctx.code.checkcast(variantClass);
-                        var castedSlot = ctx.allocateLocal("$match$casted", typePath);
-                        ctx.code.astore(castedSlot);
-                        
-                        for (int fieldIdx = 0; fieldIdx < ctor.fields().size(); fieldIdx++) {
-                            var field = ctor.fields().get(fieldIdx);
-                            if (field.pattern() instanceof BindingPattern bindPat) {
-                                ctx.code.aload(castedSlot);
-                                
-                                // Resolve the actual field name in the variant class
-                                // For Option/Result ADTs, the field names are fixed
-                                String actualFieldName = resolveVariantFieldName(typePath, field.name(), fieldIdx);
-                                
-                                // Get the field type for the getfield descriptor
-                                // For Option/Result, use the correct type parameter based on variant:
-                                // - Some(v): v is T from Option<T>
-                                // - Ok(v): v is T from Result<T, E>
-                                // - Err(e): e is E from Result<T, E>
-                                // For user-defined enums, use the declared field type
-                                String fieldType;
-                                ClassDesc fieldDesc;
-                                if (scrutineeType.equals("Option") || scrutineeType.equals("Result")) {
-                                    fieldType = getResultOptionFieldType(ctx, matchExpr.scrutinee(), shortVariantName);
-                                    fieldDesc = ConstantDescs.CD_Object; // Option/Result store as Object
-                                } else {
-                                    fieldType = lookupEnumVariantFieldType(typePath, actualFieldName);
-                                    fieldDesc = typeNameToClassDesc(fieldType);
-                                }
-                                
-                                ctx.code.getfield(variantClass, actualFieldName, fieldDesc);
-                                
-                                // For Option/Result with boxed primitives, unbox if needed
-                                if (scrutineeType.equals("Option") || scrutineeType.equals("Result")) {
-                                    if (fieldType.equals("Int")) {
-                                        ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
-                                        ctx.code.invokevirtual(
-                                            ClassDesc.of("java.lang.Integer"),
-                                            "intValue",
-                                            MethodTypeDesc.of(ConstantDescs.CD_int)
-                                        );
-                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), "Int");
-                                        ctx.code.istore(fieldSlot);
-                                    } else if (fieldType.equals("Long")) {
-                                        ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
-                                        ctx.code.invokevirtual(
-                                            ClassDesc.of("java.lang.Long"),
-                                            "longValue",
-                                            MethodTypeDesc.of(ConstantDescs.CD_long)
-                                        );
-                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), "Long");
-                                        ctx.code.lstore(fieldSlot);
-                                    } else if (fieldType.equals("Bool")) {
-                                        ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
-                                        ctx.code.invokevirtual(
-                                            ClassDesc.of("java.lang.Boolean"),
-                                            "booleanValue",
-                                            MethodTypeDesc.of(ConstantDescs.CD_boolean)
-                                        );
-                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), "Bool");
-                                        ctx.code.istore(fieldSlot);
-                                    } else {
-                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
-                                        ctx.code.astore(fieldSlot);
-                                    }
-                                } else {
-                                    // User-defined enums: use the actual field type
-                                    if (fieldType.equals("Int") || fieldType.equals("Bool")) {
-                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
-                                        ctx.code.istore(fieldSlot);
-                                    } else if (fieldType.equals("Long")) {
-                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
-                                        ctx.code.lstore(fieldSlot);
-                                    } else {
-                                        var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
-                                        ctx.code.astore(fieldSlot);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    generateExpr(ctx, arm.body());
-                    if (!isLastArm) {
-                        ctx.code.goto_(endLabel);
+                    var savedLocals = new HashMap<>(ctx.locals);
+                    var savedTypes = new HashMap<>(ctx.localTypes);
+                    var savedTypeExprs = new HashMap<>(ctx.localTypeExprs);
+                    try {
+                        matchConstructorPattern(ctx, ctor, scrutineeTypeExpr, scrutineeSlot, !isLastArm, nextArmLabel);
+                        generateExpr(ctx, arm.body());
+                    } finally {
+                        ctx.locals.clear();
+                        ctx.locals.putAll(savedLocals);
+                        ctx.localTypes.clear();
+                        ctx.localTypes.putAll(savedTypes);
+                        ctx.localTypeExprs.clear();
+                        ctx.localTypeExprs.putAll(savedTypeExprs);
                     }
                 }
             }
-        }
-        
-        ctx.code.labelBinding(endLabel);
-    }
-    
-    private String inferGenericInnerType(CodeGenContext ctx, Expr expr) {
-        // For Option<T> or Result<T, E>, return T (first type param)
-        return inferGenericTypeParam(ctx, expr, 0);
-    }
-    
-    private String inferGenericTypeParam(CodeGenContext ctx, Expr expr, int paramIndex) {
-        // For Option<T> paramIndex 0 -> T
-        // For Result<T, E> paramIndex 0 -> T, paramIndex 1 -> E
-        if (expr instanceof IdentExpr ident) {
-            // Look up in function parameters
-            for (var param : ctx.fn.params()) {
-                if (param.name().equals(ident.name())) {
-                    if (param.type() instanceof GenericTypeExpr gen) {
-                        if (gen.typeArgs().size() > paramIndex) {
-                            return getTypeName(gen.typeArgs().get(paramIndex));
-                        }
-                    }
-                }
+
+            boolean armReturned = ctx.hasReturn;
+            allArmsReturned &= armReturned;
+            if (!isLastArm && !armReturned) {
+                ctx.code.goto_(endLabel);
             }
         }
-        return "Object";
+
+        if (!allArmsReturned || arms.isEmpty()) {
+            ctx.code.labelBinding(endLabel);
+        }
+        ctx.hasReturn = prevReturn || (!arms.isEmpty() && allArmsReturned);
     }
-    
+
+    private void matchConstructorPattern(
+        CodeGenContext ctx,
+        ConstructorPattern ctor,
+        TypeExpr scrutTypeExpr,
+        int valueSlot,
+        boolean canFail,
+        Label failLabel
+    ) {
+        var typePath = ctor.typePath();
+        String shortVariantName = typePath.contains(".")
+            ? typePath.substring(typePath.lastIndexOf('.') + 1)
+            : typePath;
+        boolean isRuntimeOption = !enums.containsKey("Option")
+            && (shortVariantName.equals("Some") || shortVariantName.equals("None"));
+        boolean isRuntimeResult = !enums.containsKey("Result")
+            && (shortVariantName.equals("Ok") || shortVariantName.equals("Err"));
+        boolean isRuntimeAdt = isRuntimeOption || isRuntimeResult;
+
+        ClassDesc variantClass = resolveVariantClass(ctx, typePath);
+
+        if (canFail) {
+            ctx.code.aload(valueSlot);
+            ctx.code.instanceOf(variantClass);
+            ctx.code.ifeq(failLabel);
+        }
+
+        boolean needsCast = ctor.fields().stream().anyMatch(f ->
+            !(f.pattern() instanceof WildcardPattern)
+                && (canFail || !(f.pattern() instanceof LiteralPattern)));
+        if (!needsCast) {
+            return;
+        }
+
+        ctx.code.aload(valueSlot);
+        ctx.code.checkcast(variantClass);
+        var castedSlot = ctx.allocateLocal("$match$casted$" + ctx.nextSlot, "Object");
+        ctx.code.astore(castedSlot);
+
+        for (int fieldIdx = 0; fieldIdx < ctor.fields().size(); fieldIdx++) {
+            var field = ctor.fields().get(fieldIdx);
+            var pat = field.pattern();
+            if (pat instanceof WildcardPattern) {
+                continue;
+            }
+            if (!canFail && pat instanceof LiteralPattern) {
+                continue;
+            }
+
+            String actualFieldName = resolveVariantFieldName(typePath, field.name(), fieldIdx);
+            TypeExpr fieldTypeExpr;
+            ClassDesc fieldDesc;
+            if (isRuntimeAdt) {
+                fieldTypeExpr = getResultOptionFieldTypeExpr(scrutTypeExpr, shortVariantName);
+                fieldDesc = ConstantDescs.CD_Object;
+            } else {
+                fieldTypeExpr = lookupEnumVariantFieldTypeExpr(typePath, actualFieldName);
+                fieldDesc = typeToClassDesc(fieldTypeExpr);
+            }
+            String fieldType = getTypeName(fieldTypeExpr);
+
+            ctx.code.aload(castedSlot);
+            ctx.code.getfield(variantClass, actualFieldName, fieldDesc);
+
+            if (pat == null || pat instanceof BindingPattern) {
+                String bindName = (pat instanceof BindingPattern bp) ? bp.name() : field.name();
+                if (isRuntimeAdt) {
+                    unboxIfNeeded(ctx, fieldType);
+                } else {
+                    castReferenceIfNeeded(ctx, fieldType);
+                }
+                var fieldSlot = ctx.allocateLocal(bindName, fieldTypeExpr);
+                switch (fieldType) {
+                    case "Long" -> ctx.code.lstore(fieldSlot);
+                    case "Int", "Bool" -> ctx.code.istore(fieldSlot);
+                    default -> ctx.code.astore(fieldSlot);
+                }
+            } else if (pat instanceof LiteralPattern lit) {
+                if (!isRuntimeAdt) {
+                    boxPrimitiveType(ctx, fieldType);
+                }
+                generateExpr(ctx, lit.literal());
+                boxIfNeeded(ctx, lit.literal());
+                ctx.code.invokestatic(
+                    ClassDesc.of("java.util.Objects"),
+                    "equals",
+                    MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                );
+                ctx.code.ifeq(failLabel);
+            } else if (pat instanceof ConstructorPattern nestedCtor) {
+                castReferenceIfNeeded(ctx, fieldType);
+                var nestedSlot = ctx.allocateLocal("$match$nested$" + ctx.nextSlot, "Object");
+                ctx.code.astore(nestedSlot);
+                matchConstructorPattern(ctx, nestedCtor, fieldTypeExpr, nestedSlot, canFail, failLabel);
+            }
+        }
+    }
+
     /**
-     * Get the correct field type for Option/Result pattern bindings.
+     * Get the correct field TypeExpr for Option/Result pattern bindings.
      * - Some(v): v has type T from Option<T>
-     * - None: no binding
      * - Ok(v): v has type T from Result<T, E>
      * - Err(e): e has type E from Result<T, E>
      */
-    private String getResultOptionFieldType(CodeGenContext ctx, Expr scrutinee, String variantName) {
-        if (variantName.equals("Some")) {
-            return inferGenericTypeParam(ctx, scrutinee, 0); // Option<T> -> T
-        } else if (variantName.equals("Ok")) {
-            return inferGenericTypeParam(ctx, scrutinee, 0); // Result<T, E> -> T
-        } else if (variantName.equals("Err")) {
-            return inferGenericTypeParam(ctx, scrutinee, 1); // Result<T, E> -> E
+    private TypeExpr getResultOptionFieldTypeExpr(TypeExpr scrutineeType, String variantName) {
+        if (scrutineeType instanceof GenericTypeExpr gen) {
+            if (variantName.equals("Some") && gen.name().equals("Option") && !gen.typeArgs().isEmpty()) {
+                return gen.typeArgs().get(0);
+            }
+            if (variantName.equals("Ok") && gen.name().equals("Result") && !gen.typeArgs().isEmpty()) {
+                return gen.typeArgs().get(0);
+            }
+            if (variantName.equals("Err") && gen.name().equals("Result") && gen.typeArgs().size() >= 2) {
+                return gen.typeArgs().get(1);
+            }
         }
-        return "Object";
+        return OBJECT_TYPE;
     }
-    
+
     private ClassDesc resolveVariantClass(CodeGenContext ctx, String typePath) {
-        // Handle Option/Result builtins
-        if (typePath.equals("Some") || typePath.equals("None")) {
-            return ClassDesc.ofInternalName("ngj/runtime/Option$" + typePath);
+        String shortVariantName = typePath.contains(".")
+            ? typePath.substring(typePath.lastIndexOf('.') + 1)
+            : typePath;
+
+        if (!enums.containsKey("Option")
+            && (shortVariantName.equals("Some") || shortVariantName.equals("None"))) {
+            return ClassDesc.ofInternalName("ngj/runtime/Option$" + shortVariantName);
         }
-        if (typePath.equals("Ok") || typePath.equals("Err")) {
-            return ClassDesc.ofInternalName("ngj/runtime/Result$" + typePath);
+        if (!enums.containsKey("Result")
+            && (shortVariantName.equals("Ok") || shortVariantName.equals("Err"))) {
+            return ClassDesc.ofInternalName("ngj/runtime/Result$" + shortVariantName);
         }
-        
-        // Handle qualified paths like "Color.Red" or simple names like "Red"
+
         if (typePath.contains(".")) {
             var parts = typePath.split("\\.");
             var enumName = parts[0];
             var variantName = parts[1];
-            return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + enumName + "$" + variantName);
+            return ClassDesc.ofInternalName(moduleInternalName(enumName + "$" + variantName));
         }
-        
-        // Try to find in known enums
+
         for (var entry : enums.entrySet()) {
             for (var variant : entry.getValue().variants()) {
                 if (variant.name().equals(typePath)) {
-                    return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + entry.getKey() + "$" + typePath);
+                    return ClassDesc.ofInternalName(moduleInternalName(entry.getKey() + "$" + typePath));
                 }
             }
         }
-        
-        // Fallback: assume it's a qualified variant in current module
-        return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + typePath);
+
+        return ClassDesc.ofInternalName(moduleInternalName(typePath));
     }
-    
+
     /**
-     * Resolve the actual field name in a variant class.
-     * For Option/Result ADTs, the field names are fixed:
-     * - Some: "value"
-     * - Ok: "value"
-     * - Err: "error"
-     * For user-defined enums, use the declared field name from the enum definition.
+     * Resolve the actual field name in a variant class (or record/data).
      */
     private String resolveVariantFieldName(String typePath, String patternFieldName, int fieldIndex) {
-        // Built-in Option/Result ADT field names
-        if (typePath.equals("Some") || typePath.equals("Ok")) {
+        String enumName = typePath.contains(".")
+            ? typePath.substring(0, typePath.lastIndexOf('.'))
+            : null;
+        String shortVariantName = typePath.contains(".")
+            ? typePath.substring(typePath.lastIndexOf('.') + 1)
+            : typePath;
+
+        if (!enums.containsKey("Option") && shortVariantName.equals("Some")) {
             return "value";
         }
-        if (typePath.equals("Err")) {
+        if (!enums.containsKey("Result") && shortVariantName.equals("Ok")) {
+            return "value";
+        }
+        if (!enums.containsKey("Result") && shortVariantName.equals("Err")) {
             return "error";
         }
-        
-        // For user-defined enums, look up the declared field name
-        for (var entry : enums.entrySet()) {
-            for (var variant : entry.getValue().variants()) {
-                if (variant.name().equals(typePath)) {
+
+        if (enumName != null && enums.containsKey(enumName)) {
+            for (var variant : enums.get(enumName).variants()) {
+                if (variant.name().equals(shortVariantName)) {
                     var fields = variant.fields();
                     if (fieldIndex < fields.size()) {
                         return fields.get(fieldIndex).name();
                     }
                 }
             }
-        }
-        
-        // Fallback to pattern field name (might not match, but best effort)
-        return patternFieldName;
-    }
-    
-    /**
-     * Look up the type of a field in an enum variant.
-     */
-    private String lookupEnumVariantFieldType(String typePath, String fieldName) {
-        for (var entry : enums.entrySet()) {
-            for (var variant : entry.getValue().variants()) {
-                if (variant.name().equals(typePath)) {
-                    for (var field : variant.fields()) {
-                        if (field.name().equals(fieldName)) {
-                            return getTypeName(field.type());
+        } else {
+            for (var entry : enums.entrySet()) {
+                for (var variant : entry.getValue().variants()) {
+                    if (variant.name().equals(shortVariantName)) {
+                        var fields = variant.fields();
+                        if (fieldIndex < fields.size()) {
+                            return fields.get(fieldIndex).name();
                         }
                     }
                 }
             }
         }
-        return "Object";
+
+        if (records.containsKey(typePath)) {
+            var params = records.get(typePath).params();
+            if (fieldIndex < params.size()) {
+                return params.get(fieldIndex).name();
+            }
+        }
+        if (datas.containsKey(typePath)) {
+            var fields = datas.get(typePath).fields();
+            if (fieldIndex < fields.size()) {
+                return fields.get(fieldIndex).name();
+            }
+        }
+
+        return patternFieldName;
     }
-    
+
     /**
-     * Convert a type name (like "Int", "String") to a ClassDesc for field access.
+     * Look up the TypeExpr of a field in an enum variant (or record/data).
      */
-    private ClassDesc typeNameToClassDesc(String typeName) {
-        return switch (typeName) {
-            case "Int" -> ConstantDescs.CD_int;
-            case "Long" -> ConstantDescs.CD_long;
-            case "Bool" -> ConstantDescs.CD_boolean;
-            case "Float" -> ConstantDescs.CD_float;
-            case "Double" -> ConstantDescs.CD_double;
-            case "String" -> ConstantDescs.CD_String;
-            case "Object" -> ConstantDescs.CD_Object;
-            default -> ClassDesc.of(typeName.contains(".") ? typeName : "java.lang." + typeName);
-        };
+    private TypeExpr lookupEnumVariantFieldTypeExpr(String typePath, String fieldName) {
+        String enumName = typePath.contains(".")
+            ? typePath.substring(0, typePath.lastIndexOf('.'))
+            : null;
+        String shortVariantName = typePath.contains(".")
+            ? typePath.substring(typePath.lastIndexOf('.') + 1)
+            : typePath;
+
+        if (enumName != null && enums.containsKey(enumName)) {
+            for (var variant : enums.get(enumName).variants()) {
+                if (variant.name().equals(shortVariantName)) {
+                    for (var field : variant.fields()) {
+                        if (field.name().equals(fieldName)) {
+                            return field.type();
+                        }
+                    }
+                }
+            }
+        } else {
+            for (var entry : enums.entrySet()) {
+                for (var variant : entry.getValue().variants()) {
+                    if (variant.name().equals(shortVariantName)) {
+                        for (var field : variant.fields()) {
+                            if (field.name().equals(fieldName)) {
+                                return field.type();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (records.containsKey(typePath)) {
+            for (var param : records.get(typePath).params()) {
+                if (param.name().equals(fieldName)) {
+                    return param.type();
+                }
+            }
+        }
+        if (datas.containsKey(typePath)) {
+            for (var field : datas.get(typePath).fields()) {
+                if (field.name().equals(fieldName)) {
+                    return field.type();
+                }
+            }
+        }
+
+        return OBJECT_TYPE;
     }
     
     private void boxIfNeeded(CodeGenContext ctx, LiteralExpr literal) {
@@ -2163,6 +2542,9 @@ public final class Java25CodeGenerator {
         
         // It's an Err - return early
         ctx.code.aload(resSlot);
+        if (!enums.containsKey("Result")) {
+            ctx.code.checkcast(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
+        }
         ctx.code.areturn();
         
         // It's Ok - extract the value
@@ -2178,7 +2560,7 @@ public final class Java25CodeGenerator {
         generateExpr(ctx, access.object());
         if (records.containsKey(objTypeName)) {
             var rec = records.get(objTypeName);
-            var ownerDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + objTypeName);
+            var ownerDesc = ClassDesc.ofInternalName(moduleInternalName(objTypeName));
             for (var param : rec.params()) {
                 if (param.name().equals(access.fieldName())) {
                     ctx.code.getfield(ownerDesc, access.fieldName(), typeToClassDesc(param.type()));
@@ -2187,7 +2569,7 @@ public final class Java25CodeGenerator {
             }
         } else if (datas.containsKey(objTypeName)) {
             var data = datas.get(objTypeName);
-            var ownerDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + objTypeName);
+            var ownerDesc = ClassDesc.ofInternalName(moduleInternalName(objTypeName));
             for (var field : data.fields()) {
                 if (field.name().equals(access.fieldName())) {
                     ctx.code.getfield(ownerDesc, access.fieldName(), typeToClassDesc(field.type()));
@@ -2199,7 +2581,7 @@ public final class Java25CodeGenerator {
     }
     
     private byte[] generateData(DataDecl data) {
-        var className = currentModule.replace('.', '/') + "/" + data.name();
+        var className = moduleInternalName(data.name());
         var classDesc = ClassDesc.ofInternalName(className);
         
         return classFileBuilder().build(classDesc, classBuilder -> {
@@ -2276,7 +2658,7 @@ public final class Java25CodeGenerator {
      * - equals/hashCode based on field values
      */
     private byte[] generateRecord(RecordDecl record) {
-        var className = currentModule.replace('.', '/') + "/" + record.name();
+        var className = moduleInternalName(record.name());
         var classDesc = ClassDesc.ofInternalName(className);
         
         return classFileBuilder().build(classDesc, classBuilder -> {
@@ -2464,7 +2846,7 @@ public final class Java25CodeGenerator {
      * we generate it. For value classes, we omit ACC_IDENTITY.
      */
     private byte[] generateEnum(EnumDecl enumDecl) {
-        var className = currentModule.replace('.', '/') + "/" + enumDecl.name();
+        var className = moduleInternalName(enumDecl.name());
         var classDesc = ClassDesc.ofInternalName(className);
         
         // Build list of permitted subclass descriptors for sealed hierarchy
@@ -2508,7 +2890,7 @@ public final class Java25CodeGenerator {
      */
     public List<Path> generateEnumVariants(EnumDecl enumDecl) throws CodeGenException {
         var outputs = new ArrayList<Path>();
-        var baseClassName = currentModule.replace('.', '/') + "/" + enumDecl.name();
+        var baseClassName = moduleInternalName(enumDecl.name());
         var baseClassDesc = ClassDesc.ofInternalName(baseClassName);
         
         
@@ -2615,6 +2997,7 @@ public final class Java25CodeGenerator {
     }
     
     private String getTypeName(TypeExpr type) {
+        if (type == null) return "Object";
         return switch (type) {
             case SimpleTypeExpr simple -> simple.name();
             case GenericTypeExpr generic -> generic.name();
@@ -2627,6 +3010,7 @@ public final class Java25CodeGenerator {
         final FnDecl fn;
         final Map<String, Integer> locals = new HashMap<>();
         final Map<String, String> localTypes = new HashMap<>();
+        final Map<String, TypeExpr> localTypeExprs = new HashMap<>();
         int nextSlot;
         boolean hasReturn = false;
         
@@ -2637,8 +3021,10 @@ public final class Java25CodeGenerator {
             
             for (var param : fn.params()) {
                 locals.put(param.name(), nextSlot);
-                var typeName = getTypeName(param.type());
+                var paramType = param.type() != null ? param.type() : OBJECT_TYPE;
+                var typeName = getTypeName(paramType);
                 localTypes.put(param.name(), typeName);
+                localTypeExprs.put(param.name(), paramType);
                 if (typeName.equals("Long")) {
                     nextSlot += 2;
                 } else {
@@ -2651,6 +3037,7 @@ public final class Java25CodeGenerator {
             var ctx = new CodeGenContext(newCode, fn);
             ctx.locals.putAll(this.locals);
             ctx.localTypes.putAll(this.localTypes);
+            ctx.localTypeExprs.putAll(this.localTypeExprs);
             ctx.nextSlot = this.nextSlot;
             ctx.hasReturn = this.hasReturn;
             return ctx;
@@ -2660,11 +3047,19 @@ public final class Java25CodeGenerator {
             int slot = nextSlot;
             locals.put(name, slot);
             localTypes.put(name, typeName);
+            localTypeExprs.put(name, simpleType(typeName));
             if (typeName.equals("Long")) {
                 nextSlot += 2;
             } else {
                 nextSlot++;
             }
+            return slot;
+        }
+        
+        int allocateLocal(String name, TypeExpr typeExpr) {
+            var normalized = typeExpr != null ? typeExpr : OBJECT_TYPE;
+            int slot = allocateLocal(name, getTypeName(normalized));
+            localTypeExprs.put(name, normalized);
             return slot;
         }
         
@@ -2674,6 +3069,10 @@ public final class Java25CodeGenerator {
         
         String getLocalType(String name) {
             return localTypes.getOrDefault(name, "Object");
+        }
+        
+        TypeExpr getLocalTypeExpr(String name) {
+            return localTypeExprs.getOrDefault(name, OBJECT_TYPE);
         }
     }
 }

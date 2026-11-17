@@ -29,13 +29,13 @@ docker run --rm ngj:latest --help
 docker run --rm ngj:latest --version
 
 # ソースファイルのチェック
-docker run --rm -v $(pwd)/examples:/src ngj:latest check /src/payment_service.ngj
+docker run --rm -v $(pwd)/examples:/src ngj:latest check /src/pricing.ngj
 
 # JSON形式で出力
-docker run --rm -v $(pwd)/examples:/src ngj:latest check --format=json /src/payment_service.ngj
+docker run --rm -v $(pwd)/examples:/src ngj:latest check --format=json /src/pricing.ngj
 
 # ビルド（クラスファイル生成）
-docker run --rm -v $(pwd)/examples:/src -v $(pwd)/out:/out ngj:latest build -o /out /src/payment_service.ngj
+docker run --rm -v $(pwd)/examples:/src -v $(pwd)/out:/out ngj:latest build -o /out /src/pricing.ngj
 ```
 
 ## イメージ構成

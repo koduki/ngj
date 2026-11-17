@@ -205,7 +205,7 @@ The following features are explicitly excluded and must be rejected with
 - [ ] Add `--enable-preview` to compile and runtime flags for `ACC_VALUE` classfile bits
 - [x] Implement structural `equals`/`hashCode` for `record` and `enum` variants
 - [x] Implement sealed hierarchy for enum variants
-- [x] Enforce no-`null` rule (language design: `Option<T>` instead of `null`)
+- [x] Enforce no-`null` rule (`NGJ-TYPE-020`)
 - [x] Implement value-based `==` comparison semantics (`Objects.equals` for composite value types)
 - [x] Enhance match exhaustiveness diagnostics (include missing variant names in `NGJ-MATCH-001`)
 - [x] Verify `Int`/`Long`/`Bool` behave as value types
