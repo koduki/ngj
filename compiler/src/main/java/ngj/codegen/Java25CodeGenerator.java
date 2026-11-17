@@ -38,6 +38,10 @@ public final class Java25CodeGenerator {
     // Value classes do NOT have this flag
     private static final int ACC_IDENTITY = 0x0020;
     
+    // ACC_STRICT flag (0x0800) for value class fields (JEP 401)
+    // Fields in value classes must be strict to ensure they are initialized before use
+    private static final int ACC_STRICT = 0x0800;
+    
     // Preview minor version flag for JEP 401 Value Objects
     private static final int PREVIEW_MINOR_VERSION = 65535;
     
@@ -56,10 +60,35 @@ public final class Java25CodeGenerator {
     
     private String currentModule;
     private Path outputDir = Path.of("build/classes");
+    private String target = "valhalla"; // Default target
     private final Map<String, RecordDecl> records = new HashMap<>();
     private final Map<String, DataDecl> datas = new HashMap<>();
     private final Map<String, EnumDecl> enums = new HashMap<>();
     private final Map<String, FnDecl> functions = new HashMap<>();
+    
+    public void setTarget(String target) {
+        this.target = target;
+    }
+    
+    private int getClassFileVersionForTarget() {
+        return switch (target) {
+            case "java25" -> 69; // JDK 25 class file version
+            case "valhalla-compat" -> 69; // JDK 25 with identity classes only
+            case "valhalla" -> CLASS_FILE_VERSION; // JDK 28 with value classes
+            default -> CLASS_FILE_VERSION;
+        };
+    }
+    
+    private int getMinorVersionForTarget() {
+        return switch (target) {
+            case "valhalla" -> PREVIEW_MINOR_VERSION; // Enable preview for value classes
+            default -> 0;
+        };
+    }
+    
+    private boolean isValueClassTarget() {
+        return target.equals("valhalla");
+    }
     
     public List<Path> generate(CompilationUnit unit) throws CodeGenException {
         currentModule = unit.modulePath();
@@ -81,6 +110,9 @@ public final class Java25CodeGenerator {
             var moduleDir = outputDir.resolve(currentModule.replace('.', '/'));
             Files.createDirectories(moduleDir);
             
+            // Generate standard library runtime classes (Option, Result)
+            outputs.addAll(generateRuntimeClasses());
+            
             for (var decl : unit.declarations()) {
                 var classFile = generateDecl(decl);
                 if (classFile != null) {
@@ -100,6 +132,277 @@ public final class Java25CodeGenerator {
         } catch (Exception e) {
             throw new CodeGenException("Code generation failed: " + e.getMessage(), e);
         }
+    }
+    
+    /**
+     * Generate Option and Result as standard library runtime classes.
+     * These are sealed ADT hierarchies per the specification.
+     */
+    private List<Path> generateRuntimeClasses() throws Exception {
+        var outputs = new ArrayList<Path>();
+        var runtimeDir = outputDir.resolve("ngj/runtime");
+        Files.createDirectories(runtimeDir);
+        
+        // Generate Option hierarchy
+        outputs.add(generateOptionBase(runtimeDir));
+        outputs.add(generateOptionSome(runtimeDir));
+        outputs.add(generateOptionNone(runtimeDir));
+        
+        // Generate Result hierarchy  
+        outputs.add(generateResultBase(runtimeDir));
+        outputs.add(generateResultOk(runtimeDir));
+        outputs.add(generateResultErr(runtimeDir));
+        
+        return outputs;
+    }
+    
+    private Path generateOptionBase(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Option";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var someDesc = ClassDesc.ofInternalName("ngj/runtime/Option$Some");
+        var noneDesc = ClassDesc.ofInternalName("ngj/runtime/Option$None");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            // Sealed abstract class
+            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            // PermittedSubclasses attribute for sealed hierarchy
+            classBuilder.with(PermittedSubclassesAttribute.ofSymbols(someDesc, noneDesc));
+            
+            // Protected no-arg constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME, 
+                MethodTypeDesc.of(ConstantDescs.CD_void), ACC_PROTECTED, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Option.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateOptionSome(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Option$Some";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Option");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            if (isValueClassTarget()) {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
+            classBuilder.withSuperclass(baseDesc);
+            
+            // Field: value
+            int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+            if (isValueClassTarget()) {
+                fieldFlags |= ACC_STRICT;
+            }
+            classBuilder.withField("value", ConstantDescs.CD_Object, fieldFlags);
+            
+            // Constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    if (isValueClassTarget()) {
+                        // Value class: fields before super
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "value", ConstantDescs.CD_Object);
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                    } else {
+                        // Identity class: super first
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "value", ConstantDescs.CD_Object);
+                    }
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Option$Some.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateOptionNone(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Option$None";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Option");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            if (isValueClassTarget()) {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
+            classBuilder.withSuperclass(baseDesc);
+            
+            // No fields - None has no payload
+            
+            // No-arg constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Option$None.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateResultBase(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Result";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var okDesc = ClassDesc.ofInternalName("ngj/runtime/Result$Ok");
+        var errDesc = ClassDesc.ofInternalName("ngj/runtime/Result$Err");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            // Sealed abstract class
+            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            classBuilder.withSuperclass(ConstantDescs.CD_Object);
+            
+            // PermittedSubclasses attribute for sealed hierarchy
+            classBuilder.with(PermittedSubclassesAttribute.ofSymbols(okDesc, errDesc));
+            
+            // Protected no-arg constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void), ACC_PROTECTED, mb -> {
+                mb.withCode(code -> {
+                    code.aload(0);
+                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Result.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateResultOk(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Result$Ok";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Result");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            if (isValueClassTarget()) {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
+            classBuilder.withSuperclass(baseDesc);
+            
+            // Field: value
+            int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+            if (isValueClassTarget()) {
+                fieldFlags |= ACC_STRICT;
+            }
+            classBuilder.withField("value", ConstantDescs.CD_Object, fieldFlags);
+            
+            // Constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    if (isValueClassTarget()) {
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "value", ConstantDescs.CD_Object);
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                    } else {
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "value", ConstantDescs.CD_Object);
+                    }
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Result$Ok.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
+    }
+    
+    private Path generateResultErr(Path runtimeDir) throws Exception {
+        var className = "ngj/runtime/Result$Err";
+        var classDesc = ClassDesc.ofInternalName(className);
+        var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Result");
+        
+        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            if (isValueClassTarget()) {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
+            classBuilder.withSuperclass(baseDesc);
+            
+            // Field: error
+            int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+            if (isValueClassTarget()) {
+                fieldFlags |= ACC_STRICT;
+            }
+            classBuilder.withField("error", ConstantDescs.CD_Object, fieldFlags);
+            
+            // Constructor
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object), ACC_PUBLIC, mb -> {
+                mb.withCode(code -> {
+                    if (isValueClassTarget()) {
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "error", ConstantDescs.CD_Object);
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                    } else {
+                        code.aload(0);
+                        code.invokespecial(baseDesc, ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                        code.aload(0);
+                        code.aload(1);
+                        code.putfield(classDesc, "error", ConstantDescs.CD_Object);
+                    }
+                    code.return_();
+                });
+            });
+        });
+        
+        var outputPath = runtimeDir.resolve("Result$Err.class");
+        Files.write(outputPath, classFile);
+        return outputPath;
     }
     
     public void setOutputDir(Path outputDir) {
@@ -129,8 +432,10 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         
         return ClassFile.of().build(classDesc, classBuilder -> {
-            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
-            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
+            // Function wrapper classes are always identity classes (not value classes)
+            // JDK 28 with preview features requires explicit ACC_IDENTITY for non-value classes
+            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
             var methodDesc = buildMethodDescriptor(fn);
@@ -295,6 +600,39 @@ public final class Java25CodeGenerator {
         };
     }
     
+    /**
+     * Infer the element type from a collection expression.
+     * For List<Int>, returns "Int". For unknown types, returns "Object".
+     */
+    private String inferElementType(CodeGenContext ctx, Expr iterableExpr) {
+        // Check if it's an identifier referencing a parameter with known List type
+        if (iterableExpr instanceof IdentExpr ident) {
+            // Look up the parameter in the function signature
+            for (var param : ctx.fn.params()) {
+                if (param.name().equals(ident.name())) {
+                    if (param.type() instanceof GenericTypeExpr gen) {
+                        if (gen.name().equals("List") && !gen.typeArgs().isEmpty()) {
+                            return getTypeName(gen.typeArgs().get(0));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // Check if it's a call that returns List
+        if (iterableExpr instanceof CallExpr call && call.callee() instanceof IdentExpr ident) {
+            if (functions.containsKey(ident.name())) {
+                var fn = functions.get(ident.name());
+                if (fn.returnType() instanceof GenericTypeExpr gen) {
+                    if (gen.name().equals("List") && !gen.typeArgs().isEmpty()) {
+                        return getTypeName(gen.typeArgs().get(0));
+                    }
+                }
+            }
+        }
+        return "Object";
+    }
+    
     private void generateBlock(CodeGenContext ctx, BlockExpr block) {
         for (var stmt : block.statements()) {
             generateStmt(ctx, stmt);
@@ -398,6 +736,9 @@ public final class Java25CodeGenerator {
     }
     
     private void generateFor(CodeGenContext ctx, ForExpr forExpr) {
+        // Infer element type from iterable
+        var elementType = inferElementType(ctx, forExpr.iterable());
+        
         // Generate iterable expression (should be List)
         generateExpr(ctx, forExpr.iterable());
         
@@ -451,17 +792,61 @@ public final class Java25CodeGenerator {
             MethodTypeDesc.of(ConstantDescs.CD_Object)
         );
         
-        // Store loop variable
-        int elemSlot = ctx.allocateLocal(forExpr.varName(), "Object");
-        ctx.code.astore(elemSlot);
+        // Unbox primitive element types
+        int elemSlot;
+        switch (elementType) {
+            case "Int" -> {
+                ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
+                ctx.code.invokevirtual(
+                    ClassDesc.of("java.lang.Integer"),
+                    "intValue",
+                    MethodTypeDesc.of(ConstantDescs.CD_int)
+                );
+                elemSlot = ctx.allocateLocal(forExpr.varName(), "Int");
+                ctx.code.istore(elemSlot);
+            }
+            case "Long" -> {
+                ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
+                ctx.code.invokevirtual(
+                    ClassDesc.of("java.lang.Long"),
+                    "longValue",
+                    MethodTypeDesc.of(ConstantDescs.CD_long)
+                );
+                elemSlot = ctx.allocateLocal(forExpr.varName(), "Long");
+                ctx.code.lstore(elemSlot);
+            }
+            case "Bool" -> {
+                ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
+                ctx.code.invokevirtual(
+                    ClassDesc.of("java.lang.Boolean"),
+                    "booleanValue",
+                    MethodTypeDesc.of(ConstantDescs.CD_boolean)
+                );
+                elemSlot = ctx.allocateLocal(forExpr.varName(), "Bool");
+                ctx.code.istore(elemSlot);
+            }
+            default -> {
+                elemSlot = ctx.allocateLocal(forExpr.varName(), elementType);
+                ctx.code.astore(elemSlot);
+            }
+        }
         
         // Generate body
         generateBlock(ctx, forExpr.body());
         
         if (forExpr.hasYield()) {
+            // Box primitive values for adding to list
+            if (forExpr.body().tailExpr() != null) {
+                boxIfPrimitive(ctx, forExpr.body().tailExpr());
+            }
+            
+            // Store the yield result in a temp variable
+            int yieldSlot = ctx.allocateLocal("$yield$" + ctx.nextSlot, "Object");
+            ctx.code.astore(yieldSlot);
+            
             // Add result to list
             ctx.code.aload(resultListSlot);
-            ctx.code.swap();
+            ctx.code.aload(yieldSlot);
             ctx.code.invokeinterface(
                 ClassDesc.of("java.util.List"),
                 "add",
@@ -515,7 +900,10 @@ public final class Java25CodeGenerator {
                 default -> ctx.code.aload(slot);
             }
         } else {
-            ctx.code.aconst_null();
+            // Unresolved identifier - this should have been caught by type checking
+            throw new IllegalStateException(
+                "Unresolved identifier '" + ident.name() + "' at codegen. " +
+                "This indicates a type checker bug - unresolved identifiers should be diagnosed.");
         }
     }
     
@@ -679,50 +1067,52 @@ public final class Java25CodeGenerator {
             var methodName = ident.name();
             
             switch (methodName) {
-                // STDLIB-03: Result constructors - wrap in Optional-like structure
+                // STDLIB-03: Result constructors - ngj.runtime.Result ADT
                 case "Ok" -> {
-                    ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
                     ctx.code.dup();
-                    ctx.code.ldc("Ok");
                     generateExpr(ctx, call.args().get(0));
                     boxIfPrimitive(ctx, call.args().get(0));
                     ctx.code.invokespecial(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                        ClassDesc.ofInternalName("ngj/runtime/Result$Ok"),
                         ConstantDescs.INIT_NAME,
-                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                     );
                     return;
                 }
                 case "Err" -> {
-                    ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
                     ctx.code.dup();
-                    ctx.code.ldc("Err");
                     generateExpr(ctx, call.args().get(0));
                     boxIfPrimitive(ctx, call.args().get(0));
                     ctx.code.invokespecial(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                        ClassDesc.ofInternalName("ngj/runtime/Result$Err"),
                         ConstantDescs.INIT_NAME,
-                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                     );
                     return;
                 }
                 
-                // STDLIB-02: Option constructors using java.util.Optional
+                // STDLIB-02: Option constructors - ngj.runtime.Option ADT
                 case "Some" -> {
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                    ctx.code.dup();
                     generateExpr(ctx, call.args().get(0));
                     boxIfPrimitive(ctx, call.args().get(0));
-                    ctx.code.invokestatic(
-                        ClassDesc.of("java.util.Optional"),
-                        "of",
-                        MethodTypeDesc.of(ClassDesc.of("java.util.Optional"), ConstantDescs.CD_Object)
+                    ctx.code.invokespecial(
+                        ClassDesc.ofInternalName("ngj/runtime/Option$Some"),
+                        ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                     );
                     return;
                 }
                 case "None" -> {
-                    ctx.code.invokestatic(
-                        ClassDesc.of("java.util.Optional"),
-                        "empty",
-                        MethodTypeDesc.of(ClassDesc.of("java.util.Optional"))
+                    ctx.code.new_(ClassDesc.ofInternalName("ngj/runtime/Option$None"));
+                    ctx.code.dup();
+                    ctx.code.invokespecial(
+                        ClassDesc.ofInternalName("ngj/runtime/Option$None"),
+                        ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void)
                     );
                     return;
                 }
@@ -738,25 +1128,37 @@ public final class Java25CodeGenerator {
                 }
                 case "listOf" -> {
                     if (call.args().isEmpty()) {
+                        // Empty immutable list via List.of()
                         ctx.code.invokestatic(
                             ClassDesc.of("java.util.List"),
                             "of",
                             MethodTypeDesc.of(ClassDesc.of("java.util.List"))
                         );
                     } else {
-                        ctx.code.ldc(call.args().size());
-                        ctx.code.anewarray(ConstantDescs.CD_Object);
+                        // Build ArrayList then wrap in unmodifiableList for immutability
+                        ctx.code.new_(ClassDesc.of("java.util.ArrayList"));
+                        ctx.code.dup();
+                        ctx.code.invokespecial(
+                            ClassDesc.of("java.util.ArrayList"),
+                            ConstantDescs.INIT_NAME,
+                            MethodTypeDesc.of(ConstantDescs.CD_void)
+                        );
                         for (int i = 0; i < call.args().size(); i++) {
                             ctx.code.dup();
-                            ctx.code.ldc(i);
                             generateExpr(ctx, call.args().get(i));
                             boxIfPrimitive(ctx, call.args().get(i));
-                            ctx.code.aastore();
+                            ctx.code.invokeinterface(
+                                ClassDesc.of("java.util.List"),
+                                "add",
+                                MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+                            );
+                            ctx.code.pop(); // discard boolean
                         }
+                        // Wrap in unmodifiableList for STDLIB immutability guarantee
                         ctx.code.invokestatic(
-                            ClassDesc.of("java.util.List"),
-                            "of",
-                            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ConstantDescs.CD_Object.arrayType())
+                            ClassDesc.of("java.util.Collections"),
+                            "unmodifiableList",
+                            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ClassDesc.of("java.util.List"))
                         );
                     }
                     return;
@@ -909,64 +1311,46 @@ public final class Java25CodeGenerator {
                     return;
                 }
                 
-                // Option/Result predicates
+                // Option/Result predicates using ngj.runtime classes
                 case "isSome" -> {
                     generateExpr(ctx, call.args().get(0));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.Optional"),
-                        "isPresent",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
                     return;
                 }
                 case "isNone" -> {
                     generateExpr(ctx, call.args().get(0));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.Optional"),
-                        "isEmpty",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Option$None"));
                     return;
                 }
                 case "isOk" -> {
                     generateExpr(ctx, call.args().get(0));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-                        "getKey",
-                        MethodTypeDesc.of(ConstantDescs.CD_Object)
-                    );
-                    ctx.code.ldc("Ok");
-                    ctx.code.invokevirtual(
-                        ConstantDescs.CD_Object,
-                        "equals",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
                     return;
                 }
                 case "isErr" -> {
                     generateExpr(ctx, call.args().get(0));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-                        "getKey",
-                        MethodTypeDesc.of(ConstantDescs.CD_Object)
-                    );
-                    ctx.code.ldc("Err");
-                    ctx.code.invokevirtual(
-                        ConstantDescs.CD_Object,
-                        "equals",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
                     return;
                 }
                 case "getOrElse" -> {
                     var defaultType = inferTypeName(ctx, call.args().get(1));
                     generateExpr(ctx, call.args().get(0));
+                    var optSlot = ctx.allocateLocal("$opt$" + ctx.nextSlot, "Object");
+                    ctx.code.astore(optSlot);
                     generateExpr(ctx, call.args().get(1));
                     boxIfPrimitive(ctx, call.args().get(1));
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.Optional"),
-                        "orElse",
-                        MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                    var defSlot = ctx.allocateLocal("$def$" + ctx.nextSlot, "Object");
+                    ctx.code.astore(defSlot);
+                    
+                    ctx.code.aload(optSlot);
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                    ctx.code.ifThenElse(Opcode.IFNE,
+                        tb -> {
+                            tb.aload(optSlot);
+                            tb.checkcast(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                            tb.getfield(ClassDesc.ofInternalName("ngj/runtime/Option$Some"), "value", ConstantDescs.CD_Object);
+                        },
+                        fb -> fb.aload(defSlot)
                     );
                     unboxIfNeeded(ctx, defaultType);
                     return;
@@ -975,37 +1359,31 @@ public final class Java25CodeGenerator {
                     generateExpr(ctx, call.args().get(0));
                     var resSlot = ctx.allocateLocal("$res$" + ctx.nextSlot, "Object");
                     ctx.code.astore(resSlot);
+                    
                     ctx.code.aload(resSlot);
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-                        "getKey",
-                        MethodTypeDesc.of(ConstantDescs.CD_Object)
-                    );
-                    ctx.code.ldc("Ok");
-                    ctx.code.invokevirtual(
-                        ConstantDescs.CD_Object,
-                        "equals",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
                     ctx.code.ifThenElse(Opcode.IFNE,
                         tb -> {
+                            tb.new_(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                            tb.dup();
                             tb.aload(resSlot);
-                            tb.invokevirtual(
-                                ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-                                "getValue",
-                                MethodTypeDesc.of(ConstantDescs.CD_Object)
-                            );
-                            tb.invokestatic(
-                                ClassDesc.of("java.util.Optional"),
-                                "of",
-                                MethodTypeDesc.of(ClassDesc.of("java.util.Optional"), ConstantDescs.CD_Object)
+                            tb.checkcast(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
+                            tb.getfield(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"), "value", ConstantDescs.CD_Object);
+                            tb.invokespecial(
+                                ClassDesc.ofInternalName("ngj/runtime/Option$Some"),
+                                ConstantDescs.INIT_NAME,
+                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                             );
                         },
-                        fb -> fb.invokestatic(
-                            ClassDesc.of("java.util.Optional"),
-                            "empty",
-                            MethodTypeDesc.of(ClassDesc.of("java.util.Optional"))
-                        )
+                        fb -> {
+                            fb.new_(ClassDesc.ofInternalName("ngj/runtime/Option$None"));
+                            fb.dup();
+                            fb.invokespecial(
+                                ClassDesc.ofInternalName("ngj/runtime/Option$None"),
+                                ConstantDescs.INIT_NAME,
+                                MethodTypeDesc.of(ConstantDescs.CD_void)
+                            );
+                        }
                     );
                     return;
                 }
@@ -1017,38 +1395,30 @@ public final class Java25CodeGenerator {
                     boxIfPrimitive(ctx, call.args().get(1));
                     var errSlot = ctx.allocateLocal("$err$" + ctx.nextSlot, "Object");
                     ctx.code.astore(errSlot);
+                    
                     ctx.code.aload(optSlot);
-                    ctx.code.invokevirtual(
-                        ClassDesc.of("java.util.Optional"),
-                        "isPresent",
-                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
-                    );
+                    ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
                     ctx.code.ifThenElse(Opcode.IFNE,
                         tb -> {
-                            tb.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+                            tb.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
                             tb.dup();
-                            tb.ldc("Ok");
                             tb.aload(optSlot);
-                            tb.invokevirtual(
-                                ClassDesc.of("java.util.Optional"),
-                                "get",
-                                MethodTypeDesc.of(ConstantDescs.CD_Object)
-                            );
+                            tb.checkcast(ClassDesc.ofInternalName("ngj/runtime/Option$Some"));
+                            tb.getfield(ClassDesc.ofInternalName("ngj/runtime/Option$Some"), "value", ConstantDescs.CD_Object);
                             tb.invokespecial(
-                                ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                                ClassDesc.ofInternalName("ngj/runtime/Result$Ok"),
                                 ConstantDescs.INIT_NAME,
-                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                             );
                         },
                         fb -> {
-                            fb.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+                            fb.new_(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
                             fb.dup();
-                            fb.ldc("Err");
                             fb.aload(errSlot);
                             fb.invokespecial(
-                                ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                                ClassDesc.ofInternalName("ngj/runtime/Result$Err"),
                                 ConstantDescs.INIT_NAME,
-                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+                                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object)
                             );
                         }
                     );
@@ -1305,19 +1675,300 @@ public final class Java25CodeGenerator {
             generateExpr(ctx, field.value());
         }
         
-        var paramTypes = new ClassDesc[ctor.fields().size()];
-        Arrays.fill(paramTypes, ConstantDescs.CD_Object);
+        // Look up the actual constructor parameter types from the record/data declaration
+        ClassDesc[] paramTypes;
+        if (records.containsKey(ctor.typePath())) {
+            var rec = records.get(ctor.typePath());
+            paramTypes = rec.params().stream()
+                .map(p -> typeToClassDesc(p.type()))
+                .toArray(ClassDesc[]::new);
+        } else if (datas.containsKey(ctor.typePath())) {
+            var data = datas.get(ctor.typePath());
+            paramTypes = data.fields().stream()
+                .map(f -> typeToClassDesc(f.type()))
+                .toArray(ClassDesc[]::new);
+        } else {
+            // Fallback to Object for unknown types
+            paramTypes = new ClassDesc[ctor.fields().size()];
+            Arrays.fill(paramTypes, ConstantDescs.CD_Object);
+        }
         var ctorDesc = MethodTypeDesc.of(ConstantDescs.CD_void, paramTypes);
         
         ctx.code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
     }
     
     private void generateMatch(CodeGenContext ctx, MatchExpr matchExpr) {
+        // Evaluate scrutinee and store in local variable
         generateExpr(ctx, matchExpr.scrutinee());
+        var scrutineeSlot = ctx.allocateLocal("$match$scrutinee", "Object");
+        ctx.code.astore(scrutineeSlot);
         
-        if (!matchExpr.arms().isEmpty()) {
-            ctx.code.pop();
-            generateExpr(ctx, matchExpr.arms().get(0).body());
+        // Infer scrutinee type for Option/Result field type resolution
+        String scrutineeType = inferTypeName(ctx, matchExpr.scrutinee());
+        String innerType = inferGenericInnerType(ctx, matchExpr.scrutinee());
+        
+        var endLabel = ctx.code.newLabel();
+        var arms = matchExpr.arms();
+        
+        // Track next arm labels for conditional patterns
+        Label nextArmLabel = null;
+        
+        for (int i = 0; i < arms.size(); i++) {
+            var arm = arms.get(i);
+            var pattern = arm.pattern();
+            var isLastArm = (i == arms.size() - 1);
+            
+            // Bind previous arm's fallthrough label if any
+            if (nextArmLabel != null) {
+                ctx.code.labelBinding(nextArmLabel);
+                nextArmLabel = null;
+            }
+            
+            switch (pattern) {
+                case WildcardPattern _ -> {
+                    // Wildcard matches everything - just evaluate body
+                    generateExpr(ctx, arm.body());
+                    if (!isLastArm) {
+                        ctx.code.goto_(endLabel);
+                    }
+                }
+                
+                case BindingPattern binding -> {
+                    // Bind scrutinee to variable and evaluate body
+                    ctx.code.aload(scrutineeSlot);
+                    var bindSlot = ctx.allocateLocal(binding.name(), scrutineeType);
+                    ctx.code.astore(bindSlot);
+                    generateExpr(ctx, arm.body());
+                    if (!isLastArm) {
+                        ctx.code.goto_(endLabel);
+                    }
+                }
+                
+                case LiteralPattern literal -> {
+                    // Compare with literal value
+                    if (!isLastArm) {
+                        nextArmLabel = ctx.code.newLabel();
+                    }
+                    ctx.code.aload(scrutineeSlot);
+                    generateExpr(ctx, literal.literal());
+                    // Box primitive if needed for equals comparison
+                    boxIfNeeded(ctx, literal.literal());
+                    ctx.code.invokevirtual(
+                        ConstantDescs.CD_Object,
+                        "equals",
+                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+                    );
+                    if (!isLastArm) {
+                        ctx.code.ifeq(nextArmLabel);
+                    } else {
+                        // Last arm - pop the boolean and proceed (exhaustive match assumed)
+                        ctx.code.pop();
+                    }
+                    generateExpr(ctx, arm.body());
+                    if (!isLastArm) {
+                        ctx.code.goto_(endLabel);
+                    }
+                }
+                
+                case ConstructorPattern ctor -> {
+                    // Check instanceof variant class and extract fields
+                    var typePath = ctor.typePath();
+                    
+                    // Resolve variant class - could be EnumName.Variant or just Variant
+                    ClassDesc variantClass = resolveVariantClass(ctx, typePath);
+                    
+                    if (!isLastArm) {
+                        nextArmLabel = ctx.code.newLabel();
+                        ctx.code.aload(scrutineeSlot);
+                        ctx.code.instanceOf(variantClass);
+                        ctx.code.ifeq(nextArmLabel);
+                    }
+                    // For last arm, we assume exhaustive match and don't need to check
+                    
+                    // Extract fields from variant - use innerType for Option/Result
+                    if (!ctor.fields().isEmpty()) {
+                        ctx.code.aload(scrutineeSlot);
+                        ctx.code.checkcast(variantClass);
+                        var castedSlot = ctx.allocateLocal("$match$casted", typePath);
+                        ctx.code.astore(castedSlot);
+                        
+                        for (int fieldIdx = 0; fieldIdx < ctor.fields().size(); fieldIdx++) {
+                            var field = ctor.fields().get(fieldIdx);
+                            if (field.pattern() instanceof BindingPattern bindPat) {
+                                ctx.code.aload(castedSlot);
+                                
+                                // Resolve the actual field name in the variant class
+                                // For Option/Result ADTs, the field names are fixed
+                                String actualFieldName = resolveVariantFieldName(typePath, field.name(), fieldIdx);
+                                ctx.code.getfield(variantClass, actualFieldName, ConstantDescs.CD_Object);
+                                
+                                // For Option/Result, use the inner type for field bindings
+                                String fieldType = (scrutineeType.equals("Option") || scrutineeType.equals("Result")) 
+                                    ? innerType : lookupEnumVariantFieldType(typePath, actualFieldName);
+                                
+                                // Unbox if needed
+                                if (fieldType.equals("Int")) {
+                                    ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
+                                    ctx.code.invokevirtual(
+                                        ClassDesc.of("java.lang.Integer"),
+                                        "intValue",
+                                        MethodTypeDesc.of(ConstantDescs.CD_int)
+                                    );
+                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), "Int");
+                                    ctx.code.istore(fieldSlot);
+                                } else if (fieldType.equals("Long")) {
+                                    ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
+                                    ctx.code.invokevirtual(
+                                        ClassDesc.of("java.lang.Long"),
+                                        "longValue",
+                                        MethodTypeDesc.of(ConstantDescs.CD_long)
+                                    );
+                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), "Long");
+                                    ctx.code.lstore(fieldSlot);
+                                } else if (fieldType.equals("Bool")) {
+                                    ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
+                                    ctx.code.invokevirtual(
+                                        ClassDesc.of("java.lang.Boolean"),
+                                        "booleanValue",
+                                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
+                                    );
+                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), "Bool");
+                                    ctx.code.istore(fieldSlot);
+                                } else {
+                                    var fieldSlot = ctx.allocateLocal(bindPat.name(), fieldType);
+                                    ctx.code.astore(fieldSlot);
+                                }
+                            }
+                        }
+                    }
+                    
+                    generateExpr(ctx, arm.body());
+                    if (!isLastArm) {
+                        ctx.code.goto_(endLabel);
+                    }
+                }
+            }
+        }
+        
+        ctx.code.labelBinding(endLabel);
+    }
+    
+    private String inferGenericInnerType(CodeGenContext ctx, Expr expr) {
+        // For Option<T> or Result<T, E>, return T
+        if (expr instanceof IdentExpr ident) {
+            // Look up in function parameters
+            for (var param : ctx.fn.params()) {
+                if (param.name().equals(ident.name())) {
+                    if (param.type() instanceof GenericTypeExpr gen) {
+                        if (!gen.typeArgs().isEmpty()) {
+                            return getTypeName(gen.typeArgs().get(0));
+                        }
+                    }
+                }
+            }
+        }
+        return "Object";
+    }
+    
+    private ClassDesc resolveVariantClass(CodeGenContext ctx, String typePath) {
+        // Handle Option/Result builtins
+        if (typePath.equals("Some") || typePath.equals("None")) {
+            return ClassDesc.ofInternalName("ngj/runtime/Option$" + typePath);
+        }
+        if (typePath.equals("Ok") || typePath.equals("Err")) {
+            return ClassDesc.ofInternalName("ngj/runtime/Result$" + typePath);
+        }
+        
+        // Handle qualified paths like "Color.Red" or simple names like "Red"
+        if (typePath.contains(".")) {
+            var parts = typePath.split("\\.");
+            var enumName = parts[0];
+            var variantName = parts[1];
+            return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + enumName + "$" + variantName);
+        }
+        
+        // Try to find in known enums
+        for (var entry : enums.entrySet()) {
+            for (var variant : entry.getValue().variants()) {
+                if (variant.name().equals(typePath)) {
+                    return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + entry.getKey() + "$" + typePath);
+                }
+            }
+        }
+        
+        // Fallback: assume it's a qualified variant in current module
+        return ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + typePath);
+    }
+    
+    /**
+     * Resolve the actual field name in a variant class.
+     * For Option/Result ADTs, the field names are fixed:
+     * - Some: "value"
+     * - Ok: "value"
+     * - Err: "error"
+     * For user-defined enums, use the declared field name from the enum definition.
+     */
+    private String resolveVariantFieldName(String typePath, String patternFieldName, int fieldIndex) {
+        // Built-in Option/Result ADT field names
+        if (typePath.equals("Some") || typePath.equals("Ok")) {
+            return "value";
+        }
+        if (typePath.equals("Err")) {
+            return "error";
+        }
+        
+        // For user-defined enums, look up the declared field name
+        for (var entry : enums.entrySet()) {
+            for (var variant : entry.getValue().variants()) {
+                if (variant.name().equals(typePath)) {
+                    var fields = variant.fields();
+                    if (fieldIndex < fields.size()) {
+                        return fields.get(fieldIndex).name();
+                    }
+                }
+            }
+        }
+        
+        // Fallback to pattern field name (might not match, but best effort)
+        return patternFieldName;
+    }
+    
+    /**
+     * Look up the type of a field in an enum variant.
+     */
+    private String lookupEnumVariantFieldType(String typePath, String fieldName) {
+        for (var entry : enums.entrySet()) {
+            for (var variant : entry.getValue().variants()) {
+                if (variant.name().equals(typePath)) {
+                    for (var field : variant.fields()) {
+                        if (field.name().equals(fieldName)) {
+                            return getTypeName(field.type());
+                        }
+                    }
+                }
+            }
+        }
+        return "Object";
+    }
+    
+    private void boxIfNeeded(CodeGenContext ctx, LiteralExpr literal) {
+        switch (literal.kind()) {
+            case INT -> ctx.code.invokestatic(
+                ClassDesc.of("java.lang.Integer"),
+                "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Integer"), ConstantDescs.CD_int)
+            );
+            case LONG -> ctx.code.invokestatic(
+                ClassDesc.of("java.lang.Long"),
+                "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Long"), ConstantDescs.CD_long)
+            );
+            case BOOL -> ctx.code.invokestatic(
+                ClassDesc.of("java.lang.Boolean"),
+                "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Boolean"), ConstantDescs.CD_boolean)
+            );
+            default -> {} // String and Unit don't need boxing
         }
     }
     
@@ -1327,32 +1978,22 @@ public final class Java25CodeGenerator {
         var resSlot = ctx.allocateLocal("$prop$" + ctx.nextSlot, "Object");
         ctx.code.astore(resSlot);
         
+        // Check if it's an Err using instanceof
         ctx.code.aload(resSlot);
-        ctx.code.invokevirtual(
-            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-            "getKey",
-            MethodTypeDesc.of(ConstantDescs.CD_Object)
-        );
-        ctx.code.ldc("Err");
-        ctx.code.invokevirtual(
-            ConstantDescs.CD_Object,
-            "equals",
-            MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
-        );
+        ctx.code.instanceOf(ClassDesc.ofInternalName("ngj/runtime/Result$Err"));
         
         var okLabel = ctx.code.newLabel();
         ctx.code.ifeq(okLabel);
         
+        // It's an Err - return early
         ctx.code.aload(resSlot);
         ctx.code.areturn();
         
+        // It's Ok - extract the value
         ctx.code.labelBinding(okLabel);
         ctx.code.aload(resSlot);
-        ctx.code.invokevirtual(
-            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
-            "getValue",
-            MethodTypeDesc.of(ConstantDescs.CD_Object)
-        );
+        ctx.code.checkcast(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"));
+        ctx.code.getfield(ClassDesc.ofInternalName("ngj/runtime/Result$Ok"), "value", ConstantDescs.CD_Object);
         unboxIfNeeded(ctx, unwrappedType);
     }
     
@@ -1386,7 +2027,7 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         
         return ClassFile.of().build(classDesc, classBuilder -> {
-            classBuilder.withVersion(CLASS_FILE_VERSION, 0);
+            classBuilder.withVersion(getClassFileVersionForTarget(), 0);
             classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
@@ -1463,16 +2104,26 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         
         return ClassFile.of().build(classDesc, classBuilder -> {
-            // VALUE-01: Use preview minor version for JEP 401
-            classBuilder.withVersion(CLASS_FILE_VERSION, PREVIEW_MINOR_VERSION);
-            // VALUE-01: NO ACC_IDENTITY flag - this is a value class
-            // ACC_FINAL is implicit for value classes, but we include it for clarity
-            classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            if (isValueClassTarget()) {
+                // VALUE-01: Use preview minor version for JEP 401
+                classBuilder.withVersion(getClassFileVersionForTarget(), PREVIEW_MINOR_VERSION);
+                // VALUE-01: NO ACC_IDENTITY flag - this is a value class
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+            } else {
+                // Identity class for non-valhalla targets
+                classBuilder.withVersion(getClassFileVersionForTarget(), 0);
+                classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+            }
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
             for (var param : record.params()) {
                 var fieldDesc = typeToClassDesc(param.type());
-                classBuilder.withField(param.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL);
+                // JEP 401: Value class fields must be strict (only for valhalla target)
+                int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+                if (isValueClassTarget()) {
+                    fieldFlags |= ACC_STRICT;
+                }
+                classBuilder.withField(param.name(), fieldDesc, fieldFlags);
             }
             
             var ctorParamTypes = record.params().stream()
@@ -1482,24 +2133,49 @@ public final class Java25CodeGenerator {
             
             classBuilder.withMethod(ConstantDescs.INIT_NAME, ctorDesc, ACC_PUBLIC, mb -> {
                 mb.withCode(code -> {
-                    code.aload(0);
-                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME, 
-                        MethodTypeDesc.of(ConstantDescs.CD_void));
-                    
-                    int slot = 1;
-                    for (var param : record.params()) {
-                        code.aload(0);
-                        var typeName = getTypeName(param.type());
-                        var fieldDesc = typeToClassDesc(param.type());
-                        if (typeName.equals("Int") || typeName.equals("Bool")) {
-                            code.iload(slot++);
-                        } else if (typeName.equals("Long")) {
-                            code.lload(slot);
-                            slot += 2;
-                        } else {
-                            code.aload(slot++);
+                    if (isValueClassTarget()) {
+                        // JEP 401: Value class constructor must assign ALL fields BEFORE super()
+                        // This is the strict initialization order required for value classes
+                        int slot = 1;
+                        for (var param : record.params()) {
+                            code.aload(0);
+                            var typeName = getTypeName(param.type());
+                            var fieldDesc = typeToClassDesc(param.type());
+                            if (typeName.equals("Int") || typeName.equals("Bool")) {
+                                code.iload(slot++);
+                            } else if (typeName.equals("Long")) {
+                                code.lload(slot);
+                                slot += 2;
+                            } else {
+                                code.aload(slot++);
+                            }
+                            code.putfield(classDesc, param.name(), fieldDesc);
                         }
-                        code.putfield(classDesc, param.name(), fieldDesc);
+                        // super() after field assignments for value classes
+                        code.aload(0);
+                        code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME, 
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                    } else {
+                        // Identity class: standard super() first, then fields
+                        code.aload(0);
+                        code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME, 
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                        
+                        int slot = 1;
+                        for (var param : record.params()) {
+                            code.aload(0);
+                            var typeName = getTypeName(param.type());
+                            var fieldDesc = typeToClassDesc(param.type());
+                            if (typeName.equals("Int") || typeName.equals("Bool")) {
+                                code.iload(slot++);
+                            } else if (typeName.equals("Long")) {
+                                code.lload(slot);
+                                slot += 2;
+                            } else {
+                                code.aload(slot++);
+                            }
+                            code.putfield(classDesc, param.name(), fieldDesc);
+                        }
                     }
                     
                     code.return_();
@@ -1621,11 +2297,15 @@ public final class Java25CodeGenerator {
             .toList();
         
         return ClassFile.of().build(classDesc, classBuilder -> {
-            // VALUE-01: Use preview minor version for JEP 401
-            classBuilder.withVersion(CLASS_FILE_VERSION, PREVIEW_MINOR_VERSION);
-            // VALUE-01: NO ACC_IDENTITY flag - this is a value class base
-            // ACC_ABSTRACT for the sealed base type
-            classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            if (isValueClassTarget()) {
+                // VALUE-01: Use preview minor version for JEP 401
+                classBuilder.withVersion(getClassFileVersionForTarget(), PREVIEW_MINOR_VERSION);
+                // VALUE-01: NO ACC_IDENTITY flag - this is a value class base
+                classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
+            } else {
+                classBuilder.withVersion(getClassFileVersionForTarget(), 0);
+                classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT | ACC_IDENTITY);
+            }
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
             
             // Add PermittedSubclasses attribute for sealed hierarchy
@@ -1669,15 +2349,25 @@ public final class Java25CodeGenerator {
                 final var finalVariantClassDesc = variantClassDesc;
                 
                 var classFile = ClassFile.of().build(variantClassDesc, classBuilder -> {
-                    // VALUE-01: Use preview minor version, NO ACC_IDENTITY
-                    classBuilder.withVersion(CLASS_FILE_VERSION, PREVIEW_MINOR_VERSION);
-                    classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+                    if (isValueClassTarget()) {
+                        // VALUE-01: Use preview minor version, NO ACC_IDENTITY
+                        classBuilder.withVersion(getClassFileVersionForTarget(), PREVIEW_MINOR_VERSION);
+                        classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
+                    } else {
+                        classBuilder.withVersion(getClassFileVersionForTarget(), 0);
+                        classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL | ACC_IDENTITY);
+                    }
                     classBuilder.withSuperclass(baseClassDesc);
                     
                     // Add fields for variant payload
                     for (var field : variantFields) {
                         var fieldDesc = typeToClassDesc(field.type());
-                        classBuilder.withField(field.name(), fieldDesc, ACC_PUBLIC | ACC_FINAL);
+                        // JEP 401: Value class fields must be strict (only for valhalla target)
+                        int fieldFlags = ACC_PUBLIC | ACC_FINAL;
+                        if (isValueClassTarget()) {
+                            fieldFlags |= ACC_STRICT;
+                        }
+                        classBuilder.withField(field.name(), fieldDesc, fieldFlags);
                     }
                     
                     // Constructor
@@ -1688,24 +2378,48 @@ public final class Java25CodeGenerator {
                     
                     classBuilder.withMethod(ConstantDescs.INIT_NAME, ctorDesc, ACC_PUBLIC, mb -> {
                         mb.withCode(code -> {
-                            code.aload(0);
-                            code.invokespecial(baseClassDesc, ConstantDescs.INIT_NAME,
-                                MethodTypeDesc.of(ConstantDescs.CD_void));
-                            
-                            int slot = 1;
-                            for (var field : variantFields) {
-                                code.aload(0);
-                                var typeName = getTypeName(field.type());
-                                var fieldDesc = typeToClassDesc(field.type());
-                                if (typeName.equals("Int") || typeName.equals("Bool")) {
-                                    code.iload(slot++);
-                                } else if (typeName.equals("Long")) {
-                                    code.lload(slot);
-                                    slot += 2;
-                                } else {
-                                    code.aload(slot++);
+                            if (isValueClassTarget()) {
+                                // JEP 401: Value class constructor must assign ALL fields BEFORE super()
+                                int slot = 1;
+                                for (var field : variantFields) {
+                                    code.aload(0);
+                                    var typeName = getTypeName(field.type());
+                                    var fieldDesc = typeToClassDesc(field.type());
+                                    if (typeName.equals("Int") || typeName.equals("Bool")) {
+                                        code.iload(slot++);
+                                    } else if (typeName.equals("Long")) {
+                                        code.lload(slot);
+                                        slot += 2;
+                                    } else {
+                                        code.aload(slot++);
+                                    }
+                                    code.putfield(finalVariantClassDesc, field.name(), fieldDesc);
                                 }
-                                code.putfield(finalVariantClassDesc, field.name(), fieldDesc);
+                                // super() after field assignments for value classes
+                                code.aload(0);
+                                code.invokespecial(baseClassDesc, ConstantDescs.INIT_NAME,
+                                    MethodTypeDesc.of(ConstantDescs.CD_void));
+                            } else {
+                                // Identity class: standard super() first, then fields
+                                code.aload(0);
+                                code.invokespecial(baseClassDesc, ConstantDescs.INIT_NAME,
+                                    MethodTypeDesc.of(ConstantDescs.CD_void));
+                                
+                                int slot = 1;
+                                for (var field : variantFields) {
+                                    code.aload(0);
+                                    var typeName = getTypeName(field.type());
+                                    var fieldDesc = typeToClassDesc(field.type());
+                                    if (typeName.equals("Int") || typeName.equals("Bool")) {
+                                        code.iload(slot++);
+                                    } else if (typeName.equals("Long")) {
+                                        code.lload(slot);
+                                        slot += 2;
+                                    } else {
+                                        code.aload(slot++);
+                                    }
+                                    code.putfield(finalVariantClassDesc, field.name(), fieldDesc);
+                                }
                             }
                             
                             code.return_();
