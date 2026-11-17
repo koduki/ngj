@@ -694,6 +694,329 @@ class JDK28RuntimeTest {
     }
     
     /**
+     * Verify option_match.ngj: unwrapOrDefault with real Option values.
+     */
+    @Test
+    void runtimeVerify_optionMatch_returnsCorrectResults() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = readFixture("positive/option_match.ngj");
+        
+        var lexer = new Lexer(source, "option_match.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            Class<?> unwrapFn = loadFunction(loader, outputs, "unwrapOrDefault");
+            assertNotNull(unwrapFn, "unwrapOrDefault function should be loaded");
+            
+            // Get Option runtime classes
+            Class<?> someClass = Class.forName("ngj.runtime.Option$Some", true, loader);
+            Class<?> noneClass = Class.forName("ngj.runtime.Option$None", true, loader);
+            
+            // Create Some(42) and None() instances
+            Object some42 = someClass.getConstructor(Object.class).newInstance(42);
+            Object none = noneClass.getConstructor().newInstance();
+            
+            // Test unwrapOrDefault(Some(42), 0) = 42
+            Method invoke = unwrapFn.getMethod("invoke", Object.class, int.class);
+            Object result1 = invoke.invoke(null, some42, 0);
+            assertEquals(42, result1, "unwrapOrDefault(Some(42), 0) should return 42");
+            
+            // Test unwrapOrDefault(None(), 99) = 99
+            Object result2 = invoke.invoke(null, none, 99);
+            assertEquals(99, result2, "unwrapOrDefault(None(), 99) should return 99");
+            
+            System.out.println("SUCCESS: option_match unwrapOrDefault works correctly");
+            System.out.println("  unwrapOrDefault(Some(42), 0) = " + result1);
+            System.out.println("  unwrapOrDefault(None(), 99) = " + result2);
+        }
+    }
+    
+    /**
+     * Verify result_option.ngj: safeDivide and doubleOrZero with real values.
+     */
+    @Test
+    void runtimeVerify_resultOption_returnsCorrectResults() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = readFixture("positive/result_option.ngj");
+        
+        var lexer = new Lexer(source, "result_option.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            Class<?> safeDivideFn = loadFunction(loader, outputs, "safeDivide");
+            Class<?> doubleOrZeroFn = loadFunction(loader, outputs, "doubleOrZero");
+            
+            assertNotNull(safeDivideFn, "safeDivide function should be loaded");
+            assertNotNull(doubleOrZeroFn, "doubleOrZero function should be loaded");
+            
+            // Test safeDivide(10, 2) returns Ok(5)
+            Method divideInvoke = safeDivideFn.getMethod("invoke", int.class, int.class);
+            Object result1 = divideInvoke.invoke(null, 10, 2);
+            assertNotNull(result1, "safeDivide(10, 2) should return a Result");
+            assertTrue(result1.getClass().getName().contains("Ok"), 
+                "safeDivide(10, 2) should return Ok, got: " + result1.getClass().getName());
+            
+            // Test safeDivide(10, 0) returns Err
+            Object result2 = divideInvoke.invoke(null, 10, 0);
+            assertNotNull(result2, "safeDivide(10, 0) should return a Result");
+            assertTrue(result2.getClass().getName().contains("Err"),
+                "safeDivide(10, 0) should return Err, got: " + result2.getClass().getName());
+            
+            // Get Option runtime classes
+            Class<?> someClass = Class.forName("ngj.runtime.Option$Some", true, loader);
+            Class<?> noneClass = Class.forName("ngj.runtime.Option$None", true, loader);
+            
+            // Test doubleOrZero(Some(21)) = 42
+            Object some21 = someClass.getConstructor(Object.class).newInstance(21);
+            Method doubleInvoke = doubleOrZeroFn.getMethod("invoke", Object.class);
+            Object result3 = doubleInvoke.invoke(null, some21);
+            assertEquals(42, result3, "doubleOrZero(Some(21)) should return 42");
+            
+            // Test doubleOrZero(None()) = 0
+            Object none = noneClass.getConstructor().newInstance();
+            Object result4 = doubleInvoke.invoke(null, none);
+            assertEquals(0, result4, "doubleOrZero(None()) should return 0");
+            
+            System.out.println("SUCCESS: result_option functions work correctly");
+            System.out.println("  safeDivide(10, 2) = Ok(...)");
+            System.out.println("  safeDivide(10, 0) = Err(...)");
+            System.out.println("  doubleOrZero(Some(21)) = " + result3);
+            System.out.println("  doubleOrZero(None()) = " + result4);
+        }
+    }
+    
+    /**
+     * Verify for_yield.ngj: doubleAll with a real list.
+     */
+    @Test
+    void runtimeVerify_forYield_returnsCorrectResults() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = readFixture("positive/for_yield.ngj");
+        
+        var lexer = new Lexer(source, "for_yield.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            Class<?> doubleAllFn = loadFunction(loader, outputs, "doubleAll");
+            assertNotNull(doubleAllFn, "doubleAll function should be loaded");
+            
+            // Create input list [1, 2, 3]
+            List<Integer> input = List.of(1, 2, 3);
+            
+            // Test doubleAll([1, 2, 3]) = [2, 4, 6]
+            Method invoke = doubleAllFn.getMethod("invoke", java.util.List.class);
+            @SuppressWarnings("unchecked")
+            List<Integer> result = (List<Integer>) invoke.invoke(null, input);
+            
+            assertNotNull(result, "doubleAll should return a list");
+            assertEquals(3, result.size(), "Result list should have 3 elements");
+            assertEquals(2, result.get(0), "First element should be 2");
+            assertEquals(4, result.get(1), "Second element should be 4");
+            assertEquals(6, result.get(2), "Third element should be 6");
+            
+            System.out.println("SUCCESS: for_yield doubleAll works correctly");
+            System.out.println("  doubleAll([1, 2, 3]) = " + result);
+        }
+    }
+    
+    /**
+     * Verify listof_call.ngj: makeList returns correct list.
+     */
+    @Test
+    void runtimeVerify_listOfCall_returnsCorrectResults() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = readFixture("positive/listof_call.ngj");
+        
+        var lexer = new Lexer(source, "listof_call.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            Class<?> makeListFn = loadFunction(loader, outputs, "makeList");
+            assertNotNull(makeListFn, "makeList function should be loaded");
+            
+            // Test makeList() = [1, 2, 3]
+            Method invoke = makeListFn.getMethod("invoke");
+            @SuppressWarnings("unchecked")
+            List<Integer> result = (List<Integer>) invoke.invoke(null);
+            
+            assertNotNull(result, "makeList should return a list");
+            assertEquals(3, result.size(), "Result list should have 3 elements");
+            assertEquals(1, result.get(0), "First element should be 1");
+            assertEquals(2, result.get(1), "Second element should be 2");
+            assertEquals(3, result.get(2), "Third element should be 3");
+            
+            System.out.println("SUCCESS: listof_call makeList works correctly");
+            System.out.println("  makeList() = " + result);
+        }
+    }
+    
+    /**
+     * Verify if-expression with Ok/Err branches joins correctly.
+     */
+    @Test
+    void runtimeVerify_ifWithResultBranches_works() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = """
+            package test.ifresult;
+            
+            public fn checkPositive(n: Int) -> Result<Int, String> effects() {
+                return if (n > 0) { Ok(n) } else { Err("not positive") };
+            }
+            """;
+        
+        var lexer = new Lexer(source, "if_result.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            Class<?> checkFn = loadFunction(loader, outputs, "checkPositive");
+            assertNotNull(checkFn, "checkPositive function should be loaded");
+            
+            Method invoke = checkFn.getMethod("invoke", int.class);
+            
+            // Test checkPositive(5) returns Ok(5)
+            Object result1 = invoke.invoke(null, 5);
+            assertNotNull(result1, "checkPositive(5) should return a Result");
+            assertTrue(result1.getClass().getName().contains("Ok"),
+                "checkPositive(5) should return Ok, got: " + result1.getClass().getName());
+            
+            // Test checkPositive(-3) returns Err
+            Object result2 = invoke.invoke(null, -3);
+            assertNotNull(result2, "checkPositive(-3) should return a Result");
+            assertTrue(result2.getClass().getName().contains("Err"),
+                "checkPositive(-3) should return Err, got: " + result2.getClass().getName());
+            
+            System.out.println("SUCCESS: if with Result branches works correctly");
+            System.out.println("  checkPositive(5) = Ok(...)");
+            System.out.println("  checkPositive(-3) = Err(...)");
+        }
+    }
+    
+    /**
+     * Verify if-expression with Some/None branches joins correctly.
+     */
+    @Test
+    void runtimeVerify_ifWithOptionBranches_works() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = """
+            package test.ifoption;
+            
+            public fn findPositive(n: Int) -> Option<Int> effects() {
+                return if (n > 0) { Some(n) } else { None() };
+            }
+            """;
+        
+        var lexer = new Lexer(source, "if_option.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            Class<?> findFn = loadFunction(loader, outputs, "findPositive");
+            assertNotNull(findFn, "findPositive function should be loaded");
+            
+            Method invoke = findFn.getMethod("invoke", int.class);
+            
+            // Test findPositive(42) returns Some(42)
+            Object result1 = invoke.invoke(null, 42);
+            assertNotNull(result1, "findPositive(42) should return an Option");
+            assertTrue(result1.getClass().getName().contains("Some"),
+                "findPositive(42) should return Some, got: " + result1.getClass().getName());
+            
+            // Test findPositive(-1) returns None
+            Object result2 = invoke.invoke(null, -1);
+            assertNotNull(result2, "findPositive(-1) should return an Option");
+            assertTrue(result2.getClass().getName().contains("None"),
+                "findPositive(-1) should return None, got: " + result2.getClass().getName());
+            
+            System.out.println("SUCCESS: if with Option branches works correctly");
+            System.out.println("  findPositive(42) = Some(...)");
+            System.out.println("  findPositive(-1) = None()");
+        }
+    }
+    
+    /**
      * Helper to load a function class by name from outputs.
      */
     private Class<?> loadFunction(URLClassLoader loader, List<Path> outputs, String functionName) {

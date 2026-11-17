@@ -66,8 +66,79 @@ public final class Java25CodeGenerator {
     private final Map<String, EnumDecl> enums = new HashMap<>();
     private final Map<String, FnDecl> functions = new HashMap<>();
     
+    // Custom class hierarchy resolver for ngj.runtime classes and user enums
+    private ClassHierarchyResolver hierarchyResolver;
+    
     public void setTarget(String target) {
         this.target = target;
+    }
+    
+    /**
+     * Build a ClassHierarchyResolver that knows about ngj.runtime classes and user-defined enums.
+     * This is needed for ClassFile API to compute stack frames when branches join with different types.
+     */
+    private ClassHierarchyResolver buildHierarchyResolver() {
+        // Map of class -> superclass for our generated classes
+        Map<ClassDesc, ClassDesc> hierarchy = new HashMap<>();
+        
+        // ngj.runtime.Option hierarchy
+        var optionBase = ClassDesc.ofInternalName("ngj/runtime/Option");
+        var optionSome = ClassDesc.ofInternalName("ngj/runtime/Option$Some");
+        var optionNone = ClassDesc.ofInternalName("ngj/runtime/Option$None");
+        hierarchy.put(optionBase, ConstantDescs.CD_Object);
+        hierarchy.put(optionSome, optionBase);
+        hierarchy.put(optionNone, optionBase);
+        
+        // ngj.runtime.Result hierarchy
+        var resultBase = ClassDesc.ofInternalName("ngj/runtime/Result");
+        var resultOk = ClassDesc.ofInternalName("ngj/runtime/Result$Ok");
+        var resultErr = ClassDesc.ofInternalName("ngj/runtime/Result$Err");
+        hierarchy.put(resultBase, ConstantDescs.CD_Object);
+        hierarchy.put(resultOk, resultBase);
+        hierarchy.put(resultErr, resultBase);
+        
+        // User-defined enums and their variants
+        for (var entry : enums.entrySet()) {
+            var enumName = entry.getKey();
+            var enumDecl = entry.getValue();
+            var enumBase = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + enumName);
+            hierarchy.put(enumBase, ConstantDescs.CD_Object);
+            
+            for (var variant : enumDecl.variants()) {
+                var variantClass = ClassDesc.ofInternalName(
+                    currentModule.replace('.', '/') + "/" + enumName + "$" + variant.name());
+                hierarchy.put(variantClass, enumBase);
+            }
+        }
+        
+        // User-defined records and data types
+        for (var name : records.keySet()) {
+            var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + name);
+            hierarchy.put(classDesc, ConstantDescs.CD_Object);
+        }
+        for (var name : datas.keySet()) {
+            var classDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + name);
+            hierarchy.put(classDesc, ConstantDescs.CD_Object);
+        }
+        
+        // Create resolver that checks our hierarchy first, then falls back to system
+        return ClassHierarchyResolver.ofResourceParsing(
+            ClassLoader.getSystemClassLoader()
+        ).orElse(desc -> {
+            var superclass = hierarchy.get(desc);
+            if (superclass != null) {
+                return ClassHierarchyResolver.ClassHierarchyInfo.ofClass(superclass);
+            }
+            // Unknown class - assume Object as superclass
+            return ClassHierarchyResolver.ClassHierarchyInfo.ofClass(ConstantDescs.CD_Object);
+        });
+    }
+    
+    /**
+     * Get the ClassFile builder with our custom hierarchy resolver.
+     */
+    private ClassFile classFileBuilder() {
+        return ClassFile.of(ClassFile.ClassHierarchyResolverOption.of(hierarchyResolver));
     }
     
     private int getClassFileVersionForTarget() {
@@ -104,6 +175,10 @@ public final class Java25CodeGenerator {
                 case FnDecl f -> functions.put(f.name(), f);
             }
         }
+        
+        // Build hierarchy resolver after collecting all declarations
+        hierarchyResolver = buildHierarchyResolver();
+        
         var outputs = new ArrayList<Path>();
         
         try {
@@ -162,7 +237,7 @@ public final class Java25CodeGenerator {
         var someDesc = ClassDesc.ofInternalName("ngj/runtime/Option$Some");
         var noneDesc = ClassDesc.ofInternalName("ngj/runtime/Option$None");
         
-        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+        var classFile = classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             // Sealed abstract class
             classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
@@ -193,7 +268,7 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Option");
         
-        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+        var classFile = classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             if (isValueClassTarget()) {
                 classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
@@ -245,7 +320,7 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Option");
         
-        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+        var classFile = classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             if (isValueClassTarget()) {
                 classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
@@ -279,7 +354,7 @@ public final class Java25CodeGenerator {
         var okDesc = ClassDesc.ofInternalName("ngj/runtime/Result$Ok");
         var errDesc = ClassDesc.ofInternalName("ngj/runtime/Result$Err");
         
-        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+        var classFile = classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             // Sealed abstract class
             classBuilder.withFlags(ACC_PUBLIC | ACC_ABSTRACT);
@@ -310,7 +385,7 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Result");
         
-        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+        var classFile = classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             if (isValueClassTarget()) {
                 classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
@@ -360,7 +435,7 @@ public final class Java25CodeGenerator {
         var classDesc = ClassDesc.ofInternalName(className);
         var baseDesc = ClassDesc.ofInternalName("ngj/runtime/Result");
         
-        var classFile = ClassFile.of().build(classDesc, classBuilder -> {
+        var classFile = classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             if (isValueClassTarget()) {
                 classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
@@ -431,7 +506,7 @@ public final class Java25CodeGenerator {
         var className = currentModule.replace('.', '/') + "/" + fn.name() + "$Fn";
         var classDesc = ClassDesc.ofInternalName(className);
         
-        return ClassFile.of().build(classDesc, classBuilder -> {
+        return classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), getMinorVersionForTarget());
             // Function wrapper classes are always identity classes (not value classes)
             // JDK 28 with preview features requires explicit ACC_IDENTITY for non-value classes
@@ -1803,6 +1878,11 @@ public final class Java25CodeGenerator {
                     // Check instanceof variant class and extract fields
                     var typePath = ctor.typePath();
                     
+                    // Get the short variant name (e.g., "Ok", "Err", "Some", "None")
+                    String shortVariantName = typePath.contains(".") 
+                        ? typePath.substring(typePath.lastIndexOf('.') + 1)
+                        : typePath;
+                    
                     // Resolve variant class - could be EnumName.Variant or just Variant
                     ClassDesc variantClass = resolveVariantClass(ctx, typePath);
                     
@@ -1814,7 +1894,7 @@ public final class Java25CodeGenerator {
                     }
                     // For last arm, we assume exhaustive match and don't need to check
                     
-                    // Extract fields from variant - use innerType for Option/Result
+                    // Extract fields from variant
                     if (!ctor.fields().isEmpty()) {
                         ctx.code.aload(scrutineeSlot);
                         ctx.code.checkcast(variantClass);
@@ -1831,12 +1911,15 @@ public final class Java25CodeGenerator {
                                 String actualFieldName = resolveVariantFieldName(typePath, field.name(), fieldIdx);
                                 
                                 // Get the field type for the getfield descriptor
-                                // For Option/Result, fields are always Object
+                                // For Option/Result, use the correct type parameter based on variant:
+                                // - Some(v): v is T from Option<T>
+                                // - Ok(v): v is T from Result<T, E>
+                                // - Err(e): e is E from Result<T, E>
                                 // For user-defined enums, use the declared field type
                                 String fieldType;
                                 ClassDesc fieldDesc;
                                 if (scrutineeType.equals("Option") || scrutineeType.equals("Result")) {
-                                    fieldType = innerType;
+                                    fieldType = getResultOptionFieldType(ctx, matchExpr.scrutinee(), shortVariantName);
                                     fieldDesc = ConstantDescs.CD_Object; // Option/Result store as Object
                                 } else {
                                     fieldType = lookupEnumVariantFieldType(typePath, actualFieldName);
@@ -1907,18 +1990,42 @@ public final class Java25CodeGenerator {
     }
     
     private String inferGenericInnerType(CodeGenContext ctx, Expr expr) {
-        // For Option<T> or Result<T, E>, return T
+        // For Option<T> or Result<T, E>, return T (first type param)
+        return inferGenericTypeParam(ctx, expr, 0);
+    }
+    
+    private String inferGenericTypeParam(CodeGenContext ctx, Expr expr, int paramIndex) {
+        // For Option<T> paramIndex 0 -> T
+        // For Result<T, E> paramIndex 0 -> T, paramIndex 1 -> E
         if (expr instanceof IdentExpr ident) {
             // Look up in function parameters
             for (var param : ctx.fn.params()) {
                 if (param.name().equals(ident.name())) {
                     if (param.type() instanceof GenericTypeExpr gen) {
-                        if (!gen.typeArgs().isEmpty()) {
-                            return getTypeName(gen.typeArgs().get(0));
+                        if (gen.typeArgs().size() > paramIndex) {
+                            return getTypeName(gen.typeArgs().get(paramIndex));
                         }
                     }
                 }
             }
+        }
+        return "Object";
+    }
+    
+    /**
+     * Get the correct field type for Option/Result pattern bindings.
+     * - Some(v): v has type T from Option<T>
+     * - None: no binding
+     * - Ok(v): v has type T from Result<T, E>
+     * - Err(e): e has type E from Result<T, E>
+     */
+    private String getResultOptionFieldType(CodeGenContext ctx, Expr scrutinee, String variantName) {
+        if (variantName.equals("Some")) {
+            return inferGenericTypeParam(ctx, scrutinee, 0); // Option<T> -> T
+        } else if (variantName.equals("Ok")) {
+            return inferGenericTypeParam(ctx, scrutinee, 0); // Result<T, E> -> T
+        } else if (variantName.equals("Err")) {
+            return inferGenericTypeParam(ctx, scrutinee, 1); // Result<T, E> -> E
         }
         return "Object";
     }
@@ -2095,7 +2202,7 @@ public final class Java25CodeGenerator {
         var className = currentModule.replace('.', '/') + "/" + data.name();
         var classDesc = ClassDesc.ofInternalName(className);
         
-        return ClassFile.of().build(classDesc, classBuilder -> {
+        return classFileBuilder().build(classDesc, classBuilder -> {
             classBuilder.withVersion(getClassFileVersionForTarget(), 0);
             classBuilder.withFlags(ACC_PUBLIC | ACC_FINAL);
             classBuilder.withSuperclass(ConstantDescs.CD_Object);
@@ -2172,7 +2279,7 @@ public final class Java25CodeGenerator {
         var className = currentModule.replace('.', '/') + "/" + record.name();
         var classDesc = ClassDesc.ofInternalName(className);
         
-        return ClassFile.of().build(classDesc, classBuilder -> {
+        return classFileBuilder().build(classDesc, classBuilder -> {
             if (isValueClassTarget()) {
                 // VALUE-01: Use preview minor version for JEP 401
                 classBuilder.withVersion(getClassFileVersionForTarget(), PREVIEW_MINOR_VERSION);
@@ -2365,7 +2472,7 @@ public final class Java25CodeGenerator {
             .map(v -> ClassDesc.ofInternalName(className + "$" + v.name()))
             .toList();
         
-        return ClassFile.of().build(classDesc, classBuilder -> {
+        return classFileBuilder().build(classDesc, classBuilder -> {
             if (isValueClassTarget()) {
                 // VALUE-01: Use preview minor version for JEP 401
                 classBuilder.withVersion(getClassFileVersionForTarget(), PREVIEW_MINOR_VERSION);
@@ -2417,7 +2524,7 @@ public final class Java25CodeGenerator {
                 final var variantFields = variant.fields();
                 final var finalVariantClassDesc = variantClassDesc;
                 
-                var classFile = ClassFile.of().build(variantClassDesc, classBuilder -> {
+                var classFile = classFileBuilder().build(variantClassDesc, classBuilder -> {
                     if (isValueClassTarget()) {
                         // VALUE-01: Use preview minor version, NO ACC_IDENTITY
                         classBuilder.withVersion(getClassFileVersionForTarget(), PREVIEW_MINOR_VERSION);
