@@ -11,9 +11,9 @@ class ParserTest {
     @Test
     void parseSimpleFunction() throws Exception {
         var source = """
-            module test.simple
+            package test.simple;
             
-            pub fn main() -> Int ! {} {
+            public fn main() -> Int effects() {
                 42
             }
             """;
@@ -33,14 +33,11 @@ class ParserTest {
     }
     
     @Test
-    void parseDataDeclaration() throws Exception {
+    void parseRecordDeclaration() throws Exception {
         var source = """
-            module test.data
+            package test.data;
             
-            pub data Point {
-                x: Int,
-                y: Int
-            }
+            public record Point(x: Int, y: Int);
             """;
         
         var lexer = new Lexer(source, "test.ngj");
@@ -48,22 +45,22 @@ class ParserTest {
         var unit = parser.parse();
         
         assertEquals(1, unit.declarations().size());
-        var data = (DataDecl) unit.declarations().get(0);
-        assertEquals("Point", data.name());
-        assertEquals(2, data.fields().size());
-        assertEquals("x", data.fields().get(0).name());
-        assertEquals("y", data.fields().get(1).name());
+        var record = (RecordDecl) unit.declarations().get(0);
+        assertEquals("Point", record.name());
+        assertEquals(2, record.params().size());
+        assertEquals("x", record.params().get(0).name());
+        assertEquals("y", record.params().get(1).name());
     }
     
     @Test
     void parseEnumDeclaration() throws Exception {
         var source = """
-            module test.enum
+            package test.enumeration;
             
-            pub enum Color {
-                Red,
-                Green,
-                Blue
+            public enum Color {
+                Red(),
+                Green(),
+                Blue()
             }
             """;
         
@@ -81,30 +78,29 @@ class ParserTest {
     @Test
     void parseImports() throws Exception {
         var source = """
-            module test.imports
+            package test.imports;
             
-            import std.io.{read, write}
+            import std.io.read;
+            import std.io.write;
             
-            pub fn test() -> Int ! {} { 0 }
+            public fn test() -> Int effects() { 0 }
             """;
         
         var lexer = new Lexer(source, "test.ngj");
         var parser = new Parser(lexer);
         var unit = parser.parse();
         
-        assertEquals(1, unit.imports().size());
-        var imp = unit.imports().get(0);
-        assertEquals("std.io", imp.modulePath());
-        assertEquals(2, imp.names().size());
-        assertFalse(imp.isWildcard());
+        assertEquals(2, unit.imports().size());
+        assertEquals("std.io", unit.imports().get(0).modulePath());
+        assertEquals("read", unit.imports().get(0).names().get(0));
     }
     
     @Test
     void parseHole() throws Exception {
         var source = """
-            module test.hole
+            package test.hole;
             
-            pub fn calculate() -> Int ! {} {
+            public fn calculate() -> Int effects() {
                 ?todo
             }
             """;
@@ -121,10 +117,10 @@ class ParserTest {
     @Test
     void parseIfExpression() throws Exception {
         var source = """
-            module test.cond
+            package test.cond;
             
-            pub fn max(a: Int, b: Int) -> Int ! {} {
-                if a > b { a } else { b }
+            public fn max(a: Int, b: Int) -> Int effects() {
+                if (a > b) { a } else { b }
             }
             """;
         
@@ -142,14 +138,14 @@ class ParserTest {
     @Test
     void parseMatchExpression() throws Exception {
         var source = """
-            module test.match
+            package test.match;
             
-            pub enum Status { Ok, Err }
+            public enum Status { Ok(), Err() }
             
-            pub fn test(s: Status) -> Int ! {} {
-                match s {
-                    Ok => 1,
-                    Err => 0
+            public fn test(s: Status) -> Int effects() {
+                match (s) {
+                    case Ok() => { 1 },
+                    case Err() => { 0 }
                 }
             }
             """;
@@ -164,32 +160,131 @@ class ParserTest {
     }
     
     @Test
-    void rejectWildcardImport() throws Exception {
+    void parseValStatement() throws Exception {
         var source = """
-            module test.invalid
+            package test.binding;
             
-            import std.*
-            
-            pub fn test() -> Int ! {} { 0 }
+            public fn test() -> Int effects() {
+                val x: Int = 42;
+                x
+            }
             """;
         
         var lexer = new Lexer(source, "test.ngj");
         var parser = new Parser(lexer);
         var unit = parser.parse();
         
-        // Should have diagnostic for wildcard import
+        var fn = (FnDecl) unit.declarations().get(0);
+        assertEquals(1, fn.body().statements().size());
+        var valStmt = (ValStmt) fn.body().statements().get(0);
+        assertEquals("x", valStmt.name());
+    }
+    
+    @Test
+    void parseVarAndAssignment() throws Exception {
+        var source = """
+            package test.mutable;
+            
+            public fn test() -> Int effects() {
+                var x: Int = 0;
+                x = 42;
+                x
+            }
+            """;
+        
+        var lexer = new Lexer(source, "test.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var fn = (FnDecl) unit.declarations().get(0);
+        assertEquals(2, fn.body().statements().size());
+        var varStmt = (VarStmt) fn.body().statements().get(0);
+        assertEquals("x", varStmt.name());
+        var assignStmt = (AssignStmt) fn.body().statements().get(1);
+        assertEquals("x", assignStmt.name());
+    }
+    
+    @Test
+    void rejectWildcardImport() throws Exception {
+        var source = """
+            package test.invalid;
+            
+            import std.*;
+            
+            public fn test() -> Int effects() { 0 }
+            """;
+        
+        var lexer = new Lexer(source, "test.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
         var diagnostics = parser.getDiagnostics();
         assertTrue(diagnostics.stream()
             .anyMatch(d -> d.id().equals("NGJ-PARSE-001")));
     }
     
     @Test
-    void rejectUserGenericTypes() throws Exception {
+    void detectLegacyModuleSyntax() throws Exception {
         var source = """
-            module test.invalid
+            module test.legacy;
             
-            pub data Box<T> {
-                value: T
+            pub fn test() -> Int effects() { 0 }
+            """;
+        
+        var lexer = new Lexer(source, "test.ngj");
+        var parser = new Parser(lexer);
+        try {
+            parser.parse();
+        } catch (ParseException e) {
+        }
+        
+        var diagnostics = parser.getDiagnostics();
+        assertTrue(diagnostics.stream()
+            .anyMatch(d -> d.id().equals("NGJ-MIGRATE-001") || d.id().equals("NGJ-MIGRATE-003")));
+    }
+    
+    @Test
+    void detectLegacyPubSyntax() throws Exception {
+        var source = """
+            package test.legacy;
+            
+            pub fn test() -> Int effects() { 0 }
+            """;
+        
+        var lexer = new Lexer(source, "test.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var diagnostics = parser.getDiagnostics();
+        assertTrue(diagnostics.stream()
+            .anyMatch(d -> d.id().equals("NGJ-MIGRATE-003")));
+    }
+    
+    @Test
+    void detectLegacyEffectSyntax() throws Exception {
+        var source = """
+            package test.legacy;
+            
+            public fn test() -> Int ! {} { 0 }
+            """;
+        
+        var lexer = new Lexer(source, "test.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var diagnostics = parser.getDiagnostics();
+        assertTrue(diagnostics.stream()
+            .anyMatch(d -> d.id().equals("NGJ-MIGRATE-004")));
+    }
+    
+    @Test
+    void detectLegacyDataSyntax() throws Exception {
+        var source = """
+            package test.legacy;
+            
+            public data Point {
+                x: Int,
+                y: Int
             }
             """;
         
@@ -199,6 +294,6 @@ class ParserTest {
         
         var diagnostics = parser.getDiagnostics();
         assertTrue(diagnostics.stream()
-            .anyMatch(d -> d.id().equals("NGJ-PARSE-003")));
+            .anyMatch(d -> d.id().equals("NGJ-MIGRATE-005")));
     }
 }

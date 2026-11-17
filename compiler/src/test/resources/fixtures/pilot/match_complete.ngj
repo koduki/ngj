@@ -1,18 +1,17 @@
 // Match completion test for AI pilot evaluation
 // Tests understanding of exhaustive matching
+package pilot.match_complete;
 
-module pilot.match_complete
-
-pub enum Color {
-    Red,
-    Green,
-    Blue
+public enum Color {
+    Red(),
+    Green(),
+    Blue()
 }
 
 // The match is incomplete - AI should detect missing cases
-pub fn colorCode(c: Color) -> Int ! {} {
-    match c {
-        Red => 1,
-        Green => ?greenCode
+public fn colorCode(c: Color) -> Int effects() {
+    match (c) {
+        case Red() => { 1 },
+        case Green() => { ?greenCode }
     }
 }

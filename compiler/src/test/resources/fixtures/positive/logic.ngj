@@ -1,18 +1,18 @@
 // Short-circuit logic
-module test.logic
+package test.logic;
 
-pub fn andTest(a: Bool, b: Bool) -> Bool ! {} {
+public fn andTest(a: Bool, b: Bool) -> Bool effects() {
     a && b
 }
 
-pub fn orTest(a: Bool, b: Bool) -> Bool ! {} {
+public fn orTest(a: Bool, b: Bool) -> Bool effects() {
     a || b
 }
 
-pub fn notTest(a: Bool) -> Bool ! {} {
+public fn notTest(a: Bool) -> Bool effects() {
     !a
 }
 
-pub fn complex(a: Bool, b: Bool, c: Bool) -> Bool ! {} {
+public fn complex(a: Bool, b: Bool, c: Bool) -> Bool effects() {
     (a && b) || (!c)
 }

@@ -1,6 +1,6 @@
 // Non-empty effect bound must be rejected in MVP
-module test.invalid
+package test.invalid;
 
-pub fn readFile(path: String) -> String ! { FsRead } {
+public fn readFile(path: String) -> String effects(FsRead) {
     "content"
 }

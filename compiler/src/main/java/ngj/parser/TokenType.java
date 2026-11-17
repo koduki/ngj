@@ -1,9 +1,13 @@
 package ngj.parser;
 
 public enum TokenType {
-    // Keywords
-    MODULE, IMPORT, PUB, FN, LET, IF, ELSE, MATCH, RETURN, DATA, ENUM,
+    // v0.3 Keywords
+    PACKAGE, IMPORT, PUBLIC, FN, VAL, VAR, IF, ELSE, MATCH, CASE, 
+    RECORD, ENUM, EFFECTS, FOR, YIELD, WHILE,
     TRUE, FALSE,
+    
+    // Legacy v0.2 keywords (for migration diagnostics)
+    MODULE, PUB, DATA, LET, RETURN, MUT,
     
     // Punctuation
     LPAREN, RPAREN,     // ( )
@@ -13,6 +17,8 @@ public enum TokenType {
     COMMA, DOT, COLON, SEMICOLON,
     ARROW,              // ->
     FAT_ARROW,          // =>
+    DOUBLE_COLON,       // ::
+    LEFT_ARROW,         // <-
     BANG,               // !
     QUESTION,           // ?
     

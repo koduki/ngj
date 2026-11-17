@@ -1,8 +1,7 @@
 // Simple fill-in test for AI pilot evaluation
 // Expected: AI fills ?result with x + y
+package pilot.simple_fill;
 
-module pilot.simple_fill
-
-pub fn add(x: Int, y: Int) -> Int ! {} {
+public fn add(x: Int, y: Int) -> Int effects() {
     ?result
 }

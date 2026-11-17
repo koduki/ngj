@@ -1,6 +1,6 @@
 // Simple pure function returning an integer
-module test.hello
+package test.hello;
 
-pub fn main() -> Int ! {} {
+public fn main() -> Int effects() {
     42
 }

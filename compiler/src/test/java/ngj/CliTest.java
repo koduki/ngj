@@ -19,7 +19,6 @@ class CliTest {
     
     @AfterEach
     void tearDown() throws Exception {
-        // Clean up temp files
         try (var walk = Files.walk(tempDir)) {
             walk.sorted(java.util.Comparator.reverseOrder())
                 .map(Path::toFile)
@@ -90,9 +89,9 @@ class CliTest {
     @Test
     void checkValidFile() throws Exception {
         var source = """
-            module test.valid
+            package test.valid;
             
-            pub fn main() -> Int ! {} {
+            public fn main() -> Int effects() {
                 42
             }
             """;
@@ -115,9 +114,9 @@ class CliTest {
     @Test
     void checkWithJsonFormat() throws Exception {
         var source = """
-            module test.json
+            package test.json;
             
-            pub fn main() -> Int ! {} { 42 }
+            public fn main() -> Int effects() { 42 }
             """;
         var file = tempDir.resolve("json.ngj");
         Files.writeString(file, source);
@@ -141,9 +140,9 @@ class CliTest {
     @Test
     void checkInvalidFile() throws Exception {
         var source = """
-            module test.invalid
+            package test.invalid;
             
-            pub fn test() -> UnknownType ! {} {
+            public fn test() -> UnknownType effects() {
                 42
             }
             """;
@@ -165,9 +164,9 @@ class CliTest {
     @Test
     void checkIncompleteFile() throws Exception {
         var source = """
-            module test.incomplete
+            package test.incomplete;
             
-            pub fn calculate() -> Int ! {} {
+            public fn calculate() -> Int effects() {
                 ?todo
             }
             """;

@@ -11,9 +11,9 @@ class ResultOptionTest {
     @Test
     void okWithCorrectArgument() throws Exception {
         var source = """
-            module test.ok
+            package test.ok;
             
-            pub fn test() -> Result<Int, String> ! {} {
+            public fn test() -> Result<Int, String> effects() {
                 Ok(42)
             }
             """;
@@ -25,7 +25,6 @@ class ResultOptionTest {
         var typeChecker = new TypeChecker();
         typeChecker.check(unit);
         
-        // Should have no errors (Ok returns Result<Int, _> which is compatible)
         var errors = typeChecker.getDiagnostics().stream()
             .filter(d -> d.severity() == ngj.diagnostic.Severity.ERROR)
             .toList();
@@ -35,9 +34,9 @@ class ResultOptionTest {
     @Test
     void errWithCorrectArgument() throws Exception {
         var source = """
-            module test.err
+            package test.err;
             
-            pub fn test() -> Result<Int, String> ! {} {
+            public fn test() -> Result<Int, String> effects() {
                 Err("error")
             }
             """;
@@ -58,9 +57,9 @@ class ResultOptionTest {
     @Test
     void someWithCorrectArgument() throws Exception {
         var source = """
-            module test.some
+            package test.some;
             
-            pub fn test() -> Option<Int> ! {} {
+            public fn test() -> Option<Int> effects() {
                 Some(42)
             }
             """;
@@ -81,10 +80,10 @@ class ResultOptionTest {
     @Test
     void noneWithNoArguments() throws Exception {
         var source = """
-            module test.none
+            package test.none;
             
-            pub fn test() -> Option<Int> ! {} {
-                None
+            public fn test() -> Option<Int> effects() {
+                None()
             }
             """;
         
@@ -104,14 +103,14 @@ class ResultOptionTest {
     @Test
     void propagateWithSameErrorType() throws Exception {
         var source = """
-            module test.prop
+            package test.prop;
             
-            pub fn inner() -> Result<Int, String> ! {} {
+            public fn inner() -> Result<Int, String> effects() {
                 Ok(1)
             }
             
-            pub fn outer() -> Result<Int, String> ! {} {
-                let x = inner()?
+            public fn outer() -> Result<Int, String> effects() {
+                val x = inner()?;
                 Ok(x + 1)
             }
             """;
@@ -131,12 +130,11 @@ class ResultOptionTest {
     
     @Test
     void propagateOnNonResultType() throws Exception {
-        // Test that ? operator on non-Result/Option type is rejected
         var source = """
-            module test.prop
+            package test.prop;
             
-            pub fn outer() -> Result<Int, String> ! {} {
-                let x: Int = 42
+            public fn outer() -> Result<Int, String> effects() {
+                val x: Int = 42;
                 x?
             }
             """;

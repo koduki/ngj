@@ -27,14 +27,14 @@ public final class HoleFinder {
     private boolean hasHolesInDecl(TopLevelDecl decl) {
         return switch (decl) {
             case FnDecl fn -> hasHolesInExpr(fn.body());
-            case DataDecl _, EnumDecl _ -> false;
+            case DataDecl _, EnumDecl _, RecordDecl _ -> false;
         };
     }
     
     private HoleExpr findHoleInDecl(TopLevelDecl decl, String holeId) {
         return switch (decl) {
             case FnDecl fn -> findHoleInExpr(fn.body(), holeId);
-            case DataDecl _, EnumDecl _ -> null;
+            case DataDecl _, EnumDecl _, RecordDecl _ -> null;
         };
     }
     
@@ -82,12 +82,18 @@ public final class HoleFinder {
             }
             case PropagateExpr prop -> hasHolesInExpr(prop.inner());
             case ParenExpr paren -> hasHolesInExpr(paren.inner());
+            case ForExpr forExpr -> hasHolesInExpr(forExpr.iterable()) || hasHolesInExpr(forExpr.body());
+            case WhileExpr whileExpr -> hasHolesInExpr(whileExpr.condition()) || hasHolesInExpr(whileExpr.body());
+            case LambdaExpr lambda -> hasHolesInExpr(lambda.body());
         };
     }
     
     private boolean hasHolesInStmt(Statement stmt) {
         return switch (stmt) {
             case LetStmt let -> hasHolesInExpr(let.initializer());
+            case ValStmt val -> hasHolesInExpr(val.initializer());
+            case VarStmt var -> hasHolesInExpr(var.initializer());
+            case AssignStmt assign -> hasHolesInExpr(assign.value());
             case ExprStmt expr -> hasHolesInExpr(expr.expr());
             case ReturnStmt ret -> ret.value() != null && hasHolesInExpr(ret.value());
         };
@@ -146,12 +152,24 @@ public final class HoleFinder {
             }
             case PropagateExpr prop -> findHoleInExpr(prop.inner(), holeId);
             case ParenExpr paren -> findHoleInExpr(paren.inner(), holeId);
+            case ForExpr forExpr -> {
+                var iter = findHoleInExpr(forExpr.iterable(), holeId);
+                yield iter != null ? iter : findHoleInExpr(forExpr.body(), holeId);
+            }
+            case WhileExpr whileExpr -> {
+                var cond = findHoleInExpr(whileExpr.condition(), holeId);
+                yield cond != null ? cond : findHoleInExpr(whileExpr.body(), holeId);
+            }
+            case LambdaExpr lambda -> findHoleInExpr(lambda.body(), holeId);
         };
     }
     
     private HoleExpr findHoleInStmt(Statement stmt, String holeId) {
         return switch (stmt) {
             case LetStmt let -> findHoleInExpr(let.initializer(), holeId);
+            case ValStmt val -> findHoleInExpr(val.initializer(), holeId);
+            case VarStmt var -> findHoleInExpr(var.initializer(), holeId);
+            case AssignStmt assign -> findHoleInExpr(assign.value(), holeId);
             case ExprStmt expr -> findHoleInExpr(expr.expr(), holeId);
             case ReturnStmt ret -> ret.value() != null ? findHoleInExpr(ret.value(), holeId) : null;
         };

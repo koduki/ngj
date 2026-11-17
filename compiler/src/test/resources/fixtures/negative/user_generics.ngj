@@ -1,4 +1,5 @@
 // User-defined generics must be rejected in MVP
+// This uses legacy data syntax to test the migration diagnostic
 module test.invalid
 
 pub data Box<T> {

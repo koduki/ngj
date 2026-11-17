@@ -1,8 +1,8 @@
 // Wildcard imports must be rejected
-module test.invalid
+package test.invalid;
 
-import std.*
+import std.*;
 
-pub fn test() -> Int ! {} {
+public fn test() -> Int effects() {
     42
 }

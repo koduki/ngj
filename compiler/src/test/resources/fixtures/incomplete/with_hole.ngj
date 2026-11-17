@@ -1,6 +1,6 @@
 // Source with hole - should be incomplete
-module test.incomplete
+package test.incomplete;
 
-pub fn calculate(a: Int, b: Int) -> Int ! {} {
+public fn calculate(a: Int, b: Int) -> Int effects() {
     ?implementation
 }

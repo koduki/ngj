@@ -44,12 +44,15 @@ public final class NameResolver {
         globalSymbols.put("Unit", new Symbol("Unit", Symbol.Kind.TYPE, true));
         globalSymbols.put("Result", new Symbol("Result", Symbol.Kind.TYPE, true));
         globalSymbols.put("Option", new Symbol("Option", Symbol.Kind.TYPE, true));
+        globalSymbols.put("List", new Symbol("List", Symbol.Kind.TYPE, true));
         
         // Built-in constructors
         globalSymbols.put("Ok", new Symbol("Ok", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("Err", new Symbol("Err", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("Some", new Symbol("Some", Symbol.Kind.CONSTRUCTOR, true));
         globalSymbols.put("None", new Symbol("None", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("Nil", new Symbol("Nil", Symbol.Kind.CONSTRUCTOR, true));
+        globalSymbols.put("listOf", new Symbol("listOf", Symbol.Kind.FUNCTION, true));
     }
     
     private void registerTopLevel(TopLevelDecl decl) {
@@ -61,6 +64,10 @@ public final class NameResolver {
             case DataDecl data -> {
                 String id = currentModule + "." + data.name();
                 globalSymbols.put(data.name(), new Symbol(id, Symbol.Kind.TYPE, data.isPublic()));
+            }
+            case RecordDecl record -> {
+                String id = currentModule + "." + record.name();
+                globalSymbols.put(record.name(), new Symbol(id, Symbol.Kind.TYPE, record.isPublic()));
             }
             case EnumDecl enumDecl -> {
                 String id = currentModule + "." + enumDecl.name();
@@ -77,7 +84,14 @@ public final class NameResolver {
         switch (decl) {
             case FnDecl fn -> resolveFn(fn);
             case DataDecl data -> resolveData(data);
+            case RecordDecl record -> resolveRecord(record);
             case EnumDecl enumDecl -> resolveEnum(enumDecl);
+        }
+    }
+    
+    private void resolveRecord(RecordDecl record) {
+        for (var param : record.params()) {
+            resolveType(param.type());
         }
     }
     
@@ -156,6 +170,30 @@ public final class NameResolver {
     
     private void resolveStmt(Statement stmt) {
         switch (stmt) {
+            case ValStmt val -> {
+                if (val.explicitType() != null) {
+                    resolveType(val.explicitType());
+                }
+                resolveExpr(val.initializer());
+                addLocal(val.name(), new Symbol(val.name(), Symbol.Kind.VARIABLE, false));
+            }
+            case VarStmt var -> {
+                if (var.explicitType() != null) {
+                    resolveType(var.explicitType());
+                }
+                resolveExpr(var.initializer());
+                addLocal(var.name(), new Symbol(var.name(), Symbol.Kind.VARIABLE, false));
+            }
+            case AssignStmt assign -> {
+                if (!lookupSymbol(assign.name())) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-NAME-002",
+                        "Unknown identifier: " + assign.name(),
+                        assign.span()
+                    ));
+                }
+                resolveExpr(assign.value());
+            }
             case LetStmt let -> {
                 if (let.explicitType() != null) {
                     resolveType(let.explicitType());
@@ -233,6 +271,26 @@ public final class NameResolver {
             case BlockExpr block -> resolveBlock(block);
             case PropagateExpr prop -> resolveExpr(prop.inner());
             case ParenExpr paren -> resolveExpr(paren.inner());
+            case ForExpr forExpr -> {
+                resolveExpr(forExpr.iterable());
+                pushScope();
+                addLocal(forExpr.varName(), new Symbol(forExpr.varName(), Symbol.Kind.VARIABLE, false));
+                resolveBlock(forExpr.body());
+                popScope();
+            }
+            case WhileExpr whileExpr -> {
+                resolveExpr(whileExpr.condition());
+                resolveBlock(whileExpr.body());
+            }
+            case LambdaExpr lambda -> {
+                pushScope();
+                for (var param : lambda.params()) {
+                    resolveType(param.type());
+                    addLocal(param.name(), new Symbol(param.name(), Symbol.Kind.VARIABLE, false));
+                }
+                resolveBlock(lambda.body());
+                popScope();
+            }
         }
     }
     

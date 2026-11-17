@@ -1,33 +1,26 @@
 // Pricing calculation - complete version (simplified for MVP)
-// Demonstrates basic calculations
+// Demonstrates basic calculations with v0.3 syntax
+package example.pricing;
 
-module example.pricing
-
-// Calculate item subtotal
-pub fn itemSubtotal(basePrice: Int, quantity: Int) -> Int ! {} {
+public fn itemSubtotal(basePrice: Int, quantity: Int) -> Int effects() {
     basePrice * quantity
 }
 
-// Apply percentage discount
-pub fn applyDiscount(amount: Int, percentOff: Int) -> Int ! {} {
+public fn applyDiscount(amount: Int, percentOff: Int) -> Int effects() {
     amount - (amount * percentOff / 100)
 }
 
-// Calculate tax
-pub fn calculateTax(amount: Int, taxRate: Int) -> Int ! {} {
+public fn calculateTax(amount: Int, taxRate: Int) -> Int effects() {
     amount * taxRate / 100
 }
 
-// Calculate total with discount and tax
-pub fn calculateTotal(basePrice: Int, quantity: Int, discountPct: Int, taxRate: Int) -> Int ! {} {
-    let subtotal: Int = basePrice * quantity
-    let discounted: Int = subtotal - (subtotal * discountPct / 100)
-    let tax: Int = discounted * taxRate / 100
+public fn calculateTotal(basePrice: Int, quantity: Int, discountPct: Int, taxRate: Int) -> Int effects() {
+    val subtotal: Int = basePrice * quantity;
+    val discounted: Int = subtotal - (subtotal * discountPct / 100);
+    val tax: Int = discounted * taxRate / 100;
     discounted + tax
 }
 
-// Demo: Widget at $10, qty 2, 5% discount, 10% tax
-// Expected: (10 * 2) = 20, 5% off = 19, 10% tax = 1.9 ~ 1, total = 20
-pub fn demoCalculation() -> Int ! {} {
+public fn demoCalculation() -> Int effects() {
     calculateTotal(1000, 2, 5, 10)
 }

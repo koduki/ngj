@@ -35,9 +35,9 @@ class CodeGenTest {
     @Test
     void generateSimpleFunction() throws Exception {
         var source = """
-            module test.simple
+            package test.simple;
             
-            pub fn answer() -> Int ! {} {
+            public fn answer() -> Int effects() {
                 42
             }
             """;
@@ -46,11 +46,9 @@ class CodeGenTest {
         assertNotNull(classBytes, "Should generate class bytes");
         assertTrue(classBytes.length > 0, "Class bytes should not be empty");
         
-        // Load and verify the generated class
         var clazz = loadClass("test/simple/answer$Fn", classBytes);
         assertNotNull(clazz, "Should load generated class");
         
-        // Find and invoke the method
         var method = clazz.getMethod("invoke");
         assertNotNull(method, "Should have invoke method");
         
@@ -61,9 +59,9 @@ class CodeGenTest {
     @Test
     void generateArithmetic() throws Exception {
         var source = """
-            module test.arith
+            package test.arith;
             
-            pub fn addNumbers(a: Int, b: Int) -> Int ! {} {
+            public fn addNumbers(a: Int, b: Int) -> Int effects() {
                 a + b
             }
             """;
@@ -77,27 +75,22 @@ class CodeGenTest {
     }
     
     @Test
-    void generateDataClass() throws Exception {
+    void generateRecordClass() throws Exception {
         var source = """
-            module test.point
+            package test.point;
             
-            pub data Point {
-                x: Int,
-                y: Int
-            }
+            public record Point(x: Int, y: Int);
             """;
         
-        var classBytes = compileAndGenerateData(source, "Point");
-        assertNotNull(classBytes, "Should generate class bytes for data type");
+        var classBytes = compileAndGenerateRecord(source, "Point");
+        assertNotNull(classBytes, "Should generate class bytes for record type");
         
         var clazz = loadClass("test/point/Point", classBytes);
         assertNotNull(clazz, "Should load generated Point class");
         
-        // Check constructor
         var ctor = clazz.getConstructor(int.class, int.class);
         assertNotNull(ctor, "Should have constructor with two int params");
         
-        // Create instance and check fields
         var instance = ctor.newInstance(3, 4);
         var xField = clazz.getField("x");
         var yField = clazz.getField("y");
@@ -109,10 +102,10 @@ class CodeGenTest {
     @Test
     void generateIfExpression() throws Exception {
         var source = """
-            module test.cond
+            package test.cond;
             
-            pub fn max(a: Int, b: Int) -> Int ! {} {
-                if a > b { a } else { b }
+            public fn max(a: Int, b: Int) -> Int effects() {
+                if (a > b) { a } else { b }
             }
             """;
         
@@ -122,15 +115,15 @@ class CodeGenTest {
         
         assertEquals(5, method.invoke(null, 5, 3));
         assertEquals(10, method.invoke(null, 3, 10));
-        assertEquals(7, method.invoke(null, 7, 7)); // Equal case
+        assertEquals(7, method.invoke(null, 7, 7));
     }
     
     @Test
     void integerOverflowThrowsArithmeticException() throws Exception {
         var source = """
-            module test.overflow
+            package test.overflow;
             
-            pub fn addOverflow() -> Int ! {} {
+            public fn addOverflow() -> Int effects() {
                 2147483647 + 1
             }
             """;
@@ -139,8 +132,6 @@ class CodeGenTest {
         var clazz = loadClass("test/overflow/addOverflow$Fn", classBytes);
         var method = clazz.getMethod("invoke");
         
-        // Math.addExact throws ArithmeticException on overflow
-        // method.invoke wraps it in InvocationTargetException
         var ex = assertThrows(InvocationTargetException.class, () -> method.invoke(null),
             "Integer overflow should throw exception");
         assertTrue(ex.getCause() instanceof ArithmeticException,
@@ -150,9 +141,9 @@ class CodeGenTest {
     @Test
     void shortCircuitAnd() throws Exception {
         var source = """
-            module test.shortcircuit
+            package test.shortcircuit;
             
-            pub fn andTest(a: Bool, b: Bool) -> Bool ! {} {
+            public fn andTest(a: Bool, b: Bool) -> Bool effects() {
                 a && b
             }
             """;
@@ -170,9 +161,9 @@ class CodeGenTest {
     @Test
     void shortCircuitOr() throws Exception {
         var source = """
-            module test.shortcircuit
+            package test.shortcircuit;
             
-            pub fn orTest(a: Bool, b: Bool) -> Bool ! {} {
+            public fn orTest(a: Bool, b: Bool) -> Bool effects() {
                 a || b
             }
             """;
@@ -190,9 +181,9 @@ class CodeGenTest {
     @Test
     void negation() throws Exception {
         var source = """
-            module test.neg
+            package test.neg;
             
-            pub fn negate(n: Int) -> Int ! {} {
+            public fn negate(n: Int) -> Int effects() {
                 -n
             }
             """;
@@ -211,13 +202,11 @@ class CodeGenTest {
         var parser = new Parser(lexer);
         var unit = parser.parse();
         
-        // Check for parse errors
         var parseErrors = parser.getDiagnostics();
         if (!parseErrors.isEmpty()) {
-            throw new RuntimeException("Parse errors: " + parseErrors);
+            throw new ngj.parser.ParseException(parseErrors);
         }
         
-        // Name resolution and type checking
         var resolver = new NameResolver();
         resolver.resolve(unit);
         if (!resolver.getDiagnostics().isEmpty()) {
@@ -234,7 +223,6 @@ class CodeGenTest {
             throw new RuntimeException("Type errors: " + typeErrors);
         }
         
-        // Generate code
         var generator = new Java25CodeGenerator();
         generator.setOutputDir(tempDir);
         var outputs = generator.generate(unit);
@@ -246,7 +234,7 @@ class CodeGenTest {
         return Files.readAllBytes(outputs.get(0));
     }
     
-    private byte[] compileAndGenerateData(String source, String typeName) throws Exception {
+    private byte[] compileAndGenerateRecord(String source, String typeName) throws Exception {
         var lexer = new Lexer(source, "test.ngj");
         var parser = new Parser(lexer);
         var unit = parser.parse();
