@@ -1,0 +1,6 @@
+// for-yield expression (expected failure: VerifyError)
+package test.foryield;
+
+public fn doubleAll(numbers: List<Int>) -> List<Int> effects() {
+    return for (x <- numbers) yield { x * 2 };
+}

@@ -1,0 +1,9 @@
+// Option match expression (expected failure: VerifyError)
+package test.optionmatch;
+
+public fn unwrapOrDefault(opt: Option<Int>, default: Int) -> Int effects() {
+    return match (opt) {
+        case Some(value) => { value },
+        case None() => { default }
+    };
+}
