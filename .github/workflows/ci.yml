@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main, cursor/v03-syntax-migration-6fbb ]
+    branches: [ main ]
 
 # =============================================================================
 # Valhalla JDK Configuration
@@ -46,7 +46,9 @@ jobs:
       run: |
         java --version
         echo "Verifying JEP 401 Value Objects support..."
-        java --enable-preview -version 2>&1 | grep -q "preview" && echo "Preview features available"
+        # Verify --enable-preview flag is accepted (JDK 28 EA with JEP 401)
+        java --enable-preview -version
+        echo "Preview features enabled successfully"
     
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
