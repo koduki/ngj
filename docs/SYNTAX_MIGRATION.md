@@ -101,7 +101,7 @@ while (index < limit) { index = index + 1; };
 | `f()?.field` | same AST meaning as `(f()?).field` |
 | `a + f()?` | `a + (f()?)` |
 | `?body` | incomplete, hole position/type preserved (`NGJ-HOLE-001`) |
-| postfixed `?` on `Option` | type error (`NGJ-PROP-001`) |
+| postfixed `?` on `Option` | type error (`NGJ-TYPE-020`) |
 | malformed/unclosed angle arguments | bounded diagnostic recovery |
 | `f::<T>(x)` | syntactically recognized, unsupported if profile lacks generic calls |
 | `List` generator, with/without `yield` | `List<U>`/`Unit` respectively |
