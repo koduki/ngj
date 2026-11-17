@@ -19,7 +19,7 @@ NGJは、AIエージェントが生成・修正することを第一級の利用
 
 AIを言語ランタイムやコンパイラの必須依存にはしない。同じソース・依存・ツールチェーンからのビルドにLLM呼び出しは不要。エージェント専用構文やプロンプトDSL、任意の依存型、完全な自動証明はv0.3の必須要件ではない。
 
-### 1.3 Valhalla基盤 — 型システムの根幹
+### 1.2 Valhalla基盤 — 型システムの根幹
 
 NGJはProject Valhallaのvalue classesを言語設計の**基盤**とする。これはオプションの最適化バックエンドではなく、型システムと標準ライブラリの根幹である。
 
@@ -56,7 +56,7 @@ NGJはProject Valhallaのvalue classesを言語設計の**基盤**とする。�
 **リスクと移行:**
 詳細は本文書末尾の「オープンクエスチョンとリスク」節を参照。
 
-### 1.2 文書の読み方と保証範囲
+### 1.3 文書の読み方と保証範囲
 
 本文の「必須」「拒否」は実装が満たすべき規範要件。「候補」「後段」は未実装の研究・拡張項目。
 
@@ -186,7 +186,7 @@ val y: Int = 5;
 x == y;                // true（常に値比較）
 
 // ジェネリクスで自然に使用
-val nums: List<Int> = List.of(1, 2, 3);
+val nums: List<Int> = listOf(1, 2, 3);
 val opt: Option<Int> = Some(42);
 ```
 
@@ -238,7 +238,7 @@ Java側から受け取ったnullは即座に`None()`へ変換される。NGJ側�
 `Result<T,E>`と`Option<T>`は標準ライブラリのenum型であり、特別なビルトインではない（`Result`に対する`?`演算子のルールを除く）。定義は2.4節を参照。
 
 - `?`は`Result<T, E>`の`Err(e)`を現在の関数へ伝播する。異なるエラー型には明示的な`mapErr`を必要とする
-- 失敗する値の黙殺はエラー（`NGJ-TYPE-016`）とし、意図的な破棄には明示操作を要する
+- 失敗する値の黙殺はエラー（`NGJ-TYPE-017`）とし、意図的な破棄には明示操作を要する
 - 回復可能なドメインエラーは`Result`、協調キャンセルは`Cancelled`、プログラミング上のfaultはタスク失敗として区別する
 
 ### 2.4 Enum — 代数的データ型
@@ -370,7 +370,7 @@ public enum Result<T, E> {
 
 **`?`演算子のルール:**
 
-`?`後置演算子は**`Result<T, E>`に対してのみ**早期エラー伝播を行う（`EBNF.md` 5節および`STDLIB.md`と統一）。`Option<T>`に対して`?`を適用すると`NGJ-PROP-001`エラーとなる。
+`?`後置演算子は**`Result<T, E>`に対してのみ**早期エラー伝播を行う（`EBNF.md` 5節および`STDLIB.md`と統一）。`Option<T>`に対して`?`を適用すると`NGJ-TYPE-020`エラーとなる。
 
 ```scala
 // expr? の展開（Result<T, E>の場合）
@@ -426,34 +426,34 @@ public enum Shape {
 
 ```java
 // JVM出力（概念）
-public sealed value interface Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {
+public sealed abstract value class Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {
 }
 
-public final value class Shape.Circle implements Shape {
+public final value class Shape.Circle extends Shape {
     private final int radius;
     // ...
 }
 
-public final value class Shape.Rectangle implements Shape {
+public final value class Shape.Rectangle extends Shape {
     private final int width;
     private final int height;
     // ...
 }
 
-public final value class Shape.Point implements Shape {
+public final value class Shape.Point extends Shape {
     // ...
 }
 ```
 
 **JVM表現の詳細:**
-- 基底型はsealed value interface
-- 各バリアントはvalue class（permits句で列挙）
+- 基底型はsealed abstract value class
+- 各バリアントはvalue class（permits句で列挙、extendsで継承）
 - パターンマッチはinstanceofとキャストに展開
 
 #### 2.4.7 Java相互運用
 
 **NGJ enumをJavaから使用:**
-- Javaからはsealed interfaceとして見える
+- Javaからはsealed abstract classとして見える
 - pattern matching（Java 21+）で分岐可能
 - value class意味論はJDK 28 + preview必須
 
@@ -765,9 +765,9 @@ NGJのジェネリクスはvalue型を第一級でサポートする。これは
 
 ```scala
 // すべて有効なNGJコード
-val ints: List<Int> = List.of(1, 2, 3);
-val points: List<Point> = List.of(Point(0, 0), Point(1, 1));
-val results: List<Result<Int, Error>> = List.of(Ok(1));
+val ints: List<Int> = listOf(1, 2, 3);
+val points: List<Point> = listOf(Point(0, 0), Point(1, 1));
+val results: List<Result<Int, Error>> = listOf(Ok(1));
 val nested: Option<Option<Int>> = Some(Some(42));
 ```
 

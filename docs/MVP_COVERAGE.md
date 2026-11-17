@@ -68,7 +68,7 @@ their implementation status, and explicit exclusions.
 | `Ok(v)` / `Err(e)` | Yes | ✅ | Result constructors |
 | `Some(v)` / `None()` | Yes | ✅ | Option constructors, `None()` with parentheses |
 | Postfix `?` on Result | Yes | ✅ | Same-E propagation only |
-| Postfix `?` on Option | **No - Reject** | ✅ | v0.3 rejects, use `match` instead (`NGJ-PROP-001`) |
+| Postfix `?` on Option | **No - Reject** | ✅ | v0.3 rejects, use `match` instead (`NGJ-TYPE-020`) |
 | Different-E `?` | **No - Reject** | ✅ | Rejected (`NGJ-TYPE-019`), must use explicit conversion |
 
 ### Type Inference

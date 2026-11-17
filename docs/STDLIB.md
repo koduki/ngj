@@ -39,10 +39,9 @@ All numeric types are **value types**. There is no primitive/boxed distinction v
 ### 2.1 Int (32-bit signed integer)
 
 ```
-// Conceptual definition (built-in)
-value data Int {
-    // Internal: wraps JVM int
-}
+// Conceptual definition (built-in, not user-definable)
+// Int is a value type wrapping JVM int
+record Int();  // Internal representation; actual Int has no user-visible fields
 
 // Operations
 fn add(a: Int, b: Int) -> Int effects() { ... }      // Overflow: task fault
@@ -72,9 +71,8 @@ fn toString(x: Int) -> String effects() { ... }
 ### 2.2 Long (64-bit signed integer)
 
 ```
-value data Long {
-    // Internal: wraps JVM long
-}
+// Long is a value type wrapping JVM long
+record Long();  // Internal representation; actual Long has no user-visible fields
 
 // Same operations as Int, with Long types
 fn add(a: Long, b: Long) -> Long effects() { ... }
@@ -89,9 +87,8 @@ fn toLong(x: Long) -> Long effects() { x }
 ### 2.3 Bool (Boolean)
 
 ```
-value data Bool {
-    // Internal: wraps JVM boolean
-}
+// Bool is a value type wrapping JVM boolean
+record Bool();  // Internal representation; actual Bool has no user-visible fields
 
 // Operations
 fn and(a: Bool, b: Bool) -> Bool effects() { ... }   // a && b (short-circuit in syntax)
@@ -105,9 +102,8 @@ fn eq(a: Bool, b: Bool) -> Bool effects() { ... }
 ### 2.4 Byte (8-bit unsigned)
 
 ```
-value data Byte {
-    // Internal: wraps JVM byte (interpreted as unsigned 0..255)
-}
+// Byte is a value type wrapping JVM byte (interpreted as unsigned 0..255)
+record Byte();  // Internal representation; actual Byte has no user-visible fields
 
 // Operations for binary data processing
 fn toInt(x: Byte) -> Int effects() { ... }           // Always succeeds (0..255)
@@ -117,13 +113,11 @@ fn fromInt(x: Int) -> Result<Byte, RangeError> effects() { ... }
 ### 2.5 Float / Double (IEEE 754)
 
 ```
-value data Float {
-    // Internal: wraps JVM float
-}
+// Float is a value type wrapping JVM float
+record Float();  // Internal representation
 
-value data Double {
-    // Internal: wraps JVM double
-}
+// Double is a value type wrapping JVM double
+record Double();  // Internal representation
 
 // Note: NaN == NaN is false (IEEE 754 semantics)
 // Use isNaN(x) for NaN checks
@@ -248,7 +242,7 @@ fn process(input: String) -> Result<Output, ProcessError> effects() {
 }
 ```
 
-**Important**: `?` is **not** supported on `Option<T>` in v0.3 (`NGJ-PROP-001`). Use `match` or `toResult` explicitly.
+**Important**: `?` is **not** supported on `Option<T>` in v0.3 (`NGJ-TYPE-020`). Use `match` or `toResult` explicitly.
 
 ### 4.2 Standard Operations
 
@@ -306,9 +300,11 @@ fn toOption<T, E>(res: Result<T, E>) -> Option<T> effects() {
 `List<T>` is an **immutable** collection. All operations return new lists without modifying the original.
 
 ```
-// Conceptual definition
-public value data List<T> {
-    // Internal: backed by persistent data structure or copy-on-write
+// Conceptual definition (List is a built-in value type)
+// List<T> is backed by persistent data structure or copy-on-write
+public enum List<T> {
+    Nil(),
+    Cons(head: T, tail: List<T>)
 }
 ```
 

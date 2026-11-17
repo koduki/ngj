@@ -88,7 +88,7 @@ while (index < limit) { index = index + 1; };
 |---|---|
 | `val n = 1; return n;` at end of `Int` function | valid |
 | `Int` function with bare tail `42` (missing `return`) | invalid, `NGJ-RETURN-001` diagnostic |
-| `Int` function ending in `1;` | invalid, lost-result diagnostic (`NGJ-TYPE-016` / `NGJ-RETURN-001`) |
+| `Int` function ending in `1;` | invalid, lost-result diagnostic (`NGJ-TYPE-017` / `NGJ-RETURN-001`) |
 | `return 42` without semicolon | missing-semicolon diagnostic (`NGJ-PARSE-008`) |
 | early return in guard clause (`if (x < 0) { return 0; } return x;`) | valid |
 | adjacent bindings separated only by newline | missing-semicolon diagnostic (`NGJ-PARSE-008`) |
@@ -101,7 +101,7 @@ while (index < limit) { index = index + 1; };
 | `f()?.field` | same AST meaning as `(f()?).field` |
 | `a + f()?` | `a + (f()?)` |
 | `?body` | incomplete, hole position/type preserved (`NGJ-HOLE-001`) |
-| postfixed `?` on `Option` | type error (`NGJ-PROP-001`) |
+| postfixed `?` on `Option` | type error (`NGJ-TYPE-020`) |
 | malformed/unclosed angle arguments | bounded diagnostic recovery |
 | `f::<T>(x)` | syntactically recognized, unsupported if profile lacks generic calls |
 | `List` generator, with/without `yield` | `List<U>`/`Unit` respectively |

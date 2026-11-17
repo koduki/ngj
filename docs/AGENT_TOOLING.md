@@ -117,4 +117,4 @@ ownership診断ではmove/borrow/freezeの発生位置と寿命境界を返す�
 
 ## 7. v0.3構文と診断境界
 
-[EBNF.md](EBNF.md)の正規構文だけをcontextの生成例に使用する。旧構文の混在は移行診断（`NGJ-MIGRATE-*`）で示す。Result伝播先のfunction/lambda/fork境界IDを保持し、for callback内の`?`および`return`は明示的に拒否する（`NGJ-PROP-002`）。関数の`return`漏れ（`NGJ-RETURN-001`）、非`Unit`式文による戻り値消失（`NGJ-TYPE-016`）、`Option`への`?`（`NGJ-PROP-001`）、constructorの括弧不足は原因に即した診断を返す。全関数の型・Effectは明示署名から取得する。
+[EBNF.md](EBNF.md)の正規構文だけをcontextの生成例に使用する。旧構文の混在は移行診断（`NGJ-MIGRATE-*`）で示す。Result伝播先のfunction/lambda/fork境界IDを保持し、for callback内の`?`および`return`は明示的に拒否する（`NGJ-PROP-002`）。関数の`return`漏れ（`NGJ-RETURN-001`）、非`Unit`式文による戻り値消失（`NGJ-TYPE-017`）、`Option`への`?`（`NGJ-TYPE-020`）、constructorの括弧不足は原因に即した診断を返す。全関数の型・Effectは明示署名から取得する。

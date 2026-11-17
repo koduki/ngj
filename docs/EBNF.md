@@ -93,7 +93,7 @@ The block notation above has a shared expression prefix. A recursive-descent par
 Declarations cannot appear inside blocks.
 - **Function bodies (`fn`)**: A function with a non-`Unit` return type must exit via `return <expr>;` along every execution path (for example, ending with `return <expr>;` or returning in all branches of an `if`/`else` or `match`). A bare tail expression at the top level of a non-`Unit` function body (or a path without `return`) produces `NGJ-RETURN-001` (except when the body is a bare typed hole `{ ?hole }`, which remains `INCOMPLETE` with `NGJ-HOLE-001`). A `Unit` function may omit `return`, use `return;`, or use `return ();`.
 - **Expression blocks (`if`, `match`, `for-yield`)**: When used as value expressions, branches evaluate to their tail expression (or may exit the enclosing function early via `return <expr>;`).
-- **Expression statements**: Non-`return` expression statements must have `Unit` type (`NGJ-TYPE-016`), preventing silently discarding a value or `Result`.
+- **Expression statements**: Non-`return` expression statements must have `Unit` type (`NGJ-TYPE-017`), preventing silently discarding a value or `Result`.
 
 An if with else requires both branch types to agree under the expected type (unless a branch diverges via `return`). An if without else requires a Unit or returning then-branch and produces Unit. Braces are mandatory even for nested else-if. Match checks all variants and compatible arm result types. There are no implicit numeric widenings.
 
@@ -209,10 +209,10 @@ Records and enum variants compile to Valhalla value classes in a sealed hierarch
 enum Shape { Circle(r: Float), Rectangle(w: Float, h: Float), Point() }
 
 // JVM output (conceptual)
-sealed value interface Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {}
-final value class Shape.Circle implements Shape { float r; }
-final value class Shape.Rectangle implements Shape { float w; float h; }
-final value class Shape.Point implements Shape {}
+sealed abstract value class Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {}
+final value class Shape.Circle extends Shape { float r; }
+final value class Shape.Rectangle extends Shape { float w; float h; }
+final value class Shape.Point extends Shape {}
 ```
 
 ### 8.5 Identity types (staged feature)
