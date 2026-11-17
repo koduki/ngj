@@ -1,4 +1,5 @@
-// v0.3 target example. Current v0.2 compiler migration is pending.
+// v0.3 syntax example. The compiler accepts this syntax.
+// Runtime execution requires JDK 28 EA + --enable-preview.
 package example.syntax;
 
 public record Amount(value: Long);

@@ -1,7 +1,7 @@
 # NGJ — Concept & Language Specification
 
 > Draft v0.3 / 2026-11-17
-> Status: v0.3 target specification. An initial v0.2 compiler exists (Java 25 baseline); Valhalla基盤への移行は保留中。
+> Status: v0.3 target specification. MVPコンパイラはJDK 25でビルドし、JDK 28 EA + `--enable-preview`で実行検証する。
 > Baseline: Valhalla対応JDK（JDK 28 EA + `--enable-preview`）。Valhallaはオプションのバックエンドではなく、言語設計の基盤である。
 
 ## 1. 目的・適用範囲
@@ -132,12 +132,12 @@ Identity型が必要な場面:
 Value型の`==`はフィールドを再帰的に比較する。フィールドがvalue型なら値比較、identity型なら参照比較。
 
 ```
-data Person { name: String, age: Int }
+record Person(name: String, age: Int);
 Person("Alice", 30) == Person("Alice", 30)  // true（値等価）
 
 identity class Counter { var count: Int }
-let c1 = Counter(0)
-let c2 = Counter(0)
+val c1 = Counter(0);
+val c2 = Counter(0);
 c1 == c2   // false（異なるインスタンス）
 c1 === c1  // true（同一インスタンス）
 ```
@@ -189,12 +189,14 @@ let opt: Option<Int> = Some(42)
 
 ```
 // 不在の表現
-fn findUser(id: UserId) -> Option<User> ! { DbRead }
+fn findUser(id: UserId) -> Option<User> effects(DbRead) {
+    // ...
+}
 
 // 使用側
-match findUser(id) {
-    Some(user) => processUser(user),
-    None => handleNotFound()
+match (findUser(id)) {
+    case Some(user) => { processUser(user) }
+    case None() => { handleNotFound() }
 }
 ```
 
@@ -232,28 +234,28 @@ NGJの`enum`は**sealed algebraic data type（密封代数的データ型）**�
 ```
 // ペイロードなしバリアント（古典的enum）
 enum Direction {
-    North,
-    South,
-    East,
-    West
+    North(),
+    South(),
+    East(),
+    West()
 }
 
 // ペイロード付きバリアント（代数的データ型）
 enum Shape {
-    Circle { radius: Float },
-    Rectangle { width: Float, height: Float },
-    Point  // ペイロードなしも混在可能
+    Circle(radius: Float),
+    Rectangle(width: Float, height: Float),
+    Point()  // ペイロードなしも混在可能（括弧必須）
 }
 
 // ジェネリックenum
 enum Option<T> {
-    Some { value: T },
-    None
+    Some(value: T),
+    None()
 }
 
 enum Result<T, E> {
-    Ok { value: T },
-    Err { error: E }
+    Ok(value: T),
+    Err(error: E)
 }
 ```
 
@@ -266,28 +268,28 @@ enum Result<T, E> {
 - ジェネリクスで自然に使用可能
 
 ```
-let s1 = Shape.Circle { radius: 5.0 }
-let s2 = Shape.Circle { radius: 5.0 }
+val s1 = Circle(5.0);
+val s2 = Circle(5.0);
 s1 == s2  // true（値等価）
 
-let opt1: Option<Int> = Some { value: 42 }
-let opt2: Option<Int> = Some { value: 42 }
+val opt1: Option<Int> = Some(42);
+val opt2: Option<Int> = Some(42);
 opt1 == opt2  // true
 ```
 
 **バリアントは型ではない:**
-`Shape.Circle`は`Shape`型の値を構築する構文であり、独立した型ではない。`Shape`型の変数のみが存在する。
+`Circle`は`Shape`型の値を構築する構文であり、独立した型ではない。`Shape`型の変数のみが存在する。
 
 #### 2.4.3 パターンマッチング
 
 `match`式はenumの網羅的分岐を提供する。**網羅性検査は言語の中核保証**であり、欠落バリアントは正確な診断で報告される。
 
 ```
-fn area(shape: Shape) -> Float ! {} {
-    match shape {
-        Circle { radius } => 3.14159 * radius * radius,
-        Rectangle { width, height } => width * height,
-        Point => 0.0
+fn area(shape: Shape) -> Float effects() {
+    match (shape) {
+        case Circle(radius) => { 3.14159 * radius * radius }
+        case Rectangle(width, height) => { width * height }
+        case Point() => { 0.0 }
     }
 }
 ```
@@ -299,10 +301,10 @@ fn area(shape: Shape) -> Float ! {} {
 
 ```
 // エラー例: 'Point' variant not covered in match expression
-fn broken_area(shape: Shape) -> Float ! {} {
-    match shape {
-        Circle { radius } => 3.14159 * radius * radius,
-        Rectangle { width, height } => width * height
+fn broken_area(shape: Shape) -> Float effects() {
+    match (shape) {
+        case Circle(radius) => { 3.14159 * radius * radius }
+        case Rectangle(width, height) => { width * height }
         // Point が欠落 → コンパイルエラー
     }
 }
@@ -312,30 +314,33 @@ fn broken_area(shape: Shape) -> Float ! {} {
 
 ```
 enum Expr {
-    Literal { value: Int },
-    Add { left: Expr, right: Expr },
-    Mul { left: Expr, right: Expr }
+    Literal(value: Int),
+    Add(left: Expr, right: Expr),
+    Mul(left: Expr, right: Expr)
 }
 
-fn eval(expr: Expr) -> Int ! {} {
-    match expr {
-        Literal { value } => value,
-        Add { left: Literal { value: a }, right: Literal { value: b } } => a + b,
-        Add { left, right } => eval(left) + eval(right),
-        Mul { left, right } => eval(left) * eval(right)
+fn eval(expr: Expr) -> Int effects() {
+    match (expr) {
+        case Literal(value) => { value }
+        case Add(Literal(a), Literal(b)) => { a + b }
+        case Add(left, right) => { eval(left) + eval(right) }
+        case Mul(left, right) => { eval(left) * eval(right) }
     }
 }
 ```
 
 **ガード条件:**
 
+ガード条件（`if`付きパターン）は v0.3 で**未実装**。EBNF.md では deferred として定義されている。将来実装時の構文案:
+
 ```
-fn describe(n: Int) -> String ! {} {
-    match n {
-        x if x < 0 => "negative",
-        0 => "zero",
-        x if x < 10 => "small positive",
-        _ => "large positive"
+// 将来の構文案（現在は使用不可）
+fn describe(n: Int) -> String effects() {
+    match (n) {
+        case x if x < 0 => { "negative" }
+        case 0 => { "zero" }
+        case x if x < 10 => { "small positive" }
+        case _ => { "large positive" }
     }
 }
 ```
@@ -346,41 +351,36 @@ fn describe(n: Int) -> String ! {} {
 
 ```
 // 標準ライブラリでの定義（概念）
-package std
+package std;
 
 public enum Option<T> {
-    Some { value: T },
-    None
+    Some(value: T),
+    None()
 }
 
 public enum Result<T, E> {
-    Ok { value: T },
-    Err { error: E }
+    Ok(value: T),
+    Err(error: E)
 }
 ```
 
 **`?`演算子のルール:**
 
-`?`演算子は`Result`と`Option`に対して特別な伝播動作を持つ。これは構文糖であり、型の特別扱いではない。
+`?`演算子は`Result`に対してのみ特別な伝播動作を持つ。これは構文糖であり、型の特別扱いではない。
 
 ```
-// expr? の展開（Resultの場合）
-match expr {
-    Ok { value } => value,
-    Err { error } => return Err { error }
-}
-
-// expr? の展開（Optionの場合）
-match expr {
-    Some { value } => value,
-    None => return None
+// expr? の展開（Resultの場合のみ）
+match (expr) {
+    case Ok(value) => { value }
+    case Err(error) => { return Err(error) }
 }
 ```
 
 `?`は以下の条件で使用可能:
 - 式の型が`Result<T, E>`で、囲む関数の戻り値型が`Result<U, E>`（同じE）
-- 式の型が`Option<T>`で、囲む関数の戻り値型が`Option<U>`
 - 異なる`E`への変換は明示的な`mapErr`を要求
+
+**重要:** `Option<T>`に対する`?`演算子はv0.3で**使用不可**（NGJ-TYPE-020）。`Option`の値を取り出すには`match`を使用するか、`toResult`で明示的に`Result`へ変換する。
 
 #### 2.4.5 ジェネリックEnum
 
@@ -388,13 +388,13 @@ Enumは型パラメータを持てる。
 
 ```
 enum Either<L, R> {
-    Left { value: L },
-    Right { value: R }
+    Left(value: L),
+    Right(value: R)
 }
 
 enum Tree<T> {
-    Leaf { value: T },
-    Node { left: Tree<T>, right: Tree<T> }
+    Leaf(value: T),
+    Node(left: Tree<T>, right: Tree<T>)
 }
 ```
 
@@ -403,10 +403,13 @@ enum Tree<T> {
 
 ```
 enum List<T> {
-    Cons { head: T, tail: List<T> },
-    Nil
+    Cons(head: T, tail: List<T>),
+    Nil()
 }
 ```
+
+**ジェネリック enum の現状:**
+ユーザー定義ジェネリック enum の宣言はパーサで受理されるが、使用はNGJ-PARSE-004で拒否される。`Result<T,E>`と`Option<T>`は標準ライブラリの組み込み型として特別に許可される。完全なジェネリック enum サポートは後続プロファイルで提供予定。
 
 #### 2.4.6 JVM表現
 
@@ -415,34 +418,35 @@ Enumはsealed hierarchyのvalue classesとして出力される。
 ```
 // NGJ
 enum Shape {
-    Circle { radius: Float },
-    Rectangle { width: Float, height: Float },
-    Point
+    Circle(radius: Float),
+    Rectangle(width: Float, height: Float),
+    Point()
 }
 
 // JVM出力（概念）
-public sealed value interface Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {
+// JEP 401 にはvalue interfaceは存在しないため、sealed abstract value classを使用
+public abstract sealed value class Shape permits Shape$Circle, Shape$Rectangle, Shape$Point {
 }
 
-public final value class Shape.Circle implements Shape {
+public final value class Shape$Circle extends Shape {
     private final float radius;
     // ...
 }
 
-public final value class Shape.Rectangle implements Shape {
+public final value class Shape$Rectangle extends Shape {
     private final float width;
     private final float height;
     // ...
 }
 
-public final value class Shape.Point implements Shape {
-    // singleton-like
+public final value class Shape$Point extends Shape {
+    // 空のペイロード
 }
 ```
 
 **JVM表現の詳細:**
-- 基底型はsealed value interface
-- 各バリアントはvalue class（permits句で列挙）
+- 基底型はsealed abstract value class（JEP 401にはvalue interfaceがないため）
+- 各バリアントはfinal value class（permits句で列挙）
 - ペイロードなしバリアントは最適化でシングルトン化可能
 - パターンマッチはinstanceofとキャストに展開
 
@@ -903,7 +907,7 @@ AOTレベル（JIT/Leyden/native-image）の統一的なUXとProject Leyden対�
 - Effect/Capability、Typestate、情報フロー、契約、再実行、信頼境界を追加。
 - サンプルは安全なアダプター境界を使う設計例へ更新。コンパイル済みと誤認させない。
 
-## 13. v0.3の複雑性削減
+## 15. v0.3の複雑性削減
 
 構文はEBNF.mdに一元化し、旧表記を別名として受理しない。通常終了は末尾式、回復可能な失敗はResultに統一する。全関数の境界型・Effectを明示し、推論は局所的に限定する。Scala方式のループを標準Listから導入し、callbackからの非局所退出を廃止する。所有権・並行性・情報フローの保証は各段階の検査が完成してから有効化する。
 

@@ -2,7 +2,7 @@
 
 **NGJ (`ngj`)** is a statically typed, expression-oriented JVM language designed for AI agents to generate and repair human-reviewable applications. It combines modern JVM foundations with a compiler that exposes types, effects, ownership constraints and actionable diagnostics during generation.
 
-**Status: v0.3 specification implemented.** The compiler, tests and fixtures use v0.3 canonical syntax (`package`/`public`/`record`/`val`/`var`, `effects()`, tail expressions, mandatory semicolons). The syntax migration is documented in [SYNTAX_MIGRATION.md](docs/SYNTAX_MIGRATION.md).
+**Status: v0.3 specification in progress.** The compiler uses v0.3 canonical syntax (`package`/`public`/`record`/`val`/`var`, `effects()`, tail expressions, mandatory semicolons). Core features (parsing, type checking, code generation for basic types) are implemented. Advanced features (enum ADT, full match exhaustiveness, value class output on JDK 28) are under development. See [MVP_COVERAGE.md](docs/MVP_COVERAGE.md) for detailed implementation status and [SYNTAX_MIGRATION.md](docs/SYNTAX_MIGRATION.md) for migration details.
 
 ## Design principles
 
@@ -19,7 +19,10 @@
 - [Syntax migration](docs/SYNTAX_MIGRATION.md): scope, compatibility and acceptance cases.
 
 - [Language specification](docs/SPECIFICATION.md): semantics, safety boundaries, JVM mapping and roadmap.
+- [Standard library](docs/STDLIB.md): value types, Option, Result, List and Java interop boundary.
+- [MVP coverage matrix](docs/MVP_COVERAGE.md): feature implementation status and Valhalla migration checklist.
 - [Agent tooling protocol](docs/AGENT_TOOLING.md): proposed CLI, JSON diagnostics and context API.
+- [Container guide](docs/CONTAINER.md): Docker build and runtime configuration.
 - [AOT design direction](docs/AOT.md): post-MVP strategy for Leyden AOT and native-image support.
 - [Validation plan](docs/VALIDATION.md): conformance cases, performance checks and controlled AI-generation experiments.
 - [Research basis](docs/RESEARCH.md): primary sources and the limits of transferring their findings to NGJ.
