@@ -324,6 +324,39 @@ public final class Java25CodeGenerator {
         };
     }
     
+    /**
+     * Infer the element type from a collection expression.
+     * For List<Int>, returns "Int". For unknown types, returns "Object".
+     */
+    private String inferElementType(CodeGenContext ctx, Expr iterableExpr) {
+        // Check if it's an identifier referencing a parameter with known List type
+        if (iterableExpr instanceof IdentExpr ident) {
+            // Look up the parameter in the function signature
+            for (var param : ctx.fn.params()) {
+                if (param.name().equals(ident.name())) {
+                    if (param.type() instanceof GenericTypeExpr gen) {
+                        if (gen.name().equals("List") && !gen.typeArgs().isEmpty()) {
+                            return getTypeName(gen.typeArgs().get(0));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // Check if it's a call that returns List
+        if (iterableExpr instanceof CallExpr call && call.callee() instanceof IdentExpr ident) {
+            if (functions.containsKey(ident.name())) {
+                var fn = functions.get(ident.name());
+                if (fn.returnType() instanceof GenericTypeExpr gen) {
+                    if (gen.name().equals("List") && !gen.typeArgs().isEmpty()) {
+                        return getTypeName(gen.typeArgs().get(0));
+                    }
+                }
+            }
+        }
+        return "Object";
+    }
+    
     private void generateBlock(CodeGenContext ctx, BlockExpr block) {
         for (var stmt : block.statements()) {
             generateStmt(ctx, stmt);
@@ -427,6 +460,9 @@ public final class Java25CodeGenerator {
     }
     
     private void generateFor(CodeGenContext ctx, ForExpr forExpr) {
+        // Infer element type from iterable
+        var elementType = inferElementType(ctx, forExpr.iterable());
+        
         // Generate iterable expression (should be List)
         generateExpr(ctx, forExpr.iterable());
         
@@ -480,9 +516,44 @@ public final class Java25CodeGenerator {
             MethodTypeDesc.of(ConstantDescs.CD_Object)
         );
         
-        // Store loop variable
-        int elemSlot = ctx.allocateLocal(forExpr.varName(), "Object");
-        ctx.code.astore(elemSlot);
+        // Unbox primitive element types
+        int elemSlot;
+        switch (elementType) {
+            case "Int" -> {
+                ctx.code.checkcast(ClassDesc.of("java.lang.Integer"));
+                ctx.code.invokevirtual(
+                    ClassDesc.of("java.lang.Integer"),
+                    "intValue",
+                    MethodTypeDesc.of(ConstantDescs.CD_int)
+                );
+                elemSlot = ctx.allocateLocal(forExpr.varName(), "Int");
+                ctx.code.istore(elemSlot);
+            }
+            case "Long" -> {
+                ctx.code.checkcast(ClassDesc.of("java.lang.Long"));
+                ctx.code.invokevirtual(
+                    ClassDesc.of("java.lang.Long"),
+                    "longValue",
+                    MethodTypeDesc.of(ConstantDescs.CD_long)
+                );
+                elemSlot = ctx.allocateLocal(forExpr.varName(), "Long");
+                ctx.code.lstore(elemSlot);
+            }
+            case "Bool" -> {
+                ctx.code.checkcast(ClassDesc.of("java.lang.Boolean"));
+                ctx.code.invokevirtual(
+                    ClassDesc.of("java.lang.Boolean"),
+                    "booleanValue",
+                    MethodTypeDesc.of(ConstantDescs.CD_boolean)
+                );
+                elemSlot = ctx.allocateLocal(forExpr.varName(), "Bool");
+                ctx.code.istore(elemSlot);
+            }
+            default -> {
+                elemSlot = ctx.allocateLocal(forExpr.varName(), elementType);
+                ctx.code.astore(elemSlot);
+            }
+        }
         
         // Generate body
         generateBlock(ctx, forExpr.body());
@@ -1743,24 +1814,49 @@ public final class Java25CodeGenerator {
             
             classBuilder.withMethod(ConstantDescs.INIT_NAME, ctorDesc, ACC_PUBLIC, mb -> {
                 mb.withCode(code -> {
-                    code.aload(0);
-                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME, 
-                        MethodTypeDesc.of(ConstantDescs.CD_void));
-                    
-                    int slot = 1;
-                    for (var param : record.params()) {
-                        code.aload(0);
-                        var typeName = getTypeName(param.type());
-                        var fieldDesc = typeToClassDesc(param.type());
-                        if (typeName.equals("Int") || typeName.equals("Bool")) {
-                            code.iload(slot++);
-                        } else if (typeName.equals("Long")) {
-                            code.lload(slot);
-                            slot += 2;
-                        } else {
-                            code.aload(slot++);
+                    if (isValueClassTarget()) {
+                        // JEP 401: Value class constructor must assign ALL fields BEFORE super()
+                        // This is the strict initialization order required for value classes
+                        int slot = 1;
+                        for (var param : record.params()) {
+                            code.aload(0);
+                            var typeName = getTypeName(param.type());
+                            var fieldDesc = typeToClassDesc(param.type());
+                            if (typeName.equals("Int") || typeName.equals("Bool")) {
+                                code.iload(slot++);
+                            } else if (typeName.equals("Long")) {
+                                code.lload(slot);
+                                slot += 2;
+                            } else {
+                                code.aload(slot++);
+                            }
+                            code.putfield(classDesc, param.name(), fieldDesc);
                         }
-                        code.putfield(classDesc, param.name(), fieldDesc);
+                        // super() after field assignments for value classes
+                        code.aload(0);
+                        code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME, 
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                    } else {
+                        // Identity class: standard super() first, then fields
+                        code.aload(0);
+                        code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME, 
+                            MethodTypeDesc.of(ConstantDescs.CD_void));
+                        
+                        int slot = 1;
+                        for (var param : record.params()) {
+                            code.aload(0);
+                            var typeName = getTypeName(param.type());
+                            var fieldDesc = typeToClassDesc(param.type());
+                            if (typeName.equals("Int") || typeName.equals("Bool")) {
+                                code.iload(slot++);
+                            } else if (typeName.equals("Long")) {
+                                code.lload(slot);
+                                slot += 2;
+                            } else {
+                                code.aload(slot++);
+                            }
+                            code.putfield(classDesc, param.name(), fieldDesc);
+                        }
                     }
                     
                     code.return_();
@@ -1963,24 +2059,48 @@ public final class Java25CodeGenerator {
                     
                     classBuilder.withMethod(ConstantDescs.INIT_NAME, ctorDesc, ACC_PUBLIC, mb -> {
                         mb.withCode(code -> {
-                            code.aload(0);
-                            code.invokespecial(baseClassDesc, ConstantDescs.INIT_NAME,
-                                MethodTypeDesc.of(ConstantDescs.CD_void));
-                            
-                            int slot = 1;
-                            for (var field : variantFields) {
-                                code.aload(0);
-                                var typeName = getTypeName(field.type());
-                                var fieldDesc = typeToClassDesc(field.type());
-                                if (typeName.equals("Int") || typeName.equals("Bool")) {
-                                    code.iload(slot++);
-                                } else if (typeName.equals("Long")) {
-                                    code.lload(slot);
-                                    slot += 2;
-                                } else {
-                                    code.aload(slot++);
+                            if (isValueClassTarget()) {
+                                // JEP 401: Value class constructor must assign ALL fields BEFORE super()
+                                int slot = 1;
+                                for (var field : variantFields) {
+                                    code.aload(0);
+                                    var typeName = getTypeName(field.type());
+                                    var fieldDesc = typeToClassDesc(field.type());
+                                    if (typeName.equals("Int") || typeName.equals("Bool")) {
+                                        code.iload(slot++);
+                                    } else if (typeName.equals("Long")) {
+                                        code.lload(slot);
+                                        slot += 2;
+                                    } else {
+                                        code.aload(slot++);
+                                    }
+                                    code.putfield(finalVariantClassDesc, field.name(), fieldDesc);
                                 }
-                                code.putfield(finalVariantClassDesc, field.name(), fieldDesc);
+                                // super() after field assignments for value classes
+                                code.aload(0);
+                                code.invokespecial(baseClassDesc, ConstantDescs.INIT_NAME,
+                                    MethodTypeDesc.of(ConstantDescs.CD_void));
+                            } else {
+                                // Identity class: standard super() first, then fields
+                                code.aload(0);
+                                code.invokespecial(baseClassDesc, ConstantDescs.INIT_NAME,
+                                    MethodTypeDesc.of(ConstantDescs.CD_void));
+                                
+                                int slot = 1;
+                                for (var field : variantFields) {
+                                    code.aload(0);
+                                    var typeName = getTypeName(field.type());
+                                    var fieldDesc = typeToClassDesc(field.type());
+                                    if (typeName.equals("Int") || typeName.equals("Bool")) {
+                                        code.iload(slot++);
+                                    } else if (typeName.equals("Long")) {
+                                        code.lload(slot);
+                                        slot += 2;
+                                    } else {
+                                        code.aload(slot++);
+                                    }
+                                    code.putfield(finalVariantClassDesc, field.name(), fieldDesc);
+                                }
                             }
                             
                             code.return_();
