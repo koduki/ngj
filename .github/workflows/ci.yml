@@ -110,21 +110,50 @@ jobs:
         NGJ_RUNTIME_CLASS_VERSION: "72"
         JAVA_HOME_28: /opt/jdk-28
     
+    - name: Run CodeGenTest on JDK 28 (verify classfile generation)
+      run: |
+        echo "=== Running CodeGenTest on JDK 28 EA ==="
+        ./gradlew test --tests "ngj.CodeGenTest" \
+          -Dorg.gradle.java.installations.paths=/opt/jdk-28 \
+          -Dtest.jvm.args="--enable-preview" \
+          -PtestJavaVersion=28
+      env:
+        NGJ_BUILD_JDK_VERSION: "25"
+        NGJ_RUNTIME_CLASS_VERSION: "72"
+        JAVA_HOME_28: /opt/jdk-28
+    
     - name: Verify runtime tests actually ran (not skipped)
       run: |
         echo "=== Verifying JDK 28 Runtime Tests Executed ==="
-        if [ -f compiler/build/reports/tests/test/index.html ]; then
-          echo "Test report exists"
-          # Check for skipped runtime tests
-          if grep -q "positiveFixture_loadsAndExecutesOnJDK28.*passed" compiler/build/reports/tests/test/classes/*.html 2>/dev/null; then
-            echo "✓ Runtime tests executed and passed"
-          else
-            echo "Checking test results..."
-            grep -r "JDK28RuntimeTest" compiler/build/reports/tests/test/ 2>/dev/null | head -20 || true
-          fi
-        else
-          echo "Warning: Test report not found"
+        if [ ! -f compiler/build/reports/tests/test/index.html ]; then
+          echo "ERROR: Test report not found"
+          exit 1
         fi
+        
+        # Count passed and skipped tests
+        PASSED=$(grep -o 'passed"' compiler/build/reports/tests/test/index.html 2>/dev/null | wc -l || echo 0)
+        SKIPPED=$(grep -o 'skipped"' compiler/build/reports/tests/test/index.html 2>/dev/null | wc -l || echo 0)
+        FAILED=$(grep -o 'failed"' compiler/build/reports/tests/test/index.html 2>/dev/null | wc -l || echo 0)
+        
+        echo "Test results:"
+        echo "  Passed: $PASSED"
+        echo "  Skipped: $SKIPPED"
+        echo "  Failed: $FAILED"
+        
+        # Fail if no tests passed (they were all skipped)
+        if [ "$PASSED" -eq 0 ]; then
+          echo "ERROR: No tests passed! All tests may have been skipped."
+          echo "This likely means JDK 28 was not properly configured for test execution."
+          exit 1
+        fi
+        
+        # Fail if any tests failed
+        if [ "$FAILED" -gt 0 ]; then
+          echo "ERROR: $FAILED test(s) failed"
+          exit 1
+        fi
+        
+        echo "✓ $PASSED tests passed on JDK 28"
     
     - name: Upload JDK 28 test results
       uses: actions/upload-artifact@v4

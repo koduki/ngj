@@ -53,22 +53,14 @@ class JDK28RuntimeTest {
     /**
      * Expected failures with reasons (to be fixed in PR 3).
      * 
-     * | Fixture               | Failure Type           | Root Cause                                        |
-     * |-----------------------|------------------------|---------------------------------------------------|
-     * | data_type.ngj         | ClassFormatError       | Record fields missing strict flag (JEP 401)       |
-     * | enum_match.ngj        | Wrong result           | match codegen returns first arm (:1315-1321)      |
-     * | result_option.ngj     | ClassFormatError       | DivError record missing strict flag               |
-     * | option_match.ngj      | VerifyError            | Option match codegen issue                        |
-     * | listof_call.ngj       | IncompatibleClassChange| listOf InterfaceMethodref issue                   |
-     * | for_yield.ngj         | VerifyError            | for-yield codegen issue                           |
+     * All fixtures should now pass on JDK 28 runtime after PR #16 fixes:
+     * - ACC_STRICT flag added to value class fields (JEP 401)
+     * - match codegen fixed for enum and Option patterns
+     * - for-yield codegen fixed
+     * - Option/Result pattern matching fixed
      */
     private static final List<String> EXPECTED_RUNTIME_FAILURES = List.of(
-        "data_type.ngj",      // ClassFormatError: missing strict flag
-        "enum_match.ngj",     // Wrong result: match returns first arm
-        "result_option.ngj",  // ClassFormatError: DivError record
-        "option_match.ngj",   // VerifyError: Option match codegen
-        "listof_call.ngj",    // IncompatibleClassChangeError: listOf
-        "for_yield.ngj"       // VerifyError: for-yield codegen
+        // All expected failures have been fixed in PR #16
     );
     
     @TempDir
@@ -345,10 +337,10 @@ class JDK28RuntimeTest {
         }
     }
     
-    // ========== Expected Failure Tests ==========
+    // ========== Runtime Verification Tests ==========
     
     @Test
-    void expectedFailure_dataType_classFormatError() throws Exception {
+    void runtimeVerify_dataType_loadsSuccessfully() throws Exception {
         assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
             "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
         
@@ -372,21 +364,15 @@ class JDK28RuntimeTest {
         try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
             for (Path classFile : outputs) {
                 String className = getClassName(classFile, tempDir);
-                try {
-                    loader.loadClass(className);
-                    fail("UNEXPECTED PASS: data_type.ngj should fail with ClassFormatError " +
-                         "(record fields missing strict flag). PR 3 will fix this.");
-                } catch (ClassFormatError e) {
-                    System.out.println("EXPECTED FAILURE: data_type.ngj - " + e.getMessage());
-                    assertTrue(true, "ClassFormatError is expected until PR 3 fixes strict fields");
-                    return;
-                }
+                Class<?> clazz = loader.loadClass(className);
+                assertNotNull(clazz, "Class should load successfully: " + className);
             }
         }
+        System.out.println("SUCCESS: data_type.ngj loads successfully on JDK " + jdkVersion);
     }
     
     @Test
-    void expectedFailure_enumMatch_wrongResult() throws Exception {
+    void runtimeVerify_enumMatch_returnsCorrectResults() throws Exception {
         assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
             "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
         
@@ -412,61 +398,53 @@ class JDK28RuntimeTest {
             
             for (Path classFile : outputs) {
                 String className = getClassName(classFile, tempDir);
-                try {
-                    Class<?> clazz = loader.loadClass(className);
-                    if (className.contains("colorToInt")) {
-                        colorToIntFn = clazz;
-                    }
-                } catch (ClassFormatError | VerifyError e) {
-                    System.out.println("EXPECTED FAILURE: enum_match.ngj - " + e.getClass().getSimpleName() + ": " + e.getMessage());
-                    assertTrue(true, "Class loading error is expected until PR 3 fixes enum codegen");
-                    return;
+                Class<?> clazz = loader.loadClass(className);
+                if (className.contains("colorToInt")) {
+                    colorToIntFn = clazz;
                 }
             }
             
-            if (colorToIntFn != null) {
-                Method invoke = null;
-                for (Method m : colorToIntFn.getDeclaredMethods()) {
-                    if (m.getName().equals("invoke")) {
-                        invoke = m;
-                        break;
-                    }
-                }
-                
-                if (invoke != null) {
-                    Object red = getEnumVariant(loader, "test.enumeration.Red");
-                    Object green = getEnumVariant(loader, "test.enumeration.Green");
-                    Object blue = getEnumVariant(loader, "test.enumeration.Blue");
-                    
-                    if (red != null && green != null && blue != null) {
-                        Object redResult = invoke.invoke(null, red);
-                        Object greenResult = invoke.invoke(null, green);
-                        Object blueResult = invoke.invoke(null, blue);
-                        
-                        System.out.println("enum_match.ngj results:");
-                        System.out.println("  colorToInt(Red) = " + redResult + " (expected 0)");
-                        System.out.println("  colorToInt(Green) = " + greenResult + " (expected 1)");
-                        System.out.println("  colorToInt(Blue) = " + blueResult + " (expected 2)");
-                        
-                        if (redResult.equals(0) && greenResult.equals(1) && blueResult.equals(2)) {
-                            fail("UNEXPECTED PASS: enum_match.ngj now works correctly. Remove from EXPECTED_RUNTIME_FAILURES.");
-                        } else {
-                            System.out.println("EXPECTED FAILURE: match returns wrong results (PR 3 will fix)");
-                            assertTrue(true);
-                        }
-                        return;
-                    }
+            assertNotNull(colorToIntFn, "colorToInt function class should be loaded");
+            
+            Method invoke = null;
+            for (Method m : colorToIntFn.getDeclaredMethods()) {
+                if (m.getName().equals("invoke")) {
+                    invoke = m;
+                    break;
                 }
             }
             
-            System.out.println("EXPECTED FAILURE: enum_match.ngj - could not fully verify");
+            assertNotNull(invoke, "invoke method should exist");
+            
+            // Enum variants are generated as nested classes: EnumName$VariantName
+            Object red = getEnumVariant(loader, "test.enumeration.Color$Red");
+            Object green = getEnumVariant(loader, "test.enumeration.Color$Green");
+            Object blue = getEnumVariant(loader, "test.enumeration.Color$Blue");
+            
+            assertNotNull(red, "Red variant should be instantiable");
+            assertNotNull(green, "Green variant should be instantiable");
+            assertNotNull(blue, "Blue variant should be instantiable");
+            
+            Object redResult = invoke.invoke(null, red);
+            Object greenResult = invoke.invoke(null, green);
+            Object blueResult = invoke.invoke(null, blue);
+            
+            System.out.println("enum_match.ngj results:");
+            System.out.println("  colorToInt(Red) = " + redResult + " (expected 0)");
+            System.out.println("  colorToInt(Green) = " + greenResult + " (expected 1)");
+            System.out.println("  colorToInt(Blue) = " + blueResult + " (expected 2)");
+            
+            assertEquals(0, redResult, "colorToInt(Red) should return 0");
+            assertEquals(1, greenResult, "colorToInt(Green) should return 1");
+            assertEquals(2, blueResult, "colorToInt(Blue) should return 2");
         }
+        System.out.println("SUCCESS: enum_match.ngj works correctly on JDK " + jdkVersion);
     }
     
     @Test
-    void expectedFailure_bareNone_returnsNull() throws Exception {
-        // Test that bare `return None;` passes type check but returns null at runtime
-        // This violates the null-free guarantee and should be fixed in PR 3
+    void bareNone_isRejectedByTypeChecker() throws Exception {
+        // Test that bare `return None;` is rejected by the type checker
+        // NGJ-TYPE-022: 'None' must be called with parentheses: None()
         
         String source = """
             package test.none;
@@ -494,53 +472,24 @@ class JDK28RuntimeTest {
             .filter(d -> d.severity() == Severity.ERROR)
             .toList();
         
-        // Document current behavior: bare None passes type check (should be rejected in PR 3)
-        if (parseErrors.isEmpty() && typeErrors.isEmpty()) {
-            System.out.println("EXPECTED FAILURE: bare 'return None;' passes type check (should require None())");
-            
-            assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
-                "Runtime verification requires JDK " + REQUIRED_JDK_FOR_RUNTIME);
-            
-            var codeGen = new Java25CodeGenerator();
-            codeGen.setOutputDir(tempDir);
-            var outputs = codeGen.generate(unit);
-            
-            URL[] urls = { tempDir.toUri().toURL() };
-            try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
-                for (Path classFile : outputs) {
-                    String className = getClassName(classFile, tempDir);
-                    if (className.contains("getNone")) {
-                        try {
-                            Class<?> clazz = loader.loadClass(className);
-                            Method invoke = clazz.getMethod("invoke");
-                            Object result = invoke.invoke(null);
-                            
-                            if (result == null) {
-                                System.out.println("EXPECTED FAILURE: getNone() returned null (violates null-free guarantee)");
-                                assertTrue(true, "bare None returns null - PR 3 will fix by requiring None()");
-                            } else {
-                                fail("UNEXPECTED PASS: getNone() returned " + result + " instead of null");
-                            }
-                            return;
-                        } catch (ClassFormatError | VerifyError e) {
-                            System.out.println("EXPECTED FAILURE: bare_none.ngj - " + e.getClass().getSimpleName());
-                            assertTrue(true);
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            System.out.println("UNEXPECTED PASS: bare None correctly rejected with errors: " + 
-                (parseErrors.isEmpty() ? typeErrors : parseErrors));
-            fail("If this passes, remove from expected failures - bare None is now correctly rejected");
-        }
+        // Bare None should be rejected with NGJ-TYPE-022
+        assertFalse(typeErrors.isEmpty(), "bare 'return None;' should produce type error");
+        
+        var noneError = typeErrors.stream()
+            .filter(d -> d.id().equals("NGJ-TYPE-022"))
+            .findFirst();
+        
+        assertTrue(noneError.isPresent(), 
+            "Expected NGJ-TYPE-022 error for bare None, got: " + typeErrors);
+        assertTrue(noneError.get().message().contains("None"),
+            "Error message should mention None");
+        
+        System.out.println("SUCCESS: bare 'return None;' correctly rejected with " + noneError.get().id());
     }
     
     @Test
-    void expectedFailure_targetOutputIdentical() throws Exception {
-        // Test that --target option does not affect output (all targets produce identical bytes)
-        // This should be fixed in PR 3 to produce different outputs for different targets
+    void targetOption_producesDifferentOutput() throws Exception {
+        // Test that --target option produces different outputs for different targets
         
         String source = """
             package test.target;
@@ -560,39 +509,63 @@ class JDK28RuntimeTest {
         var typeChecker = new TypeChecker();
         typeChecker.check(unit);
         
-        // Generate with default (valhalla) target
+        // Generate with valhalla target
         var codeGen1 = new Java25CodeGenerator();
+        codeGen1.setTarget("valhalla");
         Path dir1 = tempDir.resolve("valhalla");
         Files.createDirectories(dir1);
         codeGen1.setOutputDir(dir1);
         var outputs1 = codeGen1.generate(unit);
         
-        // Generate again (simulating different target - currently no API to set target)
+        // Generate with java25 target
         var codeGen2 = new Java25CodeGenerator();
+        codeGen2.setTarget("java25");
         Path dir2 = tempDir.resolve("java25");
         Files.createDirectories(dir2);
         codeGen2.setOutputDir(dir2);
         var outputs2 = codeGen2.generate(unit);
         
-        // Compare outputs - they should be identical (expected failure)
-        boolean identical = true;
+        // Compare outputs - they should be different
+        boolean different = false;
         for (int i = 0; i < outputs1.size() && i < outputs2.size(); i++) {
             byte[] bytes1 = Files.readAllBytes(outputs1.get(i));
             byte[] bytes2 = Files.readAllBytes(outputs2.get(i));
             if (!Arrays.equals(bytes1, bytes2)) {
-                identical = false;
+                different = true;
+                System.out.println("Target differentiation confirmed:");
+                System.out.println("  valhalla: " + bytes1.length + " bytes");
+                System.out.println("  java25: " + bytes2.length + " bytes");
                 break;
             }
         }
         
-        if (identical) {
-            System.out.println("EXPECTED FAILURE: --target produces identical output for all targets");
-            System.out.println("  Both valhalla and java25 targets produce class version " + targetClassVersion);
-            System.out.println("  PR 3 will fix by implementing target-specific codegen");
-            assertTrue(true, "Identical output is expected until PR 3 implements target differentiation");
-        } else {
-            fail("UNEXPECTED PASS: Different targets produce different output. Remove from expected failures.");
+        assertTrue(different, "Different targets should produce different output");
+        System.out.println("SUCCESS: --target option produces different output for different targets");
+        
+        // Verify java25 output loads on current JDK (without --enable-preview)
+        // This is important: java25 target should produce classes loadable without preview
+        System.out.println("Verifying java25 output loads on JDK " + jdkVersion + " without preview...");
+        URL[] urls = { dir2.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, null)) {
+            for (Path classFile : outputs2) {
+                String className = getClassName(classFile, dir2);
+                try {
+                    Class<?> clazz = loader.loadClass(className);
+                    System.out.println("  Loaded (java25 target): " + clazz.getName());
+                    
+                    // Try to invoke the answer() function
+                    if (className.endsWith("answer")) {
+                        Method invoke = clazz.getMethod("invoke");
+                        Object result = invoke.invoke(null);
+                        assertEquals(42, result, "answer() should return 42");
+                        System.out.println("  Executed answer() = " + result);
+                    }
+                } catch (ClassFormatError | VerifyError e) {
+                    fail("java25 target output should load without --enable-preview: " + e.getMessage());
+                }
+            }
         }
+        System.out.println("SUCCESS: java25 output loads on JDK " + jdkVersion + " without preview");
     }
     
     private Object getEnumVariant(URLClassLoader loader, String className) {
@@ -602,6 +575,137 @@ class JDK28RuntimeTest {
         } catch (Exception e) {
             return null;
         }
+    }
+    
+    // ========== Comprehensive Runtime Verification Tests ==========
+    
+    /**
+     * Verify arithmetic.ngj functions return correct values.
+     * Tests: add, subtract, multiply, divide, modulo
+     */
+    @Test
+    void runtimeVerify_arithmetic_returnsCorrectResults() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = readFixture("positive/arithmetic.ngj");
+        
+        var lexer = new Lexer(source, "arithmetic.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            // Load all arithmetic functions
+            Class<?> addFn = loadFunction(loader, outputs, "add");
+            Class<?> subtractFn = loadFunction(loader, outputs, "subtract");
+            Class<?> multiplyFn = loadFunction(loader, outputs, "multiply");
+            Class<?> divideFn = loadFunction(loader, outputs, "divide");
+            Class<?> moduloFn = loadFunction(loader, outputs, "modulo");
+            
+            assertNotNull(addFn, "add function should be loaded");
+            assertNotNull(subtractFn, "subtract function should be loaded");
+            assertNotNull(multiplyFn, "multiply function should be loaded");
+            assertNotNull(divideFn, "divide function should be loaded");
+            assertNotNull(moduloFn, "modulo function should be loaded");
+            
+            // Test add(5, 3) = 8
+            Method addInvoke = addFn.getMethod("invoke", int.class, int.class);
+            assertEquals(8, addInvoke.invoke(null, 5, 3), "add(5, 3) should return 8");
+            
+            // Test subtract(10, 4) = 6
+            Method subInvoke = subtractFn.getMethod("invoke", int.class, int.class);
+            assertEquals(6, subInvoke.invoke(null, 10, 4), "subtract(10, 4) should return 6");
+            
+            // Test multiply(6, 7) = 42
+            Method mulInvoke = multiplyFn.getMethod("invoke", int.class, int.class);
+            assertEquals(42, mulInvoke.invoke(null, 6, 7), "multiply(6, 7) should return 42");
+            
+            // Test divide(15, 3) = 5
+            Method divInvoke = divideFn.getMethod("invoke", int.class, int.class);
+            assertEquals(5, divInvoke.invoke(null, 15, 3), "divide(15, 3) should return 5");
+            
+            // Test modulo(17, 5) = 2
+            Method modInvoke = moduloFn.getMethod("invoke", int.class, int.class);
+            assertEquals(2, modInvoke.invoke(null, 17, 5), "modulo(17, 5) should return 2");
+            
+            System.out.println("SUCCESS: All arithmetic functions return correct results");
+        }
+    }
+    
+    /**
+     * Verify logic.ngj functions return correct boolean values.
+     */
+    @Test
+    void runtimeVerify_logic_returnsCorrectResults() throws Exception {
+        assumeTrue(jdkVersion >= REQUIRED_JDK_FOR_RUNTIME,
+            "Runtime tests require JDK " + REQUIRED_JDK_FOR_RUNTIME);
+        
+        String source = readFixture("positive/logic.ngj");
+        
+        var lexer = new Lexer(source, "logic.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var resolver = new NameResolver();
+        resolver.resolve(unit);
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var codeGen = new Java25CodeGenerator();
+        codeGen.setOutputDir(tempDir);
+        var outputs = codeGen.generate(unit);
+        
+        URL[] urls = { tempDir.toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, getClass().getClassLoader())) {
+            Class<?> andFn = loadFunction(loader, outputs, "and");
+            Class<?> orFn = loadFunction(loader, outputs, "or");
+            Class<?> notFn = loadFunction(loader, outputs, "not");
+            
+            if (andFn != null && orFn != null && notFn != null) {
+                Method andInvoke = andFn.getMethod("invoke", boolean.class, boolean.class);
+                assertEquals(true, andInvoke.invoke(null, true, true), "and(true, true) should return true");
+                assertEquals(false, andInvoke.invoke(null, true, false), "and(true, false) should return false");
+                
+                Method orInvoke = orFn.getMethod("invoke", boolean.class, boolean.class);
+                assertEquals(true, orInvoke.invoke(null, true, false), "or(true, false) should return true");
+                assertEquals(false, orInvoke.invoke(null, false, false), "or(false, false) should return false");
+                
+                Method notInvoke = notFn.getMethod("invoke", boolean.class);
+                assertEquals(false, notInvoke.invoke(null, true), "not(true) should return false");
+                assertEquals(true, notInvoke.invoke(null, false), "not(false) should return true");
+                
+                System.out.println("SUCCESS: All logic functions return correct results");
+            }
+        }
+    }
+    
+    /**
+     * Helper to load a function class by name from outputs.
+     */
+    private Class<?> loadFunction(URLClassLoader loader, List<Path> outputs, String functionName) {
+        for (Path classFile : outputs) {
+            String className = getClassName(classFile, tempDir);
+            if (className.toLowerCase().contains(functionName.toLowerCase())) {
+                try {
+                    return loader.loadClass(className);
+                } catch (Exception e) {
+                    System.out.println("Failed to load " + functionName + ": " + e.getMessage());
+                }
+            }
+        }
+        return null;
     }
     
     // ========== Helper Methods ==========
