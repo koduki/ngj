@@ -20,3 +20,16 @@ Thumbs.db
 *.ear
 *.log
 hs_err_pid*
+
+# Local /ship orchestrator state & transient reports
+.ship/
+__pycache__/
+*.pyc
+
+# Local secrets & signing material
+.env
+.env.*
+*.keystore
+*.jks
+*.p12
+

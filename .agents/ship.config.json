@@ -1,0 +1,132 @@
+{
+  "schema": 2,
+  "project": {
+    "name": "NGJ",
+    "repository": "koduki/ngj",
+    "defaultBranch": "main"
+  },
+  "execution": {
+    "primaryEnvironment": "remote-agent",
+    "subagentWorkspaceMode": "inherit",
+    "concurrency": {
+      "express": 1,
+      "standard": 2,
+      "multiLayerMax": 3
+    },
+    "agents": {
+      "recon": "ship-recon",
+      "architect": "ship-architect",
+      "oracleAuthor": "oracle-test-author",
+      "implementer": "ship-implementer",
+      "verifier": "ship-verifier",
+      "reviewer": "ship-reviewer"
+    },
+    "models": {
+      "orchestrator": "inherit",
+      "recon": "flash",
+      "architect": "pro",
+      "oracleAuthor": "pro",
+      "implementer": "inherit",
+      "verifier": "flash",
+      "reviewer": "pro"
+    },
+    "implementerTiers": {
+      "standard": "flash",
+      "complex": "inherit"
+    },
+    "maxRetries": {
+      "impl": 2,
+      "codex": 2,
+      "ci": 2
+    }
+  },
+  "grilling": {
+    "mode": "one-by-one",
+    "autoSkipWhenClear": true,
+    "minQuestionsWhenAmbiguous": 1,
+    "maxQuestions": 20
+  },
+  "humanGates": [
+    "S2_CONTRACT_LOCK"
+  ],
+  "oracleTesting": {
+    "enabled": true,
+    "requireSeparateAgentProcess": true,
+    "authorBeforeImplementation": true,
+    "forbidReadingImplementationDiff": true,
+    "minimumLevel": "e2e-and-contract",
+    "requirePreImplRedCheck": true,
+    "lockOracleDuringImplementation": true,
+    "locations": {
+      "java": "compiler/src/test/java/ngj/oracle/<Name>OracleTest.java",
+      "node": "tests/oracle/<slug>.oracle.test.cjs",
+      "python": "tests/oracle/test_<slug>_oracle.py"
+    }
+  },
+  "codexReview": {
+    "primarySurface": "github-app",
+    "optionalLocalCli": true,
+    "autoMentionComment": "@codex review",
+    "autoMentionIfSilentSeconds": 90,
+    "timeoutSeconds": 600,
+    "runningGraceSeconds": 300,
+    "maxTotalTimeoutSeconds": 900,
+    "onTimeoutOrQuota": "escalate"
+  },
+  "ciSelfHeal": {
+    "track": "subscription-only",
+    "allowExternalApiBilling": false,
+    "maxAttempts": 2,
+    "microFixMaxLines": 50
+  },
+  "delivery": {
+    "defaultTarget": "merge-only",
+    "mergeStrategy": "squash",
+    "deleteBranch": true,
+    "releaseTagRequiresContractApproval": true
+  },
+  "boundaries": {
+    "neverUnlockablePatterns": [
+      "(^|/)\\.env(\\.|$)",
+      "\\.(keystore|jks|p12)$"
+    ],
+    "protectedPatterns": [
+      "(^|/)\\.github/workflows/",
+      "(^|/)scripts/guards/",
+      "(^|/)\\.agents/hooks\\.json$",
+      "(^|/)\\.agents/ship\\.config\\.json$",
+      "(^|/)\\.agents/agents/",
+      "(^|/)gradle/wrapper/gradle-wrapper\\.properties$",
+      "(^|/)Dockerfile$",
+      "(^|/)(LICENSE|THIRD_PARTY_NOTICES\\.md)$",
+      "(^|/)LICENSES/"
+    ],
+    "contractPatterns": [
+      "(^|/)docs/SPECIFICATION\\.md$",
+      "(^|/)docs/EBNF\\.md$",
+      "(^|/)docs/AGENT_TOOLING\\.md$",
+      "(^|/)docs/VALIDATION\\.md$",
+      "(^|/)docs/adr/",
+      "(^|/)docs/specs/[^/]+/spec\\.md$"
+    ],
+    "oraclePatterns": [
+      "(^|/)tests/oracle/",
+      "(^|/)compiler/src/test/java/ngj/oracle/",
+      "\\.oracle\\.test\\.cjs$",
+      "OracleTest\\.java$",
+      "_oracle\\.py$"
+    ]
+  },
+  "verification": {
+    "guards": "node scripts/guards/run-all-guards.mjs",
+    "oracle": "node scripts/guards/run-oracle-tests.mjs",
+    "syntax": [
+      "bash -n scripts/*.sh .githooks/pre-commit",
+      "node --check scripts/guards/run-all-guards.mjs scripts/guards/run-oracle-tests.mjs scripts/guards/ci-log-compressor.mjs .agents/skills/ship/scripts/session-init.mjs .agents/skills/ship/scripts/state.mjs .agents/skills/ship/scripts/stop-driver.mjs .agents/skills/ship/scripts/guard-boundaries.mjs .agents/skills/ship/scripts/guard-commands.mjs .agents/skills/ship/scripts/check-staged-boundaries.mjs .agents/skills/ship/scripts/run-codex-review.mjs .agents/skills/ship/scripts/wait-pr-gates.mjs"
+    ],
+    "tests": [
+      "node --test tests/*.test.cjs"
+    ],
+    "gradle": "NGJ_BUILD_JDK_VERSION=25 ./gradlew test"
+  }
+}

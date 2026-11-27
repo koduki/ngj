@@ -1,0 +1,105 @@
+name: Harness Guards & CI Triage
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  fast-guards-and-harness:
+    name: Non-ignorable Guards & Harness Tests
+    if: github.event_name != 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run non-ignorable NGJ guards
+        run: node scripts/guards/run-all-guards.mjs
+
+      - name: Run clean-room oracle test suites
+        run: node scripts/guards/run-oracle-tests.mjs
+
+      - name: Check bash, config JSON & harness script syntax
+        run: |
+          bash -n scripts/*.sh .githooks/pre-commit
+          node -e 'JSON.parse(require("node:fs").readFileSync(".agents/ship.config.json","utf8")); JSON.parse(require("node:fs").readFileSync(".agents/hooks.json","utf8"));'
+          node --check \
+            scripts/guards/run-all-guards.mjs \
+            scripts/guards/run-oracle-tests.mjs \
+            scripts/guards/ci-log-compressor.mjs \
+            .agents/skills/ship/scripts/session-init.mjs \
+            .agents/skills/ship/scripts/state.mjs \
+            .agents/skills/ship/scripts/stop-driver.mjs \
+            .agents/skills/ship/scripts/guard-boundaries.mjs \
+            .agents/skills/ship/scripts/guard-commands.mjs \
+            .agents/skills/ship/scripts/check-staged-boundaries.mjs \
+            .agents/skills/ship/scripts/run-codex-review.mjs \
+            .agents/skills/ship/scripts/wait-pr-gates.mjs
+
+      - name: Run agentic harness test suite
+        run: node --test tests/agentic-harness.test.cjs
+
+      - name: Audit protected boundary edits on PRs
+        if: github.event_name == 'pull_request'
+        run: |
+          CHANGED="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")"
+          PROTECTED="$(printf '%s\n' "$CHANGED" | grep -E '^(\.github/workflows/|scripts/guards/|\.agents/hooks\.json|\.agents/ship\.config\.json|\.agents/agents/|gradle/wrapper/gradle-wrapper\.properties|Dockerfile|LICENSE|THIRD_PARTY_NOTICES\.md|LICENSES/)' || true)"
+          if [[ -n "$PROTECTED" ]]; then
+            echo "::notice::Protected boundary files changed in this PR (requires human CODEOWNERS review):"
+            printf '%s\n' "$PROTECTED"
+          fi
+
+  ci-failure-triage:
+    name: LogSage-style CI Failure Triage Comment
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Compress failed CI logs and post bounded triage summary to PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PR_NUMBER}" ]]; then
+            echo "No associated same-repo PR found for run ${RUN_ID}; skipping triage comment."
+            exit 0
+          fi
+          gh run view "${RUN_ID}" --repo "${GH_REPO}" --log-failed > raw-failed.log 2>&1 || true
+          node scripts/guards/ci-log-compressor.mjs raw-failed.log > triage.md
+          {
+            echo "<!-- ngj-ci-triage run:${RUN_ID} -->"
+            cat triage.md
+            echo ""
+            echo "_Generated from failed run [\`${RUN_ID}\`](https://github.com/${GH_REPO}/actions/runs/${RUN_ID}). In Antigravity, \`/ship\` reads this compressed summary automatically (max 2 self-heal retries)._"
+          } > comment.md
+          gh pr comment "${PR_NUMBER}" --repo "${GH_REPO}" --body-file comment.md
