@@ -1,0 +1,12 @@
+# Protected architectural, toolchain, specification, and harness boundaries
+/.github/ @koduki
+/scripts/guards/ @koduki
+/.agents/hooks.json @koduki
+/.agents/ship.config.json @koduki
+/.agents/agents/ @koduki
+/gradle/wrapper/gradle-wrapper.properties @koduki
+/Dockerfile @koduki
+/docs/SPECIFICATION.md @koduki
+/docs/EBNF.md @koduki
+/docs/AGENT_TOOLING.md @koduki
+/docs/VALIDATION.md @koduki

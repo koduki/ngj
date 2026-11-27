@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "[pre-commit] Checking staged boundary locks..."
+node .agents/skills/ship/scripts/check-staged-boundaries.mjs
+
+echo "[pre-commit] Running NGJ non-ignorable guards..."
+node scripts/guards/run-all-guards.mjs --changed-only
+
+echo "[pre-commit] Running fast syntax checks..."
+bash -n scripts/*.sh .githooks/pre-commit
+node -e 'JSON.parse(require("node:fs").readFileSync(".agents/ship.config.json","utf8")); JSON.parse(require("node:fs").readFileSync(".agents/hooks.json","utf8"));'
+node --check \
+  scripts/guards/run-all-guards.mjs \
+  scripts/guards/run-oracle-tests.mjs \
+  scripts/guards/ci-log-compressor.mjs \
+  .agents/skills/ship/scripts/session-init.mjs \
+  .agents/skills/ship/scripts/state.mjs \
+  .agents/skills/ship/scripts/stop-driver.mjs \
+  .agents/skills/ship/scripts/guard-boundaries.mjs \
+  .agents/skills/ship/scripts/guard-commands.mjs \
+  .agents/skills/ship/scripts/check-staged-boundaries.mjs \
+  .agents/skills/ship/scripts/run-codex-review.mjs \
+  .agents/skills/ship/scripts/wait-pr-gates.mjs
+
+echo "[pre-commit] OK"

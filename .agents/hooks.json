@@ -1,0 +1,62 @@
+{
+  "ship-session-init": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node .agents/skills/ship/scripts/session-init.mjs",
+        "timeout": 10
+      }
+    ]
+  },
+  "ship-boundary-lock": {
+    "PreToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .agents/skills/ship/scripts/guard-boundaries.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "ship-command-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .agents/skills/ship/scripts/guard-commands.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "ship-fast-guard-after-edit": {
+    "PostToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/guards/run-all-guards.mjs --changed-only",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  },
+  "ship-auto-continue": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node .agents/skills/ship/scripts/stop-driver.mjs",
+        "timeout": 10
+      }
+    ]
+  }
+}
