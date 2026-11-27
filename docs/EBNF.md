@@ -131,14 +131,16 @@ These forms extend primary expressions. Lambda parameters always have explicit t
 
 ## 7. System features and implementation stages
 
-The pure core is the first migration target. resource/actor/build/scope/fork, borrowing, lifetimes, contracts, trace/event and derive remain staged language features in SPECIFICATION.md. Their checks must be implemented before their syntax is enabled. The core grammar makes no claim to cover their full productions.
+The pure core is the first migration target. `resource`/`actor`/`build`/`scope`/`fork`, capability capture/separation (`caps(...)`, `read`/`update`, `consume`), first-class value refinement & range types (`{v: T where expr}`, `Int[lo..hi]`), finite-state `protocol` types, `spec`/`proof`/`invariant`/`lemma`/`?proof_hole`, `trace`/`event`, and `@boundary_schema`/`@derive` remain staged language features in [SPECIFICATION.md](SPECIFICATION.md). Their checks must be implemented before their syntax is enabled. The core grammar makes no claim to cover their full productions.
 
 Public shape decisions for those stages:
-- scope/build share the ordinary block's propagation boundary; fork owns a separate boundary.
-- build names its builder explicitly rather than introducing an implicit this.
-- Effects at function boundaries remain explicit; effect polymorphism is deferred.
-- Lifetime/ownership rules begin with lexical scopes.
-- Library types (Secret, Capability, typestate markers) reuse ordinary type application.
+- `scope`/`build` share the ordinary block's propagation boundary; `fork` owns a separate boundary.
+- `build` names its builder explicitly rather than introducing an implicit `this`.
+- Effects at top-level function boundaries remain explicit (`effects(...)`), while closure/view/resource lifetimes and higher-order purity/effect propagation use Scala 3-style capture sets (`caps(...)`, `read`/`update`, explicit `consume`). Implicit parameters (`using`/`?=>`) are not adopted.
+- First-class value refinements (`{v: T where expr}`, `T where expr`, `Int[lo..hi]`, `Int[lo..<hi]`) are part of the Phase 2 core type syntax; predicates are restricted to pure NGJ expressions (`effects()`, no `var` access), with explicit `Result`-returning `refine` rather than unchecked runtime casts.
+- Finite-state `protocol` declarations generalize single-resource typestate and `must_resolve` checks using decidable state-transition checking and trace-inclusion `refines`.
+- Formal specifications (`spec fn`, `spec predicate`, `requires`, `ensures`) are syntactically separated from erasable proof hints (`proof { ... }`, `invariant`, `lemma`, `?proof_hole`), which are stripped during JVM classfile emission.
+- Library types (`Secret`, `Untrusted`, `Verified`, `Budget`) reuse ordinary type application.
 - No general macros or user-defined syntax extensions.
 
 ## 8. Valhalla foundation and value type semantics

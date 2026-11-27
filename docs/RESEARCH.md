@@ -1,8 +1,8 @@
 # Research basis and design decisions
 
-調査基準日: 2026-11-17。以下はNGJの設計判断に利用した一次資料。既存言語での実験や形式モデルをNGJの実証結果とみなさない。
+調査基準日: 2026-11-27。以下はNGJの設計判断に利用した一次資料。既存言語での実験や形式モデルをNGJの実証結果とみなさない。
 
-## AI生成・型システム関連
+## AI生成・型システム・形式手法関連
 
 | 資料 | 公開情報・位置づけ | NGJで採用する部分 | 適用の限界 |
 |---|---|---|---|
@@ -12,6 +12,22 @@
 | [Type-Constrained Code Generation](https://doi.org/10.1145/3729274) | PLDI 2025 | 型制約を生成側へ公開 | token-level constrained decodingは任意拡張 |
 | [Statically Contextualizing LLMs with Typed Holes](https://doi.org/10.1145/3689728) | OOPSLA 2024、[著者版](https://arxiv.org/abs/2409.00921) | 型付き穴、関連APIの取得、LSPとの接続 | 新言語の学習データ不足を完全に解決するとは限らない |
 | [Djinnlang](https://people.seas.harvard.edu/~chong/pubs/vericodegen2026djinnlang.pdf) | 2026年公開、AI for Verifiable Coding workshop表記の論文 | 固定した契約と実装/証明の分離 | 全プログラムの仕様一意性や自動証明は必須にしない |
+| [Securing Agents With Tracked Capabilities (`tacit`)](https://arxiv.org/abs/2603.00991) | ACM CAIS 2026（2026-05改訂、Odersky et al. / EPFL） | Capture CheckingによるCapability・局所純粋性（`Secret.map`）・スコープ寿命統合、Safe Mode、Agent/User二系統出力チャネル | タイミング側信道や外部プロセス内部までは型で防げない |
+| [Scala 3 Capture & Separation Checking](https://tanishiking.github.io/posts/introduction-to-scala-3s-capture-checking-and-separation-checking/) | ICFP/SPLASH 2025 (*System Capybara*)、2026-04解説 | `SharedCapability` (`read`) と `ExclusiveCapability` (`update`) 分離、`consume` によるmove意味論 | 実験的段階の言語設計であり、NGJでは明示構文に簡略化して適用 |
+| [Typestate via Revocable Capabilities](https://arxiv.org/abs/2510.08889) | PLDI 2026（2026-06改訂、Jia, Rompf et al.） | フロー依存失効による別名無効化、インスタンス固有のパス依存状態型 | 暗黙パラメータ（`?=>`）や暗黙Σ-liftingはNGJ正規構文方針に反するため不採用 |
+| [First-Class Refinement Types for Scala](https://arxiv.org/abs/2605.08369) | OOPSLA 2026（2026-09改訂、Bovel, Kunčak, Odersky） | 第一級値篩型、停止性不要の部分正当性意味論、等価事実 `x ~ e`、軽量・決定的E-graphソルバ | オーバーロード解決への応用はNGJ非目標。述語の純粋性は`effects()`とValue-firstで担保 |
+| [Practical Range Refinement Types with Inference (`ranger`)](https://arxiv.org/abs/2607.00824) | 2026-07 プレプリント（Aebi & Furia） | 整数範囲型略記（`[0..<len]`）、双方向候補推論、パス依存絞り込み、ループ単調性解析（QF-LIA） | 無検査のハイブリッドキャスト`!!`はAI悪用防止のため不採用（`Result`昇格へ置換） |
+| [Usability Barriers for Liquid Types](https://doi.org/10.1145/3729327) / [Barista](https://catarinagamboa.github.io/papers/barista_ase_26.pdf) | PLDI 2025 / ASE 2026（Gamboa et al.） | 二重メンタルモデル回避、Java Javadocからのテスト検証付きTypestate仕様合成フロー | 合成Adapter仕様は自動信頼せず、テスト通過・人間承認・ハッシュ固定を必須化 |
+| [Verified but Vacuous: Three Failure Surfaces](https://arxiv.org/abs/2611.05590) | 2026-11-03 プレプリント（Vempaty et al.） | Surface A（検証器受理）/ B（仕様拘束ゲート）/ C（意味的忠実度）の三層分離報告 | 構文的拘束（Surface B）だけでは恒真述語を防げないためSurface Cと併用必須 |
+| [DafnyCert: Certifying Specification Strength](https://arxiv.org/abs/2611.15548) | 2026-11-11 プレプリント（Silva, Martins, Mendes et al.） | 非空虚性検査、二回呼び出し強仕様証明、ミューテーション＋PBTによる弱仕様証人生成 | 強仕様（出力一意性）は決定的純粋関数に限定適用。他は`Post2Exe`を併用 |
+| [CryptoProver](https://arxiv.org/abs/2608.00965) | 2026-08 プレプリント（Sun, Dill, Barrett et al.） | Trust-First機械ゲート群（`spec-drift`, `axiom-drift`, `sibling-check`, `forbidden-construct`）、未解決義務集計、補題検索 | 既知の迂回経路を塞ぐゲートであり、仕様そのものの妥当性は別に監査が必要 |
+| [VeriContest](https://arxiv.org/abs/2605.08553) / [A Benchmark for Vericoding](https://arxiv.org/abs/2509.22908) | 2026-05 / POPL 2026 Dafny Workshop | `Post2Exe`（負例テスト拒否検査）、実行型とゴースト型の分離診断、言語複雑性と検証成功率の知見 | 競技プログラミング中心であり、外部I/Oや業務復旧契約はNGJ側で別途評価 |
+| [Type-Error Ablation and AI Coding Agents](https://arxiv.org/abs/2606.01522) | 2026-06 プレプリント（Krishnamurthi & Flatt） | 人間向け簡潔モードとAI向け詳細モード（完全導出スタック＋ソース式断片）の二層診断設計 | 単一型エラー修復が中心。複数エラー連鎖時のbyte budget制御はNGJ側で維持 |
+| [Identifying What the Solver Needs](https://openreview.net/forum?id=pDEW0n2YVV) | NeurIPS 2026 VeriCodeGen Workshop（Salomonsson et al.） | SMT失敗の機構分類（公理化ギャップ vs インスタンス化ギャップ）と欠落ヒント位置の局所化診断 | 局所化しても公理化ギャップは難しいため、標準補題カタログの検索APIと併用 |
+| [Concordat: Typed Sessions for LLM Agents](https://arxiv.org/abs/2610.37461) | 2026-10-30 プレプリント（Sikaroudi） | 決定可能な有限状態プロトコル型、到達性・非デッドエンド検査、BFS安全洗練検査、Mermaid図生成、線形分割予算 | 実行時ツール制限の研究であり、NGJでは静的型・コンパイル時検査へ主軸を移す |
+| [CaMeL](https://arxiv.org/abs/2503.18813) / [FIDES](https://arxiv.org/abs/2505.23643) / [Can CaMeLs Talk?](https://arxiv.org/abs/2610.05640) | IEEE SaTML 2026 / 2025-05 / 2026-10 | 未信頼データによる特権制御乗っ取りを防ぐSelective PC-Guard、境界越えラベル保存 | LLM推論内部の意味的誘導までは型で完全遮断できないためホストポリシーと多層防御 |
+| [Prediction: AI will make formal verification go mainstream](https://martin.kleppmann.com/2025/12/08/ai-formal-verification.html) / [Spec-Driven Development](https://arxiv.org/abs/2602.00180) | 2025-12 エッセイ（Kleppmann）/ 2026-01 技術報告（Piskala） | 「実装・証明はAI、仕様の定義と監査は人間＋検証器」という役割分担の設計思想 | 仕様の過剰記述や陳腐化リスクに対し、軽量篩型と段階検証でバランスを取る |
+| [Python Typing Survey 2026](https://engineering.fb.com/2026/10/27/developer-tools/python-typing-survey-2026-ai-tools-checker-landscape/) / [Type-Safe APIs for AI Coding Agents](https://encore.dev/articles/type-safe-apis-ai-agents) | 2026-10（Meta Engineering）/ 2026-11（Encore） | AIの型緩め・エラー抑制乱用への対抗、外部ライブラリ型欠落対策、単一宣言からの境界スキーマ導出 | Python/TypeScriptエコシステムの知見であり、JVM/Valhalla制約とは切り分けて適用 |
 
 ETASの研究段階については[プロジェクトの説明](https://github.com/etas-project/etas)と[APLAS/ATVA 2026 NIERプログラム](https://conf.researchr.org/details/aplas-atva-2026/aplas-atva-2026-aplas-nier/3/Etas-An-Effect-Typed-Language-for-Agent-Systems)も参照。基準日時点で予定された発表を、完了済みの評価・実用化と扱わない。
 

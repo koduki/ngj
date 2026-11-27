@@ -152,18 +152,18 @@ their implementation status, and explicit exclusions.
 The following features are explicitly excluded and must be rejected with
 `unsupported_feature` diagnostic:
 
-### Ownership & Resources
-- `&T` / `&mut T` borrowing
-- `resource` declarations
+### Ownership, Capabilities & Refinements (Phase 2+)
+- Capability tracking (`caps(...)`, `read`/`update` separation, `consume` revocation)
+- `resource` declarations and `Budget<K>`
 - `actor` declarations  
 - `build` / freeze blocks
 - `Bytes` / `Slice` / `Arena`
-- Lifetime annotations
+- First-class refinement types (`{v: T where expr}`, `Int[lo..hi]`)
 
-### Effects & Capabilities
+### Effects & Information Flow
 - Effect declarations other than `effects()`
-- Capability types
-- `Declassify` / information flow
+- Capability types and `caps(...)` polymorphism
+- `Declassify` / `Secret` / `Untrusted` / Selective PC-Guard
 
 ### Concurrency
 - `scope` / `fork` / `join`
@@ -172,15 +172,16 @@ The following features are explicitly excluded and must be rejected with
 - Cancellation
 
 ### Contracts & Verification
-- `requires` / `ensures` clauses
-- Property testing
-- SMT proof obligations
+- `spec fn` / `spec predicate` and `requires` / `ensures` clauses
+- `proof` / `invariant` / `lemma` / `?proof_hole`
+- Property testing and `ngjc certify-spec` (`Post2Exe`)
+- SMT proof obligations and Surface A/B/C gates
 
 ### Advanced Types
 - User-defined generics (beyond Result/Option)
 - Higher-order functions
 - Closures / lambdas (typed lambdas in sequential profile)
-- Typestate
+- Finite-state `protocol` types and `refines` checks
 
 ### Java Interop
 - Direct Java method calls

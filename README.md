@@ -8,9 +8,10 @@
 
 - **Value-first (Valhalla foundation):** Project Valhalla value classes are the foundation of the type system, not an optional optimization backend. All user-defined types are value types by default (identity-free, immutable, structural equality). Identity types exist only where explicitly needed (resources, actors, mutable state). No primitive/boxed split visible to users; `Int`/`Long`/`Bool` are value types. No `null` in the core language; absence is `Option<T>`. Generics over value types are a language guarantee.
 - **Structured concurrency:** Direct-style `scope` / `fork`, bounded channels, explicit cancellation and resource lifetimes, without `async/await` coloring.
-- **Checkable authority:** Effects, host-issued capabilities, ownership and typestate constrain operations. Java interoperability is a declared trust boundary.
-- **Compiler support for agents:** Typed holes, partial checking, structured diagnostics, type-directed context retrieval and revision-aware patch validation.
-- **Verification and observability:** Contracts, counterexamples, Secret flow checks, static OTel/JFR instrumentation and scoped I/O replay.
+- **Checkable authority (Tracked Capabilities & Separation):** Scala 3-style capture checking, `read`/`update` separation, explicit `consume` revocation, and finite-state `protocol` types constrain operations and local purity without Rust-style lifetime syntax. Java interoperability is a declared trust boundary.
+- **First-class value refinements:** Value refinement types (`{v: T where expr}`, `Int[lo..hi]`) are part of the Phase 2 core type syntax with partial-correctness semantics and deterministic E-graph/QF-LIA checking.
+- **Compiler support for agents:** Typed code/proof holes (`?name`, `?proof_hole`), partial checking, two-tier `human`/`agent` structured diagnostics, type-directed context retrieval and trust-first `check-patch` gates.
+- **Verification and observability:** Surface A/B/C verification reporting, `Post2Exe` & specification strength certification, Secret flow & Selective PC-Guard checks, static OTel/JFR instrumentation and scoped I/O replay.
 - **Static interop and AOT:** Direct class-file output; dependency-locked Java adapters and separately validated Native Image profiles.
 
 ## Specification
