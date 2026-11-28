@@ -184,6 +184,10 @@ public final class Compiler {
     }
 
     public CertifySpecResult certifySpec(String symbolId, String smtBackend) {
+        return certifySpec(symbolId, smtBackend, null);
+    }
+
+    public CertifySpecResult certifySpec(String symbolId, String smtBackend, CheckResult initialCheck) {
         FnDecl targetFn = null;
         String qualifiedId = null;
         for (var unit : parsedUnits.values()) {
@@ -201,20 +205,53 @@ public final class Compiler {
             if (targetFn != null) break;
         }
 
+        boolean initialCheckFailed = hasDefiniteErrors()
+            || (initialCheck != null && initialCheck.status() == CheckStatus.INVALID);
+        String effectiveBackend = smtBackend != null ? smtBackend : "jvm";
+        Map<String, SpecFnDecl> specFns = lastTypedIR.specFunctions();
+
+        if (initialCheckFailed) {
+            List<String> surfaceBFindings = new ArrayList<>();
+            List<Diagnostic> allDiags = new ArrayList<>(diagnostics);
+            if (targetFn != null && containsAssumeInFn(targetFn, specFns)) {
+                surfaceBFindings.add("NGJ-CERT-ASSUME-PRESENT");
+                allDiags.add(Diagnostic.error(
+                    "NGJ-CERT-ASSUME-PRESENT",
+                    "Certified symbol '" + qualifiedId + "' contains forbidden assume(...)",
+                    targetFn.span()
+                ));
+            }
+            return new CertifySpecResult(
+                qualifiedId != null ? qualifiedId : symbolId,
+                false,
+                false,
+                "unproven",
+                effectiveBackend,
+                "Initial compiler check failed",
+                false,
+                List.copyOf(surfaceBFindings),
+                null,
+                List.copyOf(allDiags),
+                null
+            );
+        }
+
         if (targetFn == null) {
             return CertifySpecResult.badInput("Symbol not found: " + symbolId);
         }
 
+        List<TopLevelDecl> holeCheckDecls = new ArrayList<>();
+        holeCheckDecls.add(targetFn);
+        holeCheckDecls.addAll(specFns.values());
         if (new HoleFinder().hasHoles(new CompilationUnit(
-            new ModuleDecl("tmp", null), List.of(), List.of(targetFn), null))) {
+            new ModuleDecl("tmp", null), List.of(), holeCheckDecls, null))) {
             return new CertifySpecResult(
-                qualifiedId, false, true, "unproven", smtBackend, "Holes present in symbol",
+                qualifiedId, false, true, "unproven", effectiveBackend, "Holes present in symbol",
                 false, List.of(), null, List.copyOf(diagnostics), null
             );
         }
 
         PureJvmSmtSolver jvmSolver = new PureJvmSmtSolver();
-        Map<String, SpecFnDecl> specFns = lastTypedIR.specFunctions();
         Map<String, TypeAliasDecl> typeAliases = collectTypeAliases();
         VcGenerator vcGen = new VcGenerator(specFns, typeAliases);
 
@@ -254,9 +291,9 @@ public final class Compiler {
 
         // Surface B: vacuous pre, weak ensures, assume present
         List<String> surfaceBFindings = new ArrayList<>();
-        List<Diagnostic> certDiags = new ArrayList<>();
+        List<Diagnostic> certDiags = new ArrayList<>(diagnostics);
 
-        if (containsAssume(targetFn.body())) {
+        if (containsAssumeInFn(targetFn, specFns)) {
             surfaceBFindings.add("NGJ-CERT-ASSUME-PRESENT");
             certDiags.add(Diagnostic.error(
                 "NGJ-CERT-ASSUME-PRESENT",
@@ -306,6 +343,12 @@ public final class Compiler {
 
         boolean certified = "proved".equals(surfaceAStatus) && surfaceBPassed && surfaceCPassed;
 
+        SecretRedactionContext secretCtx = collectSecretRedactionContext();
+        List<Diagnostic> redactedCertDiags = certDiags.stream()
+            .map(d -> SecretRedactor.redactDiagnostic(
+                d, secretCtx.allSecretKeys(), secretCtx.secretTypeNames(), secretCtx.secretLiterals()))
+            .toList();
+
         return new CertifySpecResult(
             qualifiedId,
             certified,
@@ -316,7 +359,7 @@ public final class Compiler {
             surfaceBPassed,
             List.copyOf(surfaceBFindings),
             surfaceCReport,
-            List.copyOf(certDiags),
+            redactedCertDiags,
             null
         );
     }
@@ -395,19 +438,169 @@ public final class Compiler {
         return false;
     }
 
+    private boolean containsAssumeInFn(FnDecl fn, Map<String, SpecFnDecl> specFns) {
+        if (containsAssume(fn.body())) {
+            return true;
+        }
+        for (var c : fn.contracts()) {
+            if (containsAssume(c.condition())) {
+                return true;
+            }
+        }
+        if (specFns != null && !specFns.isEmpty()) {
+            Set<String> referenced = new LinkedHashSet<>();
+            collectReferencedNames(fn.body(), referenced);
+            for (var c : fn.contracts()) {
+                collectReferencedNames(c.condition(), referenced);
+            }
+            Set<String> visitedSpecs = new LinkedHashSet<>();
+            Deque<String> work = new ArrayDeque<>(referenced);
+            while (!work.isEmpty()) {
+                String name = work.poll();
+                SpecFnDecl sf = specFns.get(name);
+                if (sf != null && visitedSpecs.add(name)) {
+                    if (containsAssume(sf.body())) {
+                        return true;
+                    }
+                    Set<String> nested = new LinkedHashSet<>();
+                    collectReferencedNames(sf.body(), nested);
+                    work.addAll(nested);
+                }
+            }
+        }
+        return false;
+    }
+
+    private void collectReferencedNames(Expr expr, Set<String> names) {
+        if (expr == null) return;
+        switch (expr) {
+            case IdentExpr id -> names.add(id.name());
+            case LiteralExpr _, HoleExpr _ -> {}
+            case BinaryExpr b -> {
+                collectReferencedNames(b.left(), names);
+                collectReferencedNames(b.right(), names);
+            }
+            case UnaryExpr u -> collectReferencedNames(u.operand(), names);
+            case CallExpr c -> {
+                collectReferencedNames(c.callee(), names);
+                for (var a : c.args()) collectReferencedNames(a, names);
+            }
+            case FieldAccessExpr fa -> collectReferencedNames(fa.object(), names);
+            case ConstructorExpr c -> {
+                for (var f : c.fields()) collectReferencedNames(f.value(), names);
+            }
+            case IfExpr i -> {
+                collectReferencedNames(i.condition(), names);
+                collectReferencedNames(i.thenBranch(), names);
+                collectReferencedNames(i.elseBranch(), names);
+            }
+            case MatchExpr m -> {
+                collectReferencedNames(m.scrutinee(), names);
+                for (var arm : m.arms()) collectReferencedNames(arm.body(), names);
+            }
+            case BlockExpr b -> {
+                for (var s : b.statements()) collectReferencedNamesStmt(s, names);
+                collectReferencedNames(b.tailExpr(), names);
+            }
+            case PropagateExpr p -> collectReferencedNames(p.inner(), names);
+            case ParenExpr p -> collectReferencedNames(p.inner(), names);
+            case ForExpr f -> {
+                collectReferencedNames(f.iterable(), names);
+                collectReferencedNames(f.body(), names);
+            }
+            case WhileExpr w -> {
+                collectReferencedNames(w.condition(), names);
+                collectReferencedNames(w.invariant(), names);
+                collectReferencedNames(w.body(), names);
+            }
+            case LambdaExpr l -> collectReferencedNames(l.body(), names);
+            case ScopeExpr s -> collectReferencedNames(s.body(), names);
+            case ForkExpr f -> collectReferencedNames(f.body(), names);
+            case ConsumeExpr c -> collectReferencedNames(c.target(), names);
+            case TupleExpr t -> {
+                for (var e : t.elements()) collectReferencedNames(e, names);
+            }
+        }
+    }
+
+    private void collectReferencedNamesStmt(Statement stmt, Set<String> names) {
+        switch (stmt) {
+            case LetStmt l -> collectReferencedNames(l.initializer(), names);
+            case ValStmt v -> collectReferencedNames(v.initializer(), names);
+            case VarStmt v -> collectReferencedNames(v.initializer(), names);
+            case AssignStmt a -> collectReferencedNames(a.value(), names);
+            case ExprStmt es -> collectReferencedNames(es.expr(), names);
+            case ReturnStmt r -> collectReferencedNames(r.value(), names);
+            case TupleDestructureStmt td -> collectReferencedNames(td.initializer(), names);
+            case InvariantStmt inv -> collectReferencedNames(inv.condition(), names);
+            case ProofStmt p -> collectReferencedNames(p.body(), names);
+            case AssumeStmt a -> collectReferencedNames(a.condition(), names);
+        }
+    }
+
     private boolean containsAssume(Expr expr) {
         if (expr == null) return false;
         return switch (expr) {
+            case LiteralExpr _, IdentExpr _, HoleExpr _ -> false;
+            case BinaryExpr b -> containsAssume(b.left()) || containsAssume(b.right());
+            case UnaryExpr u -> containsAssume(u.operand());
+            case CallExpr c -> {
+                if (containsAssume(c.callee())) yield true;
+                for (var a : c.args()) {
+                    if (containsAssume(a)) yield true;
+                }
+                yield false;
+            }
+            case FieldAccessExpr fa -> containsAssume(fa.object());
+            case ConstructorExpr c -> {
+                for (var f : c.fields()) {
+                    if (containsAssume(f.value())) yield true;
+                }
+                yield false;
+            }
+            case IfExpr i -> containsAssume(i.condition()) || containsAssume(i.thenBranch()) || containsAssume(i.elseBranch());
+            case MatchExpr m -> {
+                if (containsAssume(m.scrutinee())) yield true;
+                for (var arm : m.arms()) {
+                    if (containsAssume(arm.body())) yield true;
+                }
+                yield false;
+            }
             case BlockExpr b -> {
                 for (var s : b.statements()) {
-                    if (s instanceof AssumeStmt) yield true;
-                    if (s instanceof ProofStmt p && containsAssume(p.body())) yield true;
+                    if (containsAssumeStmt(s)) yield true;
                 }
                 yield containsAssume(b.tailExpr());
             }
-            case IfExpr i -> containsAssume(i.condition()) || containsAssume(i.thenBranch()) || containsAssume(i.elseBranch());
-            case WhileExpr w -> containsAssume(w.body());
-            default -> false;
+            case PropagateExpr p -> containsAssume(p.inner());
+            case ParenExpr p -> containsAssume(p.inner());
+            case ForExpr f -> containsAssume(f.iterable()) || containsAssume(f.body());
+            case WhileExpr w -> containsAssume(w.condition()) || containsAssume(w.invariant()) || containsAssume(w.body());
+            case LambdaExpr l -> containsAssume(l.body());
+            case ScopeExpr s -> containsAssume(s.body());
+            case ForkExpr f -> containsAssume(f.body());
+            case ConsumeExpr c -> containsAssume(c.target());
+            case TupleExpr t -> {
+                for (var e : t.elements()) {
+                    if (containsAssume(e)) yield true;
+                }
+                yield false;
+            }
+        };
+    }
+
+    private boolean containsAssumeStmt(Statement stmt) {
+        return switch (stmt) {
+            case AssumeStmt _ -> true;
+            case ProofStmt p -> containsAssume(p.body());
+            case ExprStmt es -> containsAssume(es.expr());
+            case ValStmt v -> containsAssume(v.initializer());
+            case LetStmt l -> containsAssume(l.initializer());
+            case VarStmt v -> containsAssume(v.initializer());
+            case AssignStmt a -> containsAssume(a.value());
+            case ReturnStmt r -> containsAssume(r.value());
+            case TupleDestructureStmt td -> containsAssume(td.initializer());
+            case InvariantStmt inv -> containsAssume(inv.condition());
         };
     }
 

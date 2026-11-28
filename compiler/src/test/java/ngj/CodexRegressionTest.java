@@ -1522,4 +1522,121 @@ class CodexRegressionTest {
         assertEquals(1, code, "Direct binary op on record Secret field must fail with NGJ-CAP-003: " + stdout);
         assertTrue(stdout.contains("NGJ-CAP-003"), "Expected NGJ-CAP-003: " + stdout);
     }
+
+    @Test
+    void certifySpecRejectsAssumeInsideIfExpressionStatement() throws Exception {
+        Path file = tempDir.resolve("certify_nested_if_assume.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad() -> Int effects()
+                ensures (result == 0)
+            {
+                if (true) {
+                    assume (false);
+                }
+                return 1;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"certify-spec", "--format=json", "--symbol=bad", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "assume(false) inside if statement must fail certify-spec: " + stdout);
+        assertTrue(stdout.contains("\"certified\": false"), "Expected certified=false: " + stdout);
+        assertTrue(stdout.contains("NGJ-CERT-ASSUME-PRESENT"), "Expected NGJ-CERT-ASSUME-PRESENT: " + stdout);
+    }
+
+    @Test
+    void certifySpecRejectsAssumeInsideValInitializerBlock() throws Exception {
+        Path file = tempDir.resolve("certify_val_block_assume.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad() -> Int effects()
+                ensures (result == 0)
+            {
+                val ignored: Int = {
+                    assume (false);
+                    0
+                };
+                return 1;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"certify-spec", "--format=json", "--symbol=bad", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "assume(false) inside val block initializer must fail certify-spec: " + stdout);
+        assertTrue(stdout.contains("\"certified\": false"), "Expected certified=false: " + stdout);
+        assertTrue(stdout.contains("NGJ-CERT-ASSUME-PRESENT"), "Expected NGJ-CERT-ASSUME-PRESENT: " + stdout);
+    }
+
+    @Test
+    void certifySpecRejectsInvalidSourceWithEffectError() throws Exception {
+        Path file = tempDir.resolve("certify_effect_error.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad() -> Int effects()
+                ensures (result == 0)
+            {
+                pay();
+                return 0;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"certify-spec", "--format=json", "--symbol=bad", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "certify-spec must fail when initial compiler check has NGJ-EFFECT-001: " + stdout);
+        assertTrue(stdout.contains("\"certified\": false"), "Expected certified=false: " + stdout);
+        assertTrue(stdout.contains("NGJ-EFFECT-001"), "Expected NGJ-EFFECT-001 in certify-spec diagnostics: " + stdout);
+    }
+
+    @Test
+    void certifySpecRejectsInvalidSourceWithTypeError() throws Exception {
+        Path file = tempDir.resolve("certify_type_error.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(x: Int) -> Int effects()
+                ensures (result == 0)
+            {
+                val wrong: Int = "not-an-int";
+                return 0;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"certify-spec", "--format=json", "--symbol=bad", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "certify-spec must fail when initial compiler check has type errors: " + stdout);
+        assertTrue(stdout.contains("\"certified\": false"), "Expected certified=false: " + stdout);
+        assertTrue(stdout.contains("NGJ-TYPE-"), "Expected NGJ-TYPE-* diagnostic in certify-spec output: " + stdout);
+    }
 }

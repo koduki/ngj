@@ -372,8 +372,8 @@ public final class Main {
         }
 
         var compiler = new ngj.Compiler();
-        compiler.check(opts.files(), opts.toCheckOptions());
-        var result = compiler.certifySpec(opts.symbolId(), opts.smtBackend());
+        var checkResult = compiler.check(opts.files(), opts.toCheckOptions());
+        var result = compiler.certifySpec(opts.symbolId(), opts.smtBackend(), checkResult);
 
         if (opts.formatJson()) {
             stdout.println(result.toJson(actualRevision, policyDigest, targetProfile));
