@@ -114,7 +114,7 @@ public final class VcGenerator {
                     SpecFnDecl spec = specFns.get(id.name());
                     Sort retSort = sortOfType(spec.returnType());
                     if (!inliningSpecFns.contains(id.name())
-                        && spec.body() != null && spec.body().tailExpr() != null && spec.body().statements().isEmpty()
+                        && spec.body() != null
                         && spec.params().size() == call.args().size()) {
                         Map<String, Expr> subst = new LinkedHashMap<>();
                         for (int i = 0; i < spec.params().size(); i++) {
@@ -122,7 +122,11 @@ public final class VcGenerator {
                         }
                         inliningSpecFns.add(id.name());
                         try {
-                            yield translateExpr(substituteExpr(spec.body().tailExpr(), subst), varSorts, ssaEnv, inliningSpecFns, false, longVars);
+                            BlockExpr substitutedBody = substituteBlock(spec.body(), subst);
+                            SmtExpr inlined = translateBranchExpr(substitutedBody, varSorts, ssaEnv, inliningSpecFns, false, longVars);
+                            if (!(inlined instanceof SmtExpr.UnsupportedExpr)) {
+                                yield inlined;
+                            }
                         } finally {
                             inliningSpecFns.remove(id.name());
                         }
@@ -476,14 +480,109 @@ public final class VcGenerator {
     }
 
     private Expr substituteExpr(Expr expr, Map<String, Expr> subst) {
-        if (expr == null) return null;
+        if (expr == null || subst.isEmpty()) return expr;
         return switch (expr) {
             case IdentExpr id -> subst.getOrDefault(id.name(), id);
             case BinaryExpr b -> new BinaryExpr(substituteExpr(b.left(), subst), b.op(), substituteExpr(b.right(), subst), b.span());
             case UnaryExpr u -> new UnaryExpr(u.op(), substituteExpr(u.operand(), subst), u.span());
             case ParenExpr p -> new ParenExpr(substituteExpr(p.inner(), subst), p.span());
+            case IfExpr i -> new IfExpr(
+                substituteExpr(i.condition(), subst),
+                substituteBlock(i.thenBranch(), subst),
+                substituteExpr(i.elseBranch(), subst),
+                i.span()
+            );
+            case BlockExpr b -> substituteBlock(b, subst);
+            case CallExpr c -> new CallExpr(
+                c.callee() instanceof IdentExpr id && !subst.containsKey(id.name())
+                    ? id
+                    : substituteExpr(c.callee(), subst),
+                c.typeArgs(),
+                c.args().stream().map(a -> substituteExpr(a, subst)).toList(),
+                c.span()
+            );
+            case FieldAccessExpr fa -> new FieldAccessExpr(substituteExpr(fa.object(), subst), fa.fieldName(), fa.span());
+            case PropagateExpr p -> new PropagateExpr(substituteExpr(p.inner(), subst), p.span());
+            case ConsumeExpr c -> new ConsumeExpr(substituteExpr(c.target(), subst), c.span());
+            case TupleExpr t -> new TupleExpr(
+                t.elements().stream().map(e -> substituteExpr(e, subst)).toList(),
+                t.span()
+            );
+            case ConstructorExpr c -> new ConstructorExpr(
+                c.typePath(),
+                c.fields().stream()
+                    .map(f -> new ConstructorExpr.FieldInit(f.name(), substituteExpr(f.value(), subst), f.span()))
+                    .toList(),
+                c.span()
+            );
+            case MatchExpr m -> new MatchExpr(
+                substituteExpr(m.scrutinee(), subst),
+                m.arms().stream().map(arm -> {
+                    Map<String, Expr> armSubst = new LinkedHashMap<>(subst);
+                    removePatternBindings(arm.pattern(), armSubst);
+                    return new MatchExpr.MatchArm(arm.pattern(), substituteExpr(arm.body(), armSubst), arm.span());
+                }).toList(),
+                m.span()
+            );
+            case ScopeExpr s -> new ScopeExpr(substituteBlock(s.body(), subst), s.span());
+            case ForkExpr f -> new ForkExpr(substituteBlock(f.body(), subst), f.span());
             default -> expr;
         };
+    }
+
+    private BlockExpr substituteBlock(BlockExpr block, Map<String, Expr> subst) {
+        if (block == null || subst.isEmpty()) return block;
+        Map<String, Expr> curSubst = new LinkedHashMap<>(subst);
+        List<Statement> newStmts = new ArrayList<>(block.statements().size());
+        for (var st : block.statements()) {
+            switch (st) {
+                case ValStmt v -> {
+                    Expr newInit = substituteExpr(v.initializer(), curSubst);
+                    curSubst.remove(v.name());
+                    newStmts.add(new ValStmt(v.name(), v.explicitType(), newInit, v.span()));
+                }
+                case LetStmt l -> {
+                    Expr newInit = substituteExpr(l.initializer(), curSubst);
+                    curSubst.remove(l.name());
+                    newStmts.add(new LetStmt(l.name(), l.explicitType(), newInit, l.span()));
+                }
+                case VarStmt v -> {
+                    Expr newInit = substituteExpr(v.initializer(), curSubst);
+                    curSubst.remove(v.name());
+                    newStmts.add(new VarStmt(v.name(), v.explicitType(), newInit, v.span()));
+                }
+                case AssignStmt a -> newStmts.add(new AssignStmt(a.name(), substituteExpr(a.value(), curSubst), a.span()));
+                case ReturnStmt r -> newStmts.add(new ReturnStmt(substituteExpr(r.value(), curSubst), r.span()));
+                case ExprStmt es -> newStmts.add(new ExprStmt(substituteExpr(es.expr(), curSubst), es.span()));
+                case TupleDestructureStmt td -> {
+                    Expr newInit = substituteExpr(td.initializer(), curSubst);
+                    for (String n : td.names()) curSubst.remove(n);
+                    newStmts.add(new TupleDestructureStmt(td.names(), td.explicitTypes(), newInit, td.span()));
+                }
+                case InvariantStmt inv -> newStmts.add(new InvariantStmt(substituteExpr(inv.condition(), curSubst), inv.span()));
+                case AssumeStmt a -> newStmts.add(new AssumeStmt(substituteExpr(a.condition(), curSubst), a.span()));
+                case ProofStmt p -> newStmts.add(new ProofStmt(substituteBlock(p.body(), curSubst), p.span()));
+            }
+        }
+        Expr newTail = substituteExpr(block.tailExpr(), curSubst);
+        return new BlockExpr(newStmts, newTail, block.span());
+    }
+
+    private void removePatternBindings(Pattern pattern, Map<String, Expr> subst) {
+        if (pattern == null) return;
+        switch (pattern) {
+            case BindingPattern bp -> subst.remove(bp.name());
+            case ConstructorPattern cp -> {
+                for (var f : cp.fields()) {
+                    if (f.pattern() != null) {
+                        removePatternBindings(f.pattern(), subst);
+                    } else if (f.name() != null) {
+                        subst.remove(f.name());
+                    }
+                }
+            }
+            default -> {}
+        }
     }
 
     private SmtExpr translateBranchExpr(

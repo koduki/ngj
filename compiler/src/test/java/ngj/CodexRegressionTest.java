@@ -715,4 +715,60 @@ class CodexRegressionTest {
         assertEquals(1, code, "Nested block assigning y = 0 must fail ensures(result == 1): " + stdout);
         assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
     }
+
+    @Test
+    void specPredicateConditionalBodySubstitutesParams() throws Exception {
+        Path file = tempDir.resolve("spec_cond_subst.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public spec predicate isZero(x: MathInt) {
+                if (true) { x == 0 } else { false }
+            }
+
+            public fn bad(x: Int) -> Int effects()
+                requires (x == 0)
+                ensures (isZero(result))
+            {
+                return 1;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "isZero(result) must substitute x->result inside if-branch and fail for return 1: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void conditionalBudgetAliasRevokesOwnership() throws Exception {
+        Path file = tempDir.resolve("cond_budget_alias.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(consume b: Budget<Fuel>) -> Unit effects() {
+                val c: Budget<Fuel> = if (true) { b } else { b };
+                val b1: Budget<Fuel> = b.spend(1L);
+                val c1: Budget<Fuel> = c.spend(1L);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Spending both b and conditional alias c must fail with NGJ-CAP-002: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
 }

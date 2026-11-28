@@ -154,6 +154,7 @@ public final class CapabilityChecker {
             case AssignStmt assign -> {
                 checkExpr(assign.value(), env);
                 recordAccess(assign.name(), VarMode.UPDATE, env, assign.span());
+                linkAliasOrView(assign.name(), assign.value(), env);
             }
             case ReturnStmt ret -> {
                 if (ret.value() != null) {
@@ -165,12 +166,21 @@ public final class CapabilityChecker {
             case TupleDestructureStmt td -> {
                 checkExpr(td.initializer(), env);
                 boolean isBudgetSplit = isBudgetSplitCall(td.initializer(), env);
+                TupleExpr tupleInit = td.initializer() instanceof TupleExpr te ? te : null;
                 for (int i = 0; i < td.names().size(); i++) {
+                    Expr compInit = (tupleInit != null && i < tupleInit.elements().size()) ? tupleInit.elements().get(i) : null;
                     TypeExpr t = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
                     if (t == null && isBudgetSplit) {
                         t = new SimpleTypeExpr("Budget", td.span());
+                    } else if (t == null && compInit != null) {
+                        t = inferResourceType(compInit, env);
                     }
-                    env.declare(td.names().get(i), t, VarMode.OWNED, isLinearType(t), isSecretType(t), env.depth);
+                    boolean isLin = isLinearType(t) || (!isBudgetSplit && compInit != null && isLinearExpr(compInit, env));
+                    boolean isSec = isSecretType(t) || (compInit != null && isSecretExpr(compInit, env));
+                    env.declare(td.names().get(i), t, modeFromType(t, false), isLin, isSec, env.depth);
+                    if (!isBudgetSplit && compInit != null) {
+                        linkAliasOrView(td.names().get(i), compInit, env);
+                    }
                 }
             }
             case InvariantStmt inv -> checkExpr(inv.condition(), env);
@@ -798,18 +808,92 @@ public final class CapabilityChecker {
     }
 
     private void linkAliasOrView(String varName, Expr init, CapEnv env) {
-        if (init instanceof IdentExpr id) {
-            String root = env.resolveAlias(id.name());
-            env.aliasOf.put(varName, root);
-            env.aliases.computeIfAbsent(root, k -> new LinkedHashSet<>()).add(varName);
-        } else if (init instanceof CallExpr c && c.callee() instanceof FieldAccessExpr fa) {
-            String m = fa.fieldName();
-            if ((m.equals("slice") || m.equals("sliceExact") || m.equals("alloc")
-                || m.equals("borrow") || m.equals("asBytes"))
-                && fa.object() instanceof IdentExpr ownerId) {
-                env.viewOf.put(varName, ownerId.name());
-                env.views.computeIfAbsent(ownerId.name(), k -> new LinkedHashSet<>()).add(varName);
+        linkAliasOrView(varName, init, env, new LinkedHashMap<>());
+    }
+
+    private void linkAliasOrView(String varName, Expr init, CapEnv env, Map<String, Expr> localBindings) {
+        if (init == null) return;
+        switch (init) {
+            case ConsumeExpr _ -> {} // Ownership transferred; source already consumed
+            case ParenExpr p -> linkAliasOrView(varName, p.inner(), env, localBindings);
+            case PropagateExpr p -> linkAliasOrView(varName, p.inner(), env, localBindings);
+            case IdentExpr id -> {
+                if (localBindings.containsKey(id.name())) {
+                    Expr target = localBindings.get(id.name());
+                    Map<String, Expr> next = new LinkedHashMap<>(localBindings);
+                    next.remove(id.name());
+                    linkAliasOrView(varName, target, env, next);
+                    return;
+                }
+                if (id.name().equals(varName)) return;
+                Set<String> roots = env.resolveAllRoots(id.name());
+                for (String root : roots) {
+                    env.aliasOf.putIfAbsent(varName, root);
+                    env.aliasRoots.computeIfAbsent(varName, k -> new LinkedHashSet<>()).add(root);
+                    env.aliases.computeIfAbsent(root, k -> new LinkedHashSet<>()).add(varName);
+                    if (env.isLinear(root) || env.isLinear(id.name())) {
+                        env.linearVars.add(varName);
+                    }
+                    if (env.isSecret(root) || env.isSecret(id.name())) {
+                        env.secretVars.add(varName);
+                    }
+                    if (env.modes.get(id.name()) == VarMode.READ || env.modes.get(root) == VarMode.READ) {
+                        env.modes.put(varName, VarMode.READ);
+                    }
+                    if (env.viewOf.containsKey(root)) {
+                        String viewOwner = env.viewOf.get(root);
+                        env.viewOf.put(varName, viewOwner);
+                        env.views.computeIfAbsent(viewOwner, k -> new LinkedHashSet<>()).add(varName);
+                    }
+                }
+                if (env.viewOf.containsKey(id.name())) {
+                    String viewOwner = env.viewOf.get(id.name());
+                    env.viewOf.put(varName, viewOwner);
+                    env.views.computeIfAbsent(viewOwner, k -> new LinkedHashSet<>()).add(varName);
+                }
             }
+            case CallExpr c -> {
+                if (c.callee() instanceof FieldAccessExpr fa) {
+                    String m = fa.fieldName();
+                    if ((m.equals("slice") || m.equals("sliceExact") || m.equals("alloc")
+                        || m.equals("borrow") || m.equals("asBytes"))
+                        && fa.object() instanceof IdentExpr ownerId) {
+                        for (String ownerRoot : env.resolveAllRoots(ownerId.name())) {
+                            env.viewOf.put(varName, ownerRoot);
+                            env.views.computeIfAbsent(ownerRoot, k -> new LinkedHashSet<>()).add(varName);
+                        }
+                    }
+                }
+            }
+            case IfExpr i -> {
+                linkAliasOrView(varName, i.thenBranch(), env, localBindings);
+                if (i.elseBranch() != null) {
+                    linkAliasOrView(varName, i.elseBranch(), env, localBindings);
+                }
+            }
+            case MatchExpr m -> {
+                for (var arm : m.arms()) {
+                    linkAliasOrView(varName, arm.body(), env, localBindings);
+                }
+            }
+            case BlockExpr b -> {
+                Map<String, Expr> inner = new LinkedHashMap<>(localBindings);
+                for (var st : b.statements()) {
+                    switch (st) {
+                        case ValStmt v -> inner.put(v.name(), v.initializer());
+                        case LetStmt l -> inner.put(l.name(), l.initializer());
+                        case VarStmt v -> inner.put(v.name(), v.initializer());
+                        case AssignStmt a -> inner.put(a.name(), a.value());
+                        default -> {}
+                    }
+                }
+                if (b.tailExpr() != null) {
+                    linkAliasOrView(varName, b.tailExpr(), env, inner);
+                }
+            }
+            case ScopeExpr s -> linkAliasOrView(varName, s.body(), env, localBindings);
+            case ForkExpr f -> linkAliasOrView(varName, f.body(), env, localBindings);
+            default -> {}
         }
     }
 
@@ -836,8 +920,16 @@ public final class CapabilityChecker {
     }
 
     private boolean isSecretExpr(Expr expr, CapEnv env) {
-        if (expr instanceof IdentExpr id) return env.isSecret(id.name());
-        return false;
+        if (expr == null) return false;
+        return switch (expr) {
+            case IdentExpr id -> env.isSecret(id.name());
+            case ParenExpr p -> isSecretExpr(p.inner(), env);
+            case PropagateExpr p -> isSecretExpr(p.inner(), env);
+            case IfExpr i -> isSecretExpr(i.thenBranch(), env) || isSecretExpr(i.elseBranch(), env);
+            case BlockExpr b -> isSecretExpr(b.tailExpr(), env);
+            case MatchExpr m -> m.arms().stream().anyMatch(a -> isSecretExpr(a.body(), env));
+            default -> false;
+        };
     }
 
     private boolean isLinearType(TypeExpr t) {
@@ -847,8 +939,16 @@ public final class CapabilityChecker {
     }
 
     private boolean isLinearExpr(Expr expr, CapEnv env) {
-        if (expr instanceof IdentExpr id) return env.isLinear(id.name());
-        return false;
+        if (expr == null) return false;
+        return switch (expr) {
+            case IdentExpr id -> env.isLinear(id.name());
+            case ParenExpr p -> isLinearExpr(p.inner(), env);
+            case PropagateExpr p -> isLinearExpr(p.inner(), env);
+            case IfExpr i -> isLinearExpr(i.thenBranch(), env) || isLinearExpr(i.elseBranch(), env);
+            case BlockExpr b -> isLinearExpr(b.tailExpr(), env);
+            case MatchExpr m -> m.arms().stream().anyMatch(a -> isLinearExpr(a.body(), env));
+            default -> false;
+        };
     }
 
     private boolean isViewType(TypeExpr t) {
@@ -1021,6 +1121,7 @@ public final class CapabilityChecker {
         final Set<String> secretVars = new LinkedHashSet<>();
         final Set<String> consumeParams = new LinkedHashSet<>();
         final Map<String, String> aliasOf = new LinkedHashMap<>();
+        final Map<String, Set<String>> aliasRoots = new LinkedHashMap<>();
         final Map<String, Set<String>> aliases = new LinkedHashMap<>();
         final Map<String, String> viewOf = new LinkedHashMap<>();
         final Map<String, Set<String>> views = new LinkedHashMap<>();
@@ -1075,12 +1176,34 @@ public final class CapabilityChecker {
             return cur;
         }
 
+        Set<String> resolveAllRoots(String name) {
+            Set<String> roots = new LinkedHashSet<>();
+            Set<String> visited = new LinkedHashSet<>();
+            Deque<String> work = new ArrayDeque<>();
+            work.add(name);
+            while (!work.isEmpty()) {
+                String cur = work.poll();
+                if (!visited.add(cur)) continue;
+                Set<String> parents = aliasRoots.get(cur);
+                if (parents != null && !parents.isEmpty()) {
+                    work.addAll(parents);
+                } else if (aliasOf.containsKey(cur)) {
+                    work.add(aliasOf.get(cur));
+                } else {
+                    roots.add(cur);
+                }
+            }
+            if (roots.isEmpty()) {
+                roots.add(name);
+            }
+            return roots;
+        }
+
         void markConsumed(String name) {
-            String root = resolveAlias(name);
             Set<String> visited = new LinkedHashSet<>();
             Deque<String> worklist = new ArrayDeque<>();
             worklist.add(name);
-            worklist.add(root);
+            worklist.addAll(resolveAllRoots(name));
             while (!worklist.isEmpty()) {
                 String cur = worklist.poll();
                 if (!visited.add(cur)) continue;
@@ -1088,6 +1211,14 @@ public final class CapabilityChecker {
                 Set<String> al = aliases.get(cur);
                 if (al != null) {
                     worklist.addAll(al);
+                }
+                Set<String> roots = aliasRoots.get(cur);
+                if (roots != null) {
+                    worklist.addAll(roots);
+                }
+                String parent = aliasOf.get(cur);
+                if (parent != null) {
+                    worklist.add(parent);
                 }
             }
         }
@@ -1105,6 +1236,7 @@ public final class CapabilityChecker {
             c.linearVars.addAll(linearVars);
             c.secretVars.addAll(secretVars);
             c.aliasOf.putAll(aliasOf);
+            for (var e : aliasRoots.entrySet()) c.aliasRoots.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
             for (var e : aliases.entrySet()) c.aliases.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
             c.viewOf.putAll(viewOf);
             for (var e : views.entrySet()) c.views.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
