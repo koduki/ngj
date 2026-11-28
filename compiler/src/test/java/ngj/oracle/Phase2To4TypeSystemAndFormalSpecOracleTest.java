@@ -1510,14 +1510,22 @@ public class Phase2To4TypeSystemAndFormalSpecOracleTest {
         assertTrue(serializedJson.contains("billing") && serializedJson.contains("8443"),
             "Serialized JSON must preserve public fields: " + serializedJson);
 
-        // Binary round-trip
+        // Binary serialization masks Secret<T> as Secret(****) and preserves public fields
         byte[] binBytes = (byte[]) (binEncode.getParameterCount() == 0
             ? binEncode.invoke(payloadObj)
             : binEncode.invoke(null, payloadObj));
         assertTrue(binBytes.length > 0);
+        String binText = new String(binBytes, StandardCharsets.UTF_8);
+        assertFalse(binText.contains(secretLiteral),
+            "@boundary_schema binary serialization must never leak raw secret");
+        assertTrue(binText.contains("Secret(****)"),
+            "@boundary_schema binary serialization must mask Secret<T> as Secret(****)");
         Object binDecodedRes = binDecode.invoke(null, (Object) binBytes);
         Object binPayloadObj = unwrapOkOrThrow(binDecodedRes);
-        assertEquals(payloadObj, binPayloadObj, "Binary round-trip must preserve value equality");
+        String binSerializedJson = (String) (jsonEncode.getParameterCount() == 0
+            ? jsonEncode.invoke(binPayloadObj)
+            : jsonEncode.invoke(null, binPayloadObj));
+        assertEquals(serializedJson, binSerializedJson, "Binary round-trip must preserve public fields and masked Secret");
 
         // Runtime refinement rejection on invalid port = 0
         String badJsonInput = String.format(

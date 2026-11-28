@@ -2594,9 +2594,8 @@ public final class Java25CodeGenerator {
                         case "Long" -> code.invokevirtual(dosDesc, "writeLong", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_long));
                         case "Bool" -> code.invokevirtual(dosDesc, "writeBoolean", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_boolean));
                         case "Secret" -> {
-                            code.invokevirtual(secretDesc, "expose", MethodTypeDesc.of(ConstantDescs.CD_Object));
-                            code.invokestatic(ConstantDescs.CD_String, "valueOf",
-                                MethodTypeDesc.of(ConstantDescs.CD_String, ConstantDescs.CD_Object));
+                            code.pop();
+                            code.ldc("Secret(****)");
                             code.invokevirtual(dosDesc, "writeUTF", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String));
                         }
                         default -> {
