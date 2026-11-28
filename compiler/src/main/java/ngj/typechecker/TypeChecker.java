@@ -1838,14 +1838,43 @@ public final class TypeChecker {
         }
         if (protocolEnv.containsKey(staticTarget)) {
             var proto = protocolEnv.get(staticTarget);
+            String knownFromState = null;
+            if (!call.args().isEmpty()) {
+                TypeExpr argType = checkExpr(call.args().get(0));
+                if (argType instanceof CapabilityTypeExpr cap) argType = cap.inner();
+                if (argType instanceof GenericTypeExpr g && !g.typeArgs().isEmpty()
+                    && g.typeArgs().get(0) instanceof SimpleTypeExpr st) {
+                    knownFromState = st.name();
+                }
+            }
+            ProtocolDecl.Transition matched = null;
+            for (var t : proto.transitions()) {
+                if (!t.name().equals(method)) continue;
+                if (knownFromState != null && t.fromState().equals(knownFromState)) {
+                    matched = t;
+                    break;
+                }
+                if (matched == null) {
+                    matched = t;
+                }
+            }
+            if (matched != null) {
+                return new GenericTypeExpr(staticTarget,
+                    List.of(new SimpleTypeExpr(matched.toState(), call.span())),
+                    call.span());
+            }
+            return new SimpleTypeExpr(staticTarget, call.span());
+        }
+        if (protocolEnv.containsKey(objTypeName)) {
+            var proto = protocolEnv.get(objTypeName);
             for (var t : proto.transitions()) {
                 if (t.name().equals(method)) {
-                    return new GenericTypeExpr(staticTarget,
+                    return new GenericTypeExpr(objTypeName,
                         List.of(new SimpleTypeExpr(t.toState(), call.span())),
                         call.span());
                 }
             }
-            return new SimpleTypeExpr(staticTarget, call.span());
+            return new SimpleTypeExpr(objTypeName, call.span());
         }
         if (method.equals("len") || method.equals("remaining") || method.equals("toLong")) {
             return new SimpleTypeExpr("Long", call.span());

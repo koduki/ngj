@@ -334,10 +334,15 @@ public final class ProtocolChecker {
                     }
                     // Transition with first arg as token
                     if (!call.args().isEmpty()) {
-                        TokenResult tok = checkExpr(call.args().get(0), env);
+                        Expr firstArg = call.args().get(0);
+                        TokenResult tok = checkExpr(firstArg, env);
                         for (int i = 1; i < call.args().size(); i++) checkExpr(call.args().get(i), env);
                         if (tok != null) {
-                            return applyTransition(aut, objName, tok, method, call.span());
+                            TokenResult next = applyTransition(aut, objName, tok, method, call.span());
+                            if (next != null) {
+                                markArgTokenConsumed(firstArg, env);
+                            }
+                            return next;
                         }
                     }
                 }
@@ -368,6 +373,16 @@ public final class ProtocolChecker {
         return null;
     }
 
+    private void markArgTokenConsumed(Expr arg, ProtoEnv env) {
+        Expr unwrapped = arg instanceof ParenExpr p ? p.inner() : arg;
+        if (unwrapped instanceof IdentExpr id) {
+            TokenState st = env.tokens.get(id.name());
+            if (st != null) {
+                st.consumed = true;
+            }
+        }
+    }
+
     private TokenResult applyTransition(
         ProtocolAutomaton aut,
         String protoName,
@@ -375,6 +390,14 @@ public final class ProtocolChecker {
         String action,
         SourceSpan span
     ) {
+        if (!tok.protoName.equals(protoName)) {
+            diagnostics.add(Diagnostic.error(
+                "NGJ-PROTO-004",
+                "Protocol mismatch: expected token of '" + protoName + "', got '" + tok.protoName + "'",
+                span
+            ));
+            return null;
+        }
         for (var t : aut.transitions()) {
             if (t.from().equals(tok.state) && t.action().equals(action)) {
                 return new TokenResult(protoName, t.to(), tok.instanceId);

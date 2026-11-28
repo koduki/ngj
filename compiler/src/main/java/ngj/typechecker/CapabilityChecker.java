@@ -125,27 +125,30 @@ public final class CapabilityChecker {
         switch (stmt) {
             case ValStmt val -> {
                 checkExpr(val.initializer(), env);
-                VarMode mode = modeFromType(val.explicitType(), false);
-                boolean isSecret = isSecretType(val.explicitType()) || isSecretExpr(val.initializer(), env);
-                boolean isLinear = isLinearType(val.explicitType()) || isLinearExpr(val.initializer(), env);
-                env.declare(val.name(), val.explicitType(), mode, isLinear, isSecret, env.depth);
+                TypeExpr effectiveType = val.explicitType() != null ? val.explicitType() : inferResourceType(val.initializer(), env);
+                VarMode mode = modeFromType(effectiveType, false);
+                boolean isSecret = isSecretType(effectiveType) || isSecretExpr(val.initializer(), env);
+                boolean isLinear = isLinearType(effectiveType) || isLinearExpr(val.initializer(), env);
+                env.declare(val.name(), effectiveType, mode, isLinear, isSecret, env.depth);
                 linkAliasOrView(val.name(), val.initializer(), env);
                 checkBudgetLiteralInit(val.name(), val.initializer(), env);
             }
             case LetStmt let -> {
                 checkExpr(let.initializer(), env);
-                VarMode mode = modeFromType(let.explicitType(), false);
-                boolean isSecret = isSecretType(let.explicitType()) || isSecretExpr(let.initializer(), env);
-                boolean isLinear = isLinearType(let.explicitType()) || isLinearExpr(let.initializer(), env);
-                env.declare(let.name(), let.explicitType(), mode, isLinear, isSecret, env.depth);
+                TypeExpr effectiveType = let.explicitType() != null ? let.explicitType() : inferResourceType(let.initializer(), env);
+                VarMode mode = modeFromType(effectiveType, false);
+                boolean isSecret = isSecretType(effectiveType) || isSecretExpr(let.initializer(), env);
+                boolean isLinear = isLinearType(effectiveType) || isLinearExpr(let.initializer(), env);
+                env.declare(let.name(), effectiveType, mode, isLinear, isSecret, env.depth);
                 linkAliasOrView(let.name(), let.initializer(), env);
             }
             case VarStmt varStmt -> {
                 checkExpr(varStmt.initializer(), env);
+                TypeExpr effectiveType = varStmt.explicitType() != null ? varStmt.explicitType() : inferResourceType(varStmt.initializer(), env);
                 VarMode mode = VarMode.UPDATE;
-                boolean isSecret = isSecretType(varStmt.explicitType()) || isSecretExpr(varStmt.initializer(), env);
-                boolean isLinear = isLinearType(varStmt.explicitType());
-                env.declare(varStmt.name(), varStmt.explicitType(), mode, isLinear, isSecret, env.depth);
+                boolean isSecret = isSecretType(effectiveType) || isSecretExpr(varStmt.initializer(), env);
+                boolean isLinear = isLinearType(effectiveType);
+                env.declare(varStmt.name(), effectiveType, mode, isLinear, isSecret, env.depth);
                 linkAliasOrView(varStmt.name(), varStmt.initializer(), env);
             }
             case AssignStmt assign -> {
@@ -161,8 +164,12 @@ public final class CapabilityChecker {
             case ExprStmt es -> checkExpr(es.expr(), env);
             case TupleDestructureStmt td -> {
                 checkExpr(td.initializer(), env);
+                boolean isBudgetSplit = isBudgetSplitCall(td.initializer(), env);
                 for (int i = 0; i < td.names().size(); i++) {
                     TypeExpr t = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
+                    if (t == null && isBudgetSplit) {
+                        t = new SimpleTypeExpr("Budget", td.span());
+                    }
                     env.declare(td.names().get(i), t, VarMode.OWNED, isLinearType(t), isSecretType(t), env.depth);
                 }
             }
@@ -354,6 +361,19 @@ public final class CapabilityChecker {
                             call.span()
                         ));
                     }
+                } else if (protocols.containsKey(target)) {
+                    checkProtocolTransitionEffects(target, method, call.args(), env, call.span());
+                    checkExpr(fa.object(), env);
+                    for (var arg : call.args()) checkExpr(arg, env);
+                    if (!call.args().isEmpty()) {
+                        Expr firstArg = call.args().get(0);
+                        Expr unwrapped = firstArg instanceof ParenExpr p ? p.inner() : firstArg;
+                        if (unwrapped instanceof IdentExpr argId
+                            && env.states.get(argId.name()) == CapState.ALIVE) {
+                            consumeVariable(argId.name(), env, firstArg.span());
+                        }
+                    }
+                    return;
                 }
             }
             // Instance method calls like xs.map(...), xs.filter(...), b.split(...)
@@ -364,7 +384,32 @@ public final class CapabilityChecker {
             if (method.equals("split") || method.equals("spend")) {
                 checkExpr(fa.object(), env);
                 checkBudgetOp(call, env);
+                if (fa.object() instanceof IdentExpr objId && objId.name().equals("Budget")) {
+                    if (!call.args().isEmpty()) {
+                        Expr firstArg = call.args().get(0);
+                        Expr unwrapped = firstArg instanceof ParenExpr p ? p.inner() : firstArg;
+                        if (unwrapped instanceof IdentExpr bId && env.states.get(bId.name()) == CapState.ALIVE) {
+                            consumeVariable(bId.name(), env, firstArg.span());
+                        }
+                    }
+                } else {
+                    Expr unwrappedObj = fa.object() instanceof ParenExpr p ? p.inner() : fa.object();
+                    if (unwrappedObj instanceof IdentExpr bId
+                        && (method.equals("spend") || isBudgetBinding(bId.name(), env))
+                        && env.states.get(bId.name()) == CapState.ALIVE) {
+                        consumeVariable(bId.name(), env, fa.object().span());
+                    }
+                }
                 return;
+            }
+            if (fa.object() instanceof IdentExpr objId) {
+                TypeExpr objType = env.types.get(objId.name());
+                if (objType != null) {
+                    String objTypeName = typeName(objType);
+                    if (protocols.containsKey(objTypeName)) {
+                        checkProtocolTransitionEffects(objTypeName, method, List.of(), env, call.span());
+                    }
+                }
             }
             checkExpr(fa.object(), env);
             for (var arg : call.args()) checkExpr(arg, env);
@@ -567,6 +612,20 @@ public final class CapabilityChecker {
                             "Pure callback cannot invoke effectful function '" + id.name() + "'",
                             call.span()
                         ));
+                    }
+                } else if (call.callee() instanceof FieldAccessExpr fa && fa.object() instanceof IdentExpr objId) {
+                    ProtocolDecl proto = protocols.get(objId.name());
+                    if (proto != null) {
+                        for (var t : proto.transitions()) {
+                            if (t.name().equals(fa.fieldName()) && !t.effects().isEmpty()) {
+                                diagnostics.add(Diagnostic.error(
+                                    "NGJ-CAP-003",
+                                    "Pure callback cannot invoke effectful protocol transition '" + objId.name() + "." + fa.fieldName() + "'",
+                                    call.span()
+                                ));
+                                break;
+                            }
+                        }
                     }
                 }
                 checkExprLocalPurity(call.callee(), outerVars, env, contextSpan);
@@ -796,6 +855,111 @@ public final class CapabilityChecker {
         if (t == null) return false;
         String n = typeName(t);
         return n.equals("Slice") || n.equals("Bytes");
+    }
+
+    private void checkProtocolTransitionEffects(
+        String protoName,
+        String action,
+        List<Expr> args,
+        CapEnv env,
+        SourceSpan span
+    ) {
+        ProtocolDecl proto = protocols.get(protoName);
+        if (proto == null) return;
+        String knownFromState = null;
+        if (!args.isEmpty()) {
+            Expr first = args.get(0);
+            if (first instanceof ConsumeExpr ce) first = ce.target();
+            if (first instanceof ParenExpr pe) first = pe.inner();
+            if (first instanceof IdentExpr id) {
+                TypeExpr t = env.types.get(id.name());
+                if (t instanceof CapabilityTypeExpr cap) t = cap.inner();
+                if (t instanceof GenericTypeExpr g && !g.typeArgs().isEmpty()
+                    && g.typeArgs().get(0) instanceof SimpleTypeExpr st) {
+                    knownFromState = st.name();
+                }
+            }
+        }
+        ProtocolDecl.Transition matched = null;
+        for (var t : proto.transitions()) {
+            if (!t.name().equals(action)) continue;
+            if (knownFromState != null && t.fromState().equals(knownFromState)) {
+                matched = t;
+                break;
+            }
+            if (matched == null) {
+                matched = t;
+            }
+        }
+        if (matched != null) {
+            for (var eff : matched.effects()) {
+                requireEffect(eff, env, span);
+            }
+        }
+    }
+
+    private TypeExpr inferResourceType(Expr init, CapEnv env) {
+        if (init == null) return null;
+        if (init instanceof IdentExpr id) {
+            return env.types.get(id.name());
+        }
+        if (init instanceof ConsumeExpr ce) {
+            return inferResourceType(ce.target(), env);
+        }
+        if (init instanceof ParenExpr pe) {
+            return inferResourceType(pe.inner(), env);
+        }
+        if (init instanceof CallExpr c && c.callee() instanceof FieldAccessExpr fa
+            && fa.object() instanceof IdentExpr objId) {
+            String target = objId.name();
+            if (target.equals("Budget") && fa.fieldName().equals("mint")) {
+                return new SimpleTypeExpr("Budget", c.span());
+            }
+            if (protocols.containsKey(target)) {
+                ProtocolDecl proto = protocols.get(target);
+                for (var t : proto.transitions()) {
+                    if (t.name().equals(fa.fieldName())) {
+                        return new GenericTypeExpr(target,
+                            List.of(new SimpleTypeExpr(t.toState(), c.span())),
+                            c.span());
+                    }
+                }
+                return new SimpleTypeExpr(target, c.span());
+            }
+            TypeExpr objType = env.types.get(target);
+            if (objType != null) {
+                String objTypeName = typeName(objType);
+                if (protocols.containsKey(objTypeName)) {
+                    ProtocolDecl proto = protocols.get(objTypeName);
+                    for (var t : proto.transitions()) {
+                        if (t.name().equals(fa.fieldName())) {
+                            return new GenericTypeExpr(objTypeName,
+                                List.of(new SimpleTypeExpr(t.toState(), c.span())),
+                                c.span());
+                        }
+                    }
+                    return new SimpleTypeExpr(objTypeName, c.span());
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean isBudgetSplitCall(Expr init, CapEnv env) {
+        if (init instanceof ParenExpr pe) return isBudgetSplitCall(pe.inner(), env);
+        if (init instanceof CallExpr c && c.callee() instanceof FieldAccessExpr fa
+            && fa.fieldName().equals("split")) {
+            if (fa.object() instanceof IdentExpr objId) {
+                return objId.name().equals("Budget") || isBudgetBinding(objId.name(), env);
+            }
+        }
+        return false;
+    }
+
+    private boolean isBudgetBinding(String name, CapEnv env) {
+        if (env.budgetLimits.containsKey(name)) return true;
+        TypeExpr t = env.types.get(name);
+        return t != null && typeName(t).equals("Budget");
     }
 
     private String typeName(TypeExpr t) {

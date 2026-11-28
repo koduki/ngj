@@ -296,4 +296,162 @@ class CodexRegressionTest {
         assertEquals(1, code, "Tainted assignment inside if branch must persist after branch and reject pay(): " + stdout);
         assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
     }
+
+    @Test
+    void protocolTransitionEffectsAreEnforcedInCaller() throws Exception {
+        Path file = tempDir.resolve("proto_effect.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            protocol PaymentFlow {
+                initial Start;
+                states Start, Done;
+                final Done;
+                transition charge(Start) -> Done effects(PaymentWrite);
+            }
+
+            public fn pureCaller(consume tok: PaymentFlow<Start>) -> PaymentFlow<Done> effects() {
+                return PaymentFlow.charge(consume tok);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Calling PaymentWrite transition from effects() must fail with NGJ-EFFECT-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-EFFECT-001"), "Expected NGJ-EFFECT-001: " + stdout);
+    }
+
+    @Test
+    void crossProtocolTokenTransitionIsRejected() throws Exception {
+        Path file = tempDir.resolve("cross_proto.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            @must_resolve
+            protocol A {
+                initial Start;
+                states Start, Done;
+                final Done;
+                transition finish(Start) -> Done effects();
+            }
+
+            @must_resolve
+            protocol B {
+                initial Start;
+                states Start, Done;
+                final Done;
+                transition finish(Start) -> Done effects();
+            }
+
+            public fn bad(consume a: A<Start>) -> B<Done> effects() {
+                return B.finish(consume a);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Passing A<Start> to B.finish must fail: " + stdout);
+        assertTrue(stdout.contains("NGJ-PROTO-004") || stdout.contains("NGJ-PROTO-002"), "Expected protocol error: " + stdout);
+    }
+
+    @Test
+    void protocolTransitionWithoutExplicitConsumeInvalidatesSourceToken() throws Exception {
+        Path file = tempDir.resolve("proto_implicit_consume.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            protocol A {
+                initial Start;
+                states Start, Done;
+                final Done;
+                transition finish(Start) -> Done effects();
+            }
+
+            public fn bad(consume a: A<Start>) -> A<Done> effects() {
+                val d1 = A.finish(a);
+                val d2 = A.finish(a);
+                return d2;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Second transition on same token must fail: " + stdout);
+        assertTrue(stdout.contains("NGJ-PROTO-004") || stdout.contains("NGJ-CAP-002") || stdout.contains("NGJ-PROTO-002"),
+            "Expected protocol/capability reuse error: " + stdout);
+    }
+
+    @Test
+    void budgetSpendRevokesReceiverOwnership() throws Exception {
+        Path file = tempDir.resolve("budget_double_spend.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(consume b: Budget<ApiQuota>) -> Unit effects() {
+                val b1: Budget<ApiQuota> = b.spend(1L);
+                val b2: Budget<ApiQuota> = b.spend(1L);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Successive b.spend(1L) must fail with NGJ-CAP-002: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void conditionalExpressionPreservesUntrustedTaint() throws Exception {
+        Path file = tempDir.resolve("cond_taint.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>) -> Unit effects(PaymentWrite) {
+                val selected = if (true) { flag } else { flag };
+                if (isSome(selected)) {
+                    pay();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Untrusted flag flowing through if-expr must trigger NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
 }

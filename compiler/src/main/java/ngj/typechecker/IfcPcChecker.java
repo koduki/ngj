@@ -203,7 +203,7 @@ public final class IfcPcChecker {
             case ValStmt val -> {
                 localDeclared.add(val.name());
                 checkExpr(val.initializer(), untrustedVars, inUntrustedPc);
-                if (isValidatedExpr(val.initializer())) {
+                if (isValidatedType(val.explicitType()) || isValidatedExpr(val.initializer())) {
                     untrustedVars.remove(val.name());
                 } else if (isUntrustedType(val.explicitType()) || isExprUntrusted(val.initializer(), untrustedVars)) {
                     untrustedVars.add(val.name());
@@ -212,7 +212,7 @@ public final class IfcPcChecker {
             case LetStmt let -> {
                 localDeclared.add(let.name());
                 checkExpr(let.initializer(), untrustedVars, inUntrustedPc);
-                if (isValidatedExpr(let.initializer())) {
+                if (isValidatedType(let.explicitType()) || isValidatedExpr(let.initializer())) {
                     untrustedVars.remove(let.name());
                 } else if (isUntrustedType(let.explicitType()) || isExprUntrusted(let.initializer(), untrustedVars)) {
                     untrustedVars.add(let.name());
@@ -386,12 +386,27 @@ public final class IfcPcChecker {
         };
     }
 
+    private boolean isValidatedType(TypeExpr type) {
+        if (type == null) return false;
+        return switch (type) {
+            case GenericTypeExpr g -> g.name().equals("Validated")
+                || (g.name().equals("Result") && !g.typeArgs().isEmpty() && isValidatedType(g.typeArgs().get(0)));
+            case SimpleTypeExpr s -> s.name().equals("Validated");
+            case CapabilityTypeExpr c -> isValidatedType(c.inner());
+            default -> false;
+        };
+    }
+
     private boolean isValidatedExpr(Expr expr) {
         if (expr == null) return false;
         return switch (expr) {
             case PropagateExpr p -> isValidatedExpr(p.inner());
             case CallExpr c -> {
-                if (c.callee() instanceof IdentExpr id && id.name().equals("validate")) yield true;
+                if (c.callee() instanceof IdentExpr id) {
+                    if (id.name().equals("validate")) yield true;
+                    FnDecl fn = fnDecls.get(id.name());
+                    if (fn != null && isValidatedType(fn.returnType())) yield true;
+                }
                 if (c.callee() instanceof FieldAccessExpr fa
                     && (fa.fieldName().equals("validate") || fa.fieldName().equals("parse"))) yield true;
                 yield false;
@@ -418,7 +433,84 @@ public final class IfcPcChecker {
             case BinaryExpr b -> isExprUntrusted(b.left(), untrustedVars) || isExprUntrusted(b.right(), untrustedVars);
             case UnaryExpr u -> isExprUntrusted(u.operand(), untrustedVars);
             case ParenExpr p -> isExprUntrusted(p.inner(), untrustedVars);
+            case PropagateExpr p -> isExprUntrusted(p.inner(), untrustedVars);
+            case IfExpr i -> isExprUntrusted(i.condition(), untrustedVars)
+                || isBlockUntrusted(i.thenBranch(), untrustedVars)
+                || (i.elseBranch() != null && isExprUntrusted(i.elseBranch(), untrustedVars));
+            case MatchExpr m -> {
+                if (!isValidatedExpr(m.scrutinee()) && isExprUntrusted(m.scrutinee(), untrustedVars)) {
+                    yield true;
+                }
+                for (var arm : m.arms()) {
+                    if (isExprUntrusted(arm.body(), untrustedVars)) {
+                        yield true;
+                    }
+                }
+                yield false;
+            }
+            case BlockExpr b -> isBlockUntrusted(b, untrustedVars);
+            case ScopeExpr s -> isBlockUntrusted(s.body(), untrustedVars);
+            case ForkExpr f -> isBlockUntrusted(f.body(), untrustedVars);
+            case TupleExpr t -> {
+                for (var elem : t.elements()) {
+                    if (isExprUntrusted(elem, untrustedVars)) yield true;
+                }
+                yield false;
+            }
+            case ConstructorExpr c -> {
+                for (var field : c.fields()) {
+                    if (isExprUntrusted(field.value(), untrustedVars)) yield true;
+                }
+                yield false;
+            }
             default -> false;
         };
+    }
+
+    private boolean isBlockUntrusted(BlockExpr block, Set<String> untrustedVars) {
+        if (block == null) return false;
+        Set<String> localUntrusted = new LinkedHashSet<>(untrustedVars);
+        for (var stmt : block.statements()) {
+            switch (stmt) {
+                case ValStmt val -> {
+                    if (isValidatedType(val.explicitType()) || isValidatedExpr(val.initializer())) {
+                        localUntrusted.remove(val.name());
+                    } else if (isUntrustedType(val.explicitType()) || isExprUntrusted(val.initializer(), localUntrusted)) {
+                        localUntrusted.add(val.name());
+                    }
+                }
+                case LetStmt let -> {
+                    if (isValidatedType(let.explicitType()) || isValidatedExpr(let.initializer())) {
+                        localUntrusted.remove(let.name());
+                    } else if (isUntrustedType(let.explicitType()) || isExprUntrusted(let.initializer(), localUntrusted)) {
+                        localUntrusted.add(let.name());
+                    }
+                }
+                case VarStmt varStmt -> {
+                    if (isUntrustedType(varStmt.explicitType()) || isExprUntrusted(varStmt.initializer(), localUntrusted)) {
+                        localUntrusted.add(varStmt.name());
+                    }
+                }
+                case AssignStmt assign -> {
+                    if (isExprUntrusted(assign.value(), localUntrusted)) {
+                        localUntrusted.add(assign.name());
+                    }
+                }
+                case ReturnStmt ret -> {
+                    if (ret.value() != null && isExprUntrusted(ret.value(), localUntrusted)) {
+                        return true;
+                    }
+                }
+                case ExprStmt es -> {
+                    if (es.expr() instanceof IfExpr || es.expr() instanceof MatchExpr || es.expr() instanceof BlockExpr) {
+                        if (isExprUntrusted(es.expr(), localUntrusted)) {
+                            return true;
+                        }
+                    }
+                }
+                default -> {}
+            }
+        }
+        return block.tailExpr() != null && isExprUntrusted(block.tailExpr(), localUntrusted);
     }
 }
