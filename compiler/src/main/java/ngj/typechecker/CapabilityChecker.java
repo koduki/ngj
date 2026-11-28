@@ -238,6 +238,7 @@ public final class CapabilityChecker {
                     consumeVariable(id.name(), env, consume.span());
                 } else {
                     checkExpr(consume.target(), env);
+                    consumeExprTargets(consume.target(), env, consume.span());
                 }
             }
             case CallExpr call -> checkCall(call, env);
@@ -253,6 +254,7 @@ public final class CapabilityChecker {
                         ));
                     }
                 }
+                checkFieldAccessOwnership(fa, env);
             }
             case BinaryExpr bin -> {
                 checkExpr(bin.left(), env);
@@ -416,11 +418,9 @@ public final class CapabilityChecker {
                     for (var arg : call.args()) checkExpr(arg, env);
                     if (!call.args().isEmpty()) {
                         Expr firstArg = call.args().get(0);
-                        Expr unwrapped = firstArg instanceof ParenExpr p ? p.inner() : firstArg;
-                        if (unwrapped instanceof IdentExpr argId
-                            && env.states.get(argId.name()) == CapState.ALIVE) {
-                            consumeVariable(argId.name(), env, firstArg.span());
-                        }
+                        Expr unwrapped = firstArg;
+                        while (unwrapped instanceof ParenExpr p) unwrapped = p.inner();
+                        consumeExprTargets(unwrapped, env, firstArg.span());
                     }
                     return;
                 }
@@ -436,28 +436,24 @@ public final class CapabilityChecker {
                 if (fa.object() instanceof IdentExpr objId && objId.name().equals("Budget")) {
                     if (!call.args().isEmpty()) {
                         Expr firstArg = call.args().get(0);
-                        Expr unwrapped = firstArg instanceof ParenExpr p ? p.inner() : firstArg;
-                        if (unwrapped instanceof IdentExpr bId && env.states.get(bId.name()) == CapState.ALIVE) {
-                            consumeVariable(bId.name(), env, firstArg.span());
-                        }
+                        Expr unwrapped = firstArg;
+                        while (unwrapped instanceof ParenExpr p) unwrapped = p.inner();
+                        consumeExprTargets(unwrapped, env, firstArg.span());
                     }
                 } else {
-                    Expr unwrappedObj = fa.object() instanceof ParenExpr p ? p.inner() : fa.object();
-                    if (unwrappedObj instanceof IdentExpr bId
-                        && (method.equals("spend") || isBudgetBinding(bId.name(), env))
-                        && env.states.get(bId.name()) == CapState.ALIVE) {
-                        consumeVariable(bId.name(), env, fa.object().span());
+                    Expr unwrappedObj = fa.object();
+                    while (unwrappedObj instanceof ParenExpr p) unwrappedObj = p.inner();
+                    if (method.equals("spend") || isBudgetExpr(unwrappedObj, env)) {
+                        consumeExprTargets(unwrappedObj, env, fa.object().span());
                     }
                 }
                 return;
             }
-            if (fa.object() instanceof IdentExpr objId) {
-                TypeExpr objType = env.types.get(objId.name());
-                if (objType != null) {
-                    String objTypeName = typeName(objType);
-                    if (protocols.containsKey(objTypeName)) {
-                        checkProtocolTransitionEffects(objTypeName, method, List.of(), env, call.span());
-                    }
+            TypeExpr receiverType = inferExprType(fa.object(), env);
+            if (receiverType != null) {
+                String objTypeName = typeName(receiverType);
+                if (protocols.containsKey(objTypeName)) {
+                    checkProtocolTransitionEffects(objTypeName, method, List.of(), env, call.span());
                 }
             }
             checkExpr(fa.object(), env);
@@ -479,21 +475,24 @@ public final class CapabilityChecker {
                     Param p = fn.params().get(i);
                     Expr arg = call.args().get(i);
                     if (p.isConsume()) {
-                        if (arg instanceof ConsumeExpr ce && ce.target() instanceof IdentExpr argId) {
-                            consumeVariable(argId.name(), env, arg.span());
+                        if (arg instanceof ConsumeExpr) {
+                            checkExpr(arg, env);
                         } else if (arg instanceof IdentExpr argId) {
                             consumeVariable(argId.name(), env, arg.span());
                         } else {
                             checkExpr(arg, env);
+                            consumeExprTargets(arg, env, arg.span());
                         }
                     } else {
                         checkExpr(arg, env);
                         if (resolveTypeAlias(p.type()) instanceof CapabilityTypeExpr cap
                             && cap.mode() == CapabilityTypeExpr.CapabilityMode.UPDATE) {
-                            Expr unwrapped = arg instanceof ParenExpr pe ? pe.inner() : arg;
-                            if (unwrapped instanceof IdentExpr argId) {
-                                boolean hasReadRoot = env.modes.get(argId.name()) == VarMode.READ;
-                                for (String root : env.resolveAllRoots(argId.name())) {
+                            Expr unwrapped = arg;
+                            while (unwrapped instanceof ParenExpr pe) unwrapped = pe.inner();
+                            Set<String> targets = resolveOwnershipTargets(unwrapped, env);
+                            for (String target : targets) {
+                                boolean hasReadRoot = env.modes.get(target) == VarMode.READ;
+                                for (String root : env.resolveAllRoots(target)) {
                                     if (env.modes.get(root) == VarMode.READ) {
                                         hasReadRoot = true;
                                         break;
@@ -502,11 +501,11 @@ public final class CapabilityChecker {
                                 if (hasReadRoot) {
                                     diagnostics.add(Diagnostic.error(
                                         "NGJ-SEP-001",
-                                        "Cannot pass 'read' capability '" + argId.name() + "' to 'update' parameter '" + p.name() + "'",
+                                        "Cannot pass 'read' capability '" + target + "' to 'update' parameter '" + p.name() + "'",
                                         arg.span() != null ? arg.span() : call.span()
                                     ));
                                 }
-                                recordAccess(argId.name(), VarMode.UPDATE, env, arg.span());
+                                recordAccess(target, VarMode.UPDATE, env, arg.span());
                             }
                         }
                     }
@@ -812,6 +811,16 @@ public final class CapabilityChecker {
             }
         }
         for (String target : targets) {
+            if (env.hasConsumedSyntheticChild(target)) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-CAP-002",
+                    "Cannot consume '" + name + "' because one or more of its resource fields were already consumed",
+                    span
+                ));
+                return;
+            }
+        }
+        for (String target : targets) {
             if (env.hasLiveViews(target)) {
                 diagnostics.add(Diagnostic.error(
                     "NGJ-CAP-002",
@@ -823,6 +832,83 @@ public final class CapabilityChecker {
         }
         env.markConsumed(name);
         recordAccess(name, VarMode.UPDATE, env, span);
+    }
+
+    private void checkFieldAccessOwnership(FieldAccessExpr fa, CapEnv env) {
+        AliasGraph graph = computeAliasGraph(fa, env, Map.of());
+        for (String root : graph.directRoots()) {
+            CapState state = env.states.get(root);
+            if (state == CapState.CONSUMED || state == CapState.MAYBE_CONSUMED) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-CAP-002",
+                    "Use of consumed or potentially consumed resource field '" + root + "'",
+                    fa.span()
+                ));
+                return;
+            }
+        }
+    }
+
+    private Set<String> resolveOwnershipTargets(Expr expr, CapEnv env) {
+        if (expr == null) return Set.of();
+        Expr unwrapped = expr;
+        while (unwrapped instanceof ParenExpr p) unwrapped = p.inner();
+        if (unwrapped instanceof IdentExpr id) {
+            return env.states.containsKey(id.name()) ? Set.of(id.name()) : Set.of();
+        }
+        AliasGraph graph = computeAliasGraph(unwrapped, env, Map.of());
+        if (!graph.directRoots().isEmpty()) {
+            Set<String> existing = new LinkedHashSet<>();
+            for (String root : graph.directRoots()) {
+                if (env.states.containsKey(root)) {
+                    existing.add(root);
+                }
+            }
+            if (!existing.isEmpty()) {
+                return existing;
+            }
+        }
+        return Set.of();
+    }
+
+    private void consumeExprTargets(Expr target, CapEnv env, SourceSpan span) {
+        Set<String> targets = resolveOwnershipTargets(target, env);
+        for (String name : targets) {
+            if (env.states.get(name) == CapState.ALIVE) {
+                consumeVariable(name, env, span);
+            }
+        }
+    }
+
+    private String registerSyntheticField(String owner, String fieldName, TypeExpr fieldType, CapEnv env) {
+        String key = owner + "." + fieldName;
+        env.syntheticChildren.computeIfAbsent(owner, k -> new LinkedHashSet<>()).add(key);
+        env.aliases.computeIfAbsent(owner, k -> new LinkedHashSet<>()).add(key);
+        if (!env.states.containsKey(key)) {
+            CapState ownerState = env.states.getOrDefault(owner, CapState.ALIVE);
+            VarMode ownerMode = env.modes.getOrDefault(owner, VarMode.OWNED);
+            int ownerDepth = env.declDepths.getOrDefault(owner, 0);
+            env.states.put(key, ownerState);
+            env.modes.put(key, ownerMode);
+            env.declDepths.put(key, ownerDepth);
+            if (fieldType != null) {
+                env.types.put(key, fieldType);
+            }
+            if (isLinearType(fieldType)) {
+                env.linearVars.add(key);
+            }
+            if (isSecretType(fieldType)) {
+                env.secretVars.add(key);
+            }
+        }
+        return key;
+    }
+
+    private boolean isPrimitiveValueType(TypeExpr t) {
+        if (t == null) return false;
+        String n = typeName(t);
+        return n.equals("Int") || n.equals("Long") || n.equals("Float") || n.equals("Double")
+            || n.equals("Bool") || n.equals("String") || n.equals("Char") || n.equals("Unit");
     }
 
     private void recordAccess(String name, VarMode mode, CapEnv env, SourceSpan span) {
@@ -970,6 +1056,16 @@ public final class CapabilityChecker {
                         }
                         yield fields.isEmpty() ? AliasGraph.EMPTY : new AliasGraph(Set.of(), Map.of(), fields);
                     }
+                    if (td instanceof DataDecl d) {
+                        Map<String, AliasGraph> fields = new LinkedHashMap<>();
+                        for (int i = 0; i < Math.min(d.fields().size(), c.args().size()); i++) {
+                            AliasGraph fg = computeAliasGraph(c.args().get(i), env, localGraphs);
+                            if (!fg.isEmpty()) {
+                                fields.put(d.fields().get(i).name(), fg);
+                            }
+                        }
+                        yield fields.isEmpty() ? AliasGraph.EMPTY : new AliasGraph(Set.of(), Map.of(), fields);
+                    }
                 }
                 yield AliasGraph.EMPTY;
             }
@@ -984,6 +1080,18 @@ public final class CapabilityChecker {
                     AliasGraph elemGraph = objGraph.elementAt(idx);
                     if (!elemGraph.isEmpty()) yield elemGraph;
                 } catch (NumberFormatException ignored) {}
+                TypeExpr fieldType = resolveFieldType(inferExprType(fa.object(), env), fa.fieldName());
+                if (!objGraph.directRoots().isEmpty() && !isPrimitiveValueType(fieldType)) {
+                    Set<String> synthRoots = new LinkedHashSet<>();
+                    for (String owner : objGraph.directRoots()) {
+                        if (env.states.containsKey(owner)) {
+                            synthRoots.add(registerSyntheticField(owner, fa.fieldName(), fieldType, env));
+                        }
+                    }
+                    if (!synthRoots.isEmpty()) {
+                        yield new AliasGraph(synthRoots, Map.of(), Map.of());
+                    }
+                }
                 yield AliasGraph.EMPTY;
             }
             case IfExpr i -> {
@@ -1293,18 +1401,29 @@ public final class CapabilityChecker {
                 }
             }
         }
-        return null;
+        return inferExprType(init, env);
     }
 
     private boolean isBudgetSplitCall(Expr init, CapEnv env) {
         if (init instanceof ParenExpr pe) return isBudgetSplitCall(pe.inner(), env);
         if (init instanceof CallExpr c && c.callee() instanceof FieldAccessExpr fa
             && fa.fieldName().equals("split")) {
-            if (fa.object() instanceof IdentExpr objId) {
-                return objId.name().equals("Budget") || isBudgetBinding(objId.name(), env);
+            if (fa.object() instanceof IdentExpr objId && objId.name().equals("Budget")) {
+                return true;
             }
+            return isBudgetExpr(fa.object(), env);
         }
         return false;
+    }
+
+    private boolean isBudgetExpr(Expr expr, CapEnv env) {
+        if (expr == null) return false;
+        Expr unwrapped = expr;
+        while (unwrapped instanceof ParenExpr pe) unwrapped = pe.inner();
+        if (unwrapped instanceof ConsumeExpr ce) return isBudgetExpr(ce.target(), env);
+        if (unwrapped instanceof IdentExpr id) return isBudgetBinding(id.name(), env);
+        TypeExpr t = inferExprType(unwrapped, env);
+        return t != null && typeName(t).equals("Budget");
     }
 
     private boolean isBudgetBinding(String name, CapEnv env) {
@@ -1475,6 +1594,7 @@ public final class CapabilityChecker {
         final Map<String, String> aliasOf = new LinkedHashMap<>();
         final Map<String, Set<String>> aliasRoots = new LinkedHashMap<>();
         final Map<String, Set<String>> aliases = new LinkedHashMap<>();
+        final Map<String, Set<String>> syntheticChildren = new LinkedHashMap<>();
         final Map<String, AliasGraph> aliasGraphs = new LinkedHashMap<>();
         final Map<String, String> viewOf = new LinkedHashMap<>();
         final Map<String, Set<String>> views = new LinkedHashMap<>();
@@ -1517,6 +1637,28 @@ public final class CapabilityChecker {
             if (vs == null) return false;
             for (String v : vs) {
                 if (states.get(v) == CapState.ALIVE) return true;
+            }
+            return false;
+        }
+
+        boolean hasConsumedSyntheticChild(String owner) {
+            Set<String> visited = new LinkedHashSet<>();
+            Deque<String> work = new ArrayDeque<>();
+            Set<String> direct = syntheticChildren.get(owner);
+            if (direct != null) {
+                work.addAll(direct);
+            }
+            while (!work.isEmpty()) {
+                String cur = work.poll();
+                if (!visited.add(cur)) continue;
+                CapState st = states.get(cur);
+                if (st == CapState.CONSUMED || st == CapState.MAYBE_CONSUMED) {
+                    return true;
+                }
+                Set<String> nested = syntheticChildren.get(cur);
+                if (nested != null) {
+                    work.addAll(nested);
+                }
             }
             return false;
         }
@@ -1587,6 +1729,7 @@ public final class CapabilityChecker {
             c.aliasOf.putAll(aliasOf);
             for (var e : aliasRoots.entrySet()) c.aliasRoots.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
             for (var e : aliases.entrySet()) c.aliases.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
+            for (var e : syntheticChildren.entrySet()) c.syntheticChildren.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
             c.aliasGraphs.putAll(aliasGraphs);
             c.viewOf.putAll(viewOf);
             for (var e : views.entrySet()) c.views.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
@@ -1598,6 +1741,30 @@ public final class CapabilityChecker {
             c.activeScope = activeScope;
             c.currentFork = currentFork;
             return c;
+        }
+
+        private void adoptSyntheticFieldsFrom(CapEnv branch) {
+            boolean changed = true;
+            while (changed) {
+                changed = false;
+                for (var entry : branch.syntheticChildren.entrySet()) {
+                    String owner = entry.getKey();
+                    if (!states.containsKey(owner)) continue;
+                    for (String child : entry.getValue()) {
+                        syntheticChildren.computeIfAbsent(owner, k -> new LinkedHashSet<>()).add(child);
+                        aliases.computeIfAbsent(owner, k -> new LinkedHashSet<>()).add(child);
+                        if (!states.containsKey(child)) {
+                            states.put(child, states.getOrDefault(owner, CapState.ALIVE));
+                            if (branch.types.containsKey(child)) types.put(child, branch.types.get(child));
+                            if (branch.modes.containsKey(child)) modes.put(child, branch.modes.get(child));
+                            if (branch.declDepths.containsKey(child)) declDepths.put(child, branch.declDepths.get(child));
+                            if (branch.linearVars.contains(child)) linearVars.add(child);
+                            if (branch.secretVars.contains(child)) secretVars.add(child);
+                            changed = true;
+                        }
+                    }
+                }
+            }
         }
 
         private void mergeBranchRelationsFrom(CapEnv branch) {
@@ -1622,7 +1789,7 @@ public final class CapabilityChecker {
                 Set<String> bAliases = branch.aliases.get(key);
                 if (bAliases != null) {
                     for (String al : bAliases) {
-                        if (outerVars.contains(al)) {
+                        if (outerVars.contains(al) && !al.contains(".")) {
                             aliasOf.putIfAbsent(al, key);
                             aliasRoots.computeIfAbsent(al, k -> new LinkedHashSet<>()).add(key);
                             aliases.computeIfAbsent(key, k -> new LinkedHashSet<>()).add(al);
@@ -1654,6 +1821,7 @@ public final class CapabilityChecker {
         }
 
         void copyStatesFrom(CapEnv other) {
+            adoptSyntheticFieldsFrom(other);
             for (var key : states.keySet()) {
                 if (other.states.containsKey(key)) {
                     states.put(key, other.states.get(key));
@@ -1663,6 +1831,8 @@ public final class CapabilityChecker {
         }
 
         void mergeStates(CapEnv a, CapEnv b) {
+            adoptSyntheticFieldsFrom(a);
+            adoptSyntheticFieldsFrom(b);
             for (var key : states.keySet()) {
                 CapState sa = a.states.getOrDefault(key, CapState.ALIVE);
                 CapState sb = b.states.getOrDefault(key, CapState.ALIVE);

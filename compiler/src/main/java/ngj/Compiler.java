@@ -254,14 +254,21 @@ public final class Compiler {
         PureJvmSmtSolver jvmSolver = new PureJvmSmtSolver();
         Map<String, TypeAliasDecl> typeAliases = collectTypeAliases();
         Map<String, FnDecl> fnDecls = new LinkedHashMap<>();
+        Map<String, TopLevelDecl> typeDecls = new LinkedHashMap<>();
         for (var unit : parsedUnits.values()) {
             for (var decl : unit.declarations()) {
                 if (decl instanceof FnDecl fn) {
                     fnDecls.put(fn.name(), fn);
+                } else if (decl instanceof RecordDecl r) {
+                    typeDecls.put(r.name(), r);
+                } else if (decl instanceof DataDecl d) {
+                    typeDecls.put(d.name(), d);
+                } else if (decl instanceof EnumDecl e) {
+                    typeDecls.put(e.name(), e);
                 }
             }
         }
-        VcGenerator vcGen = new VcGenerator(specFns, typeAliases, fnDecls);
+        VcGenerator vcGen = new VcGenerator(specFns, typeAliases, fnDecls, typeDecls);
 
         // Surface A: SMT verification of requires => ensures
         List<Expr> reqExprs = targetFn.contracts().stream()
@@ -274,8 +281,9 @@ public final class Compiler {
             .toList();
 
         Map<String, SmtExpr.Sort> sorts = vcGen.collectSorts(targetFn.params(), targetFn.returnType());
-        List<SmtExpr> reqSmt = reqExprs.stream().map(e -> vcGen.translateExpr(e, sorts)).toList();
-        List<SmtExpr> ensSmt = ensExprs.stream().map(e -> vcGen.translateExpr(e, sorts)).toList();
+        Map<String, TypeExpr> varTypes = vcGen.collectVarTypes(targetFn.params());
+        List<SmtExpr> reqSmt = reqExprs.stream().map(e -> vcGen.translateExpr(e, sorts, Map.of(), varTypes)).toList();
+        List<SmtExpr> ensSmt = ensExprs.stream().map(e -> vcGen.translateExpr(e, sorts, Map.of(), varTypes)).toList();
 
         String surfaceAStatus = "unproven";
         String surfaceADetail = "No ensures clause";

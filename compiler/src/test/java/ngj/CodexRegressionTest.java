@@ -2378,4 +2378,173 @@ class CodexRegressionTest {
         assertEquals(1, code, "Short-circuited false && { y = 1; true } must not assume y == 1: " + stdout);
         assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
     }
+
+    @Test
+    void recordFieldBudgetReceiverDoubleSpendRejected() throws Exception {
+        Path file = tempDir.resolve("record_field_budget_double_spend.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record Wallet(b: Budget<Fuel>);
+
+            public fn bad(consume b: Budget<Fuel>) -> Unit effects() {
+                val w = Wallet(b);
+                val b1: Budget<Fuel> = w.b.spend(1L);
+                val b2: Budget<Fuel> = w.b.spend(1L);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Spending w.b twice on Wallet(b) must fail with NGJ-CAP-002: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void parameterRecordFieldBudgetReceiverDoubleSpendRejected() throws Exception {
+        Path file = tempDir.resolve("param_record_field_budget_double_spend.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record Wallet(b: Budget<Fuel>);
+
+            public fn bad(w: Wallet) -> Unit effects() {
+                val b1: Budget<Fuel> = w.b.spend(1L);
+                val b2: Budget<Fuel> = w.b.spend(1L);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Spending w.b twice on parameter w: Wallet must fail with NGJ-CAP-002: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void parameterRecordDistinctBudgetFieldsSpendAllowed() throws Exception {
+        Path file = tempDir.resolve("param_record_distinct_budgets_ok.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record TwoWallets(a: Budget<Fuel>, b: Budget<Fuel>);
+
+            public fn ok(tw: TwoWallets) -> Unit effects() {
+                val a1: Budget<Fuel> = tw.a.spend(1L);
+                val b1: Budget<Fuel> = tw.b.spend(1L);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(0, code, "Spending distinct fields tw.a and tw.b once each must succeed: " + stdout);
+    }
+
+    @Test
+    void longRecordFieldNegationModelsLongMinValueInPostcondition() throws Exception {
+        Path file = tempDir.resolve("long_field_neg_post_bad.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record Box(value: Long);
+
+            public fn bad(b: Box) -> Long effects()
+                requires (b.value == -9223372036854775807L - 1L)
+                ensures (result > 0)
+            {
+                return -b.value;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Negating Long.MIN_VALUE record field must fail ensures(result > 0): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void longRecordFieldNegationModelsLongMinValueInCallSitePrecondition() throws Exception {
+        Path file = tempDir.resolve("long_field_neg_callsite_bad.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record Box(value: Long);
+
+            public fn positiveLong(x: Long) -> Long effects()
+                requires (x > 0)
+            {
+                return x;
+            }
+
+            public fn bad(b: Box) -> Long effects()
+                requires (b.value == -9223372036854775807L - 1L)
+            {
+                return positiveLong(-b.value);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Passing -b.value for Long.MIN_VALUE record field to positiveLong must fail: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void longRecordFieldNegationAtIntMinValueIsPositive() throws Exception {
+        Path file = tempDir.resolve("long_field_neg_int_min_ok.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record Box(value: Long);
+
+            public fn ok(b: Box) -> Long effects()
+                requires (b.value == -2147483648L)
+                ensures (result > 0)
+            {
+                return -b.value;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(0, code, "Negating Long field at -2147483648L must not overflow and should prove result > 0: " + stdout);
+    }
 }

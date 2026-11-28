@@ -19,6 +19,7 @@ public final class ProofChecker {
     private final Map<String, LemmaDecl> lemmas = new LinkedHashMap<>();
     private final Map<String, FnDecl> fnDecls = new LinkedHashMap<>();
     private final Map<String, TypeAliasDecl> typeAliases = new HashMap<>();
+    private final Map<String, TopLevelDecl> typeDecls = new HashMap<>();
     private final Set<String> secretVars = new LinkedHashSet<>();
 
     private final String profile;
@@ -44,6 +45,7 @@ public final class ProofChecker {
         lemmas.clear();
         fnDecls.clear();
         typeAliases.clear();
+        typeDecls.clear();
         secretVars.clear();
 
         for (var unit : units) {
@@ -53,12 +55,15 @@ public final class ProofChecker {
                     case LemmaDecl lm -> lemmas.put(lm.name(), lm);
                     case FnDecl fn -> fnDecls.put(fn.name(), fn);
                     case TypeAliasDecl ta -> typeAliases.put(ta.name(), ta);
+                    case RecordDecl r -> typeDecls.put(r.name(), r);
+                    case DataDecl d -> typeDecls.put(d.name(), d);
+                    case EnumDecl e -> typeDecls.put(e.name(), e);
                     default -> {}
                 }
             }
         }
 
-        VcGenerator vcGen = new VcGenerator(specFns, typeAliases, fnDecls);
+        VcGenerator vcGen = new VcGenerator(specFns, typeAliases, fnDecls, typeDecls);
 
         for (var unit : units) {
             for (var decl : unit.declarations()) {
@@ -191,13 +196,21 @@ public final class ProofChecker {
         }
     }
 
-    private record EvalResult(SmtExpr smt, boolean isLong, List<EvalResult> tupleElements) {
+    private record EvalResult(SmtExpr smt, boolean isLong, TypeExpr type, List<EvalResult> tupleElements) {
         static EvalResult of(SmtExpr smt, boolean isLong) {
-            return new EvalResult(smt, isLong, null);
+            return new EvalResult(smt, isLong, null, null);
+        }
+
+        static EvalResult of(SmtExpr smt, boolean isLong, TypeExpr type) {
+            return new EvalResult(smt, isLong, type, null);
         }
 
         static EvalResult unsupported(String reason) {
-            return new EvalResult(new SmtExpr.UnsupportedExpr(reason), false, null);
+            return new EvalResult(new SmtExpr.UnsupportedExpr(reason), false, null, null);
+        }
+
+        static EvalResult unsupported(String reason, TypeExpr type) {
+            return new EvalResult(new SmtExpr.UnsupportedExpr(reason), false, type, null);
         }
     }
 
@@ -254,7 +267,7 @@ public final class ProofChecker {
                 case InvariantStmt inv -> {
                     checkExprPurityAndHoles(inv.condition(), true, Set.of());
                     if (!inProofContext && activeCtx != null) {
-                        SmtExpr invExpr = activeCtx.vcGen.translateExpr(inv.condition(), activeCtx.sorts, activeCtx.ssaEnv);
+                        SmtExpr invExpr = activeCtx.vcGen.translateExpr(inv.condition(), activeCtx.sorts, activeCtx.ssaEnv, activeCtx.varTypes);
                         SmtExpr vc;
                         if (activeCtx.premises.isEmpty()) {
                             vc = invExpr;
@@ -297,9 +310,10 @@ public final class ProofChecker {
                     yield EvalResult.unsupported("no_ctx");
                 }
                 yield switch (lit.kind()) {
-                    case INT -> EvalResult.of(SmtExpr.intConst(((Number) lit.value()).longValue()), false);
-                    case LONG -> EvalResult.of(SmtExpr.intConst(((Number) lit.value()).longValue()), true);
-                    case BOOL -> EvalResult.of(SmtExpr.boolConst((Boolean) lit.value()), false);
+                    case INT -> EvalResult.of(SmtExpr.intConst(((Number) lit.value()).longValue()), false, new SimpleTypeExpr("Int", lit.span()));
+                    case LONG -> EvalResult.of(SmtExpr.intConst(((Number) lit.value()).longValue()), true, new SimpleTypeExpr("Long", lit.span()));
+                    case BOOL -> EvalResult.of(SmtExpr.boolConst((Boolean) lit.value()), false, new SimpleTypeExpr("Bool", lit.span()));
+                    case STRING -> EvalResult.unsupported("Unsupported literal: " + lit.kind(), new SimpleTypeExpr("String", lit.span()));
                     default -> EvalResult.unsupported("Unsupported literal: " + lit.kind());
                 };
             }
@@ -316,8 +330,9 @@ public final class ProofChecker {
                 }
                 String ssaName = ctx.ssaEnv.getOrDefault(id.name(), id.name());
                 SmtExpr.Sort sort = ctx.sorts.getOrDefault(ssaName, ctx.sorts.getOrDefault(id.name(), SmtExpr.Sort.INT));
-                boolean isLong = ctx.longVars.contains(ssaName);
-                yield EvalResult.of(new SmtExpr.Var(ssaName, sort), isLong);
+                TypeExpr varType = ctx.varTypes.get(ssaName);
+                boolean isLong = ctx.longVars.contains(ssaName) || ctx.vcGen.isLong(varType);
+                yield EvalResult.of(new SmtExpr.Var(ssaName, sort), isLong, varType);
             }
             case CallExpr call -> {
                 Expr rawCallee = call.callee();
@@ -344,16 +359,27 @@ public final class ProofChecker {
                 }
                 if (rawCallee instanceof IdentExpr id) {
                     FnDecl decl = fnDecls.get(id.name());
-                    boolean isLong = decl != null && ctx.vcGen.isLong(decl.returnType());
-                    SmtExpr.Sort retSort = decl != null ? ctx.vcGen.sortOf(decl.returnType()) : SmtExpr.Sort.INT;
-                    yield EvalResult.of(new SmtExpr.UfApp(id.name(), evaluatedArgs, retSort), isLong);
+                    if (decl != null) {
+                        TypeExpr retType = ctx.vcGen.resolveAliasType(decl.returnType());
+                        boolean isLong = ctx.vcGen.isLong(retType);
+                        SmtExpr.Sort retSort = ctx.vcGen.sortOf(retType);
+                        yield EvalResult.of(new SmtExpr.UfApp(id.name(), evaluatedArgs, retSort), isLong, retType);
+                    }
+                    if (typeDecls.containsKey(id.name())) {
+                        TypeExpr ctorType = call.typeArgs().isEmpty()
+                            ? new SimpleTypeExpr(id.name(), call.span())
+                            : new GenericTypeExpr(id.name(), call.typeArgs(), call.span());
+                        yield EvalResult.of(new SmtExpr.UfApp(id.name(), evaluatedArgs, SmtExpr.Sort.INT), false, ctorType);
+                    }
+                    yield EvalResult.of(new SmtExpr.UfApp(id.name(), evaluatedArgs, SmtExpr.Sort.INT), false, null);
                 }
                 if (rawCallee instanceof FieldAccessExpr fa) {
                     boolean isLong = fa.fieldName().equals("toLong");
+                    TypeExpr methodType = isLong ? new SimpleTypeExpr("Long", call.span()) : null;
                     List<SmtExpr> methodArgs = new ArrayList<>(evaluatedArgs.size() + 1);
                     methodArgs.add(calleeRes.smt());
                     methodArgs.addAll(evaluatedArgs);
-                    yield EvalResult.of(new SmtExpr.UfApp("method_" + fa.fieldName(), methodArgs, SmtExpr.Sort.INT), isLong);
+                    yield EvalResult.of(new SmtExpr.UfApp("method_" + fa.fieldName(), methodArgs, SmtExpr.Sort.INT), isLong, methodType);
                 }
                 yield EvalResult.unsupported("call_expr");
             }
@@ -394,6 +420,11 @@ public final class ProofChecker {
                     collectAssignedVars(i.thenBranch(), mutated);
                     collectAssignedVars(i.elseBranch(), mutated);
                     ctx.havocVars(mutated);
+                    TypeExpr resType = (thenRes.isLong() || ctx.vcGen.isLong(thenRes.type()))
+                        ? thenRes.type()
+                        : ((elseRes.isLong() || ctx.vcGen.isLong(elseRes.type()))
+                            ? elseRes.type()
+                            : (thenRes.type() != null ? thenRes.type() : elseRes.type()));
                     if (i.elseBranch() != null
                         && thenFact != null
                         && !VcGenerator.containsUnsupported(thenRes.smt())
@@ -404,10 +435,11 @@ public final class ProofChecker {
                         }
                         yield EvalResult.of(
                             new SmtExpr.Ite(cond, thenRes.smt(), elseRes.smt()),
-                            thenRes.isLong() || elseRes.isLong()
+                            thenRes.isLong() || elseRes.isLong() || ctx.vcGen.isLong(resType),
+                            resType
                         );
                     }
-                    yield EvalResult.unsupported("if_expr");
+                    yield EvalResult.unsupported("if_expr", resType);
                 } else {
                     checkBlock(i.thenBranch(), inProofContext, null);
                     if (i.elseBranch() != null) checkAndEvalExpr(i.elseBranch(), inProofContext, null);
@@ -508,7 +540,7 @@ public final class ProofChecker {
                     SmtExpr combined = b.op() == BinaryExpr.BinaryOp.AND
                         ? SmtExpr.and(left.smt(), right.smt())
                         : SmtExpr.or(left.smt(), right.smt());
-                    yield EvalResult.of(combined, false);
+                    yield EvalResult.of(combined, false, new SimpleTypeExpr("Bool", b.span()));
                 }
                 EvalResult right = checkAndEvalExpr(b.right(), inProofContext, ctx);
                 if (inProofContext || ctx == null) {
@@ -516,20 +548,25 @@ public final class ProofChecker {
                 }
                 SmtExpr l = left.smt();
                 SmtExpr r = right.smt();
-                boolean arithLong = left.isLong() || right.isLong();
+                boolean arithLong = left.isLong() || right.isLong()
+                    || ctx.vcGen.isLong(left.type()) || ctx.vcGen.isLong(right.type());
+                TypeExpr arithType = arithLong
+                    ? new SimpleTypeExpr("Long", b.span())
+                    : (left.type() != null ? left.type() : right.type());
+                TypeExpr boolType = new SimpleTypeExpr("Bool", b.span());
                 yield switch (b.op()) {
-                    case ADD -> EvalResult.of(new SmtExpr.Add(l, r), arithLong);
-                    case SUB -> EvalResult.of(new SmtExpr.Sub(l, r), arithLong);
-                    case MUL -> EvalResult.of(new SmtExpr.Mul(l, r), arithLong);
-                    case DIV, MOD -> EvalResult.of(new SmtExpr.UfApp("op_" + b.op().name(), List.of(l, r), SmtExpr.Sort.INT), arithLong);
-                    case EQ -> EvalResult.of(new SmtExpr.Eq(l, r), false);
-                    case NE -> EvalResult.of(new SmtExpr.Not(new SmtExpr.Eq(l, r)), false);
-                    case LT -> EvalResult.of(new SmtExpr.Lt(l, r), false);
-                    case LE -> EvalResult.of(new SmtExpr.Le(l, r), false);
-                    case GT -> EvalResult.of(new SmtExpr.Gt(l, r), false);
-                    case GE -> EvalResult.of(new SmtExpr.Ge(l, r), false);
-                    case AND -> EvalResult.of(SmtExpr.and(l, r), false);
-                    case OR -> EvalResult.of(SmtExpr.or(l, r), false);
+                    case ADD -> EvalResult.of(new SmtExpr.Add(l, r), arithLong, arithType);
+                    case SUB -> EvalResult.of(new SmtExpr.Sub(l, r), arithLong, arithType);
+                    case MUL -> EvalResult.of(new SmtExpr.Mul(l, r), arithLong, arithType);
+                    case DIV, MOD -> EvalResult.of(new SmtExpr.UfApp("op_" + b.op().name(), List.of(l, r), SmtExpr.Sort.INT), arithLong, arithType);
+                    case EQ -> EvalResult.of(new SmtExpr.Eq(l, r), false, boolType);
+                    case NE -> EvalResult.of(new SmtExpr.Not(new SmtExpr.Eq(l, r)), false, boolType);
+                    case LT -> EvalResult.of(new SmtExpr.Lt(l, r), false, boolType);
+                    case LE -> EvalResult.of(new SmtExpr.Le(l, r), false, boolType);
+                    case GT -> EvalResult.of(new SmtExpr.Gt(l, r), false, boolType);
+                    case GE -> EvalResult.of(new SmtExpr.Ge(l, r), false, boolType);
+                    case AND -> EvalResult.of(SmtExpr.and(l, r), false, boolType);
+                    case OR -> EvalResult.of(SmtExpr.or(l, r), false, boolType);
                 };
             }
             case UnaryExpr u -> {
@@ -539,15 +576,16 @@ public final class ProofChecker {
                 }
                 yield switch (u.op()) {
                     case NEG -> {
-                        long minVal = op.isLong() ? Long.MIN_VALUE : Integer.MIN_VALUE;
+                        boolean isLong = op.isLong() || ctx.vcGen.isLong(op.type());
+                        long minVal = isLong ? Long.MIN_VALUE : Integer.MIN_VALUE;
                         SmtExpr neg = new SmtExpr.Ite(
                             new SmtExpr.Eq(op.smt(), SmtExpr.intConst(minVal)),
                             SmtExpr.intConst(minVal),
                             new SmtExpr.Sub(SmtExpr.intConst(0), op.smt())
                         );
-                        yield EvalResult.of(neg, op.isLong());
+                        yield EvalResult.of(neg, isLong, op.type());
                     }
-                    case NOT -> EvalResult.of(new SmtExpr.Not(op.smt()), false);
+                    case NOT -> EvalResult.of(new SmtExpr.Not(op.smt()), false, new SimpleTypeExpr("Bool", u.span()));
                 };
             }
             case ParenExpr p -> checkAndEvalExpr(p.inner(), inProofContext, ctx);
@@ -561,29 +599,48 @@ public final class ProofChecker {
                 if (inProofContext || ctx == null) {
                     yield EvalResult.unsupported("no_ctx");
                 }
+                TypeExpr fieldType = ctx.vcGen.resolveFieldType(obj.type(), fa.fieldName());
+                boolean isLong = ctx.vcGen.isLong(fieldType);
+                SmtExpr.Sort fieldSort = fieldType != null ? ctx.vcGen.sortOf(fieldType) : SmtExpr.Sort.INT;
                 yield EvalResult.of(
-                    new SmtExpr.UfApp("field_" + fa.fieldName(), List.of(obj.smt()), SmtExpr.Sort.INT),
-                    false
+                    new SmtExpr.UfApp("field_" + fa.fieldName(), List.of(obj.smt()), fieldSort),
+                    isLong,
+                    fieldType
                 );
             }
             case TupleExpr t -> {
                 List<EvalResult> elems = new ArrayList<>(t.elements().size());
+                List<TypeExpr> elemTypes = new ArrayList<>(t.elements().size());
                 for (var e : t.elements()) {
-                    elems.add(checkAndEvalExpr(e, inProofContext, ctx));
+                    EvalResult er = checkAndEvalExpr(e, inProofContext, ctx);
+                    elems.add(er);
+                    elemTypes.add(er.type());
                 }
-                yield new EvalResult(new SmtExpr.UnsupportedExpr("tuple_expr"), false, elems);
+                yield new EvalResult(
+                    new SmtExpr.UnsupportedExpr("tuple_expr"),
+                    false,
+                    new TupleTypeExpr(elemTypes, t.span()),
+                    elems
+                );
             }
             case ConstructorExpr c -> {
                 for (var field : c.fields()) checkAndEvalExpr(field.value(), inProofContext, ctx);
-                yield EvalResult.unsupported("constructor_expr");
+                String shortName = c.typePath().contains(".")
+                    ? c.typePath().substring(c.typePath().lastIndexOf('.') + 1)
+                    : c.typePath();
+                yield EvalResult.unsupported("constructor_expr", new SimpleTypeExpr(shortName, c.span()));
             }
             case LambdaExpr l -> {
                 CallSiteCtx lambdaCtx = (!inProofContext && ctx != null) ? ctx.fork(null) : null;
                 if (lambdaCtx != null) {
                     for (var p : l.params()) {
-                        SmtExpr.Sort pSort = lambdaCtx.vcGen.sortOf(p.type());
+                        TypeExpr resolvedType = lambdaCtx.vcGen.resolveAliasType(p.type());
+                        SmtExpr.Sort pSort = lambdaCtx.vcGen.sortOf(resolvedType);
                         String lhs = lambdaCtx.freshSsa(p.name(), pSort);
-                        if (lambdaCtx.vcGen.isLong(p.type())) {
+                        if (resolvedType != null) {
+                            lambdaCtx.varTypes.put(lhs, resolvedType);
+                        }
+                        if (lambdaCtx.vcGen.isLong(resolvedType)) {
                             lambdaCtx.longVars.add(lhs);
                             lambdaCtx.longVars.add(p.name());
                         }
@@ -650,14 +707,19 @@ public final class ProofChecker {
 
         int callId = ctx.nextCallId();
         Map<String, SmtExpr.Sort> callSorts = new LinkedHashMap<>(ctx.sorts);
+        Map<String, TypeExpr> callVarTypes = new LinkedHashMap<>(ctx.varTypes);
         List<SmtExpr> callPremises = new ArrayList<>(ctx.premises);
         Map<String, String> calleeSsaEnv = new LinkedHashMap<>();
 
         for (int i = 0; i < callee.params().size(); i++) {
             Param p = callee.params().get(i);
-            SmtExpr.Sort pSort = ctx.vcGen.sortOf(p.type());
+            TypeExpr resolvedParamType = ctx.vcGen.resolveAliasType(p.type());
+            SmtExpr.Sort pSort = ctx.vcGen.sortOf(resolvedParamType);
             String callParamName = "__callee$" + callId + "$" + p.name();
             callSorts.put(callParamName, pSort);
+            if (resolvedParamType != null) {
+                callVarTypes.put(callParamName, resolvedParamType);
+            }
             calleeSsaEnv.put(p.name(), callParamName);
 
             SmtExpr argExpr = evaluatedArgs.get(i);
@@ -667,7 +729,7 @@ public final class ProofChecker {
         }
 
         for (var req : calleeRequires) {
-            SmtExpr reqExpr = ctx.vcGen.translateExpr(req.condition(), callSorts, calleeSsaEnv);
+            SmtExpr reqExpr = ctx.vcGen.translateExpr(req.condition(), callSorts, calleeSsaEnv, callVarTypes);
             SmtExpr vc;
             if (callPremises.isEmpty()) {
                 vc = reqExpr;
@@ -766,6 +828,7 @@ public final class ProofChecker {
     private static final class CallSiteCtx {
         final VcGenerator vcGen;
         final Map<String, SmtExpr.Sort> sorts;
+        final Map<String, TypeExpr> varTypes;
         final Map<String, String> ssaEnv;
         final Map<String, Integer> ssaCounter;
         final Set<String> longVars;
@@ -775,6 +838,7 @@ public final class ProofChecker {
         private CallSiteCtx(
             VcGenerator vcGen,
             Map<String, SmtExpr.Sort> sorts,
+            Map<String, TypeExpr> varTypes,
             Map<String, String> ssaEnv,
             Map<String, Integer> ssaCounter,
             Set<String> longVars,
@@ -783,6 +847,7 @@ public final class ProofChecker {
         ) {
             this.vcGen = vcGen;
             this.sorts = sorts;
+            this.varTypes = varTypes;
             this.ssaEnv = ssaEnv;
             this.ssaCounter = ssaCounter;
             this.longVars = longVars;
@@ -792,11 +857,12 @@ public final class ProofChecker {
 
         static CallSiteCtx forFn(FnDecl fn, VcGenerator vcGen) {
             Map<String, SmtExpr.Sort> sorts = vcGen.collectSorts(fn.params(), fn.returnType());
+            Map<String, TypeExpr> varTypes = vcGen.collectVarTypes(fn.params());
             Set<String> longVars = vcGen.collectLongVarsFor(fn.params());
             List<SmtExpr> premises = new ArrayList<>();
             for (var c : fn.contracts()) {
                 if (c.kind() == ContractClause.Kind.REQUIRES) {
-                    SmtExpr req = vcGen.translateExpr(c.condition(), sorts);
+                    SmtExpr req = vcGen.translateExpr(c.condition(), sorts, Map.of(), varTypes);
                     if (!VcGenerator.containsUnsupported(req)) {
                         premises.add(req);
                     }
@@ -805,6 +871,7 @@ public final class ProofChecker {
             return new CallSiteCtx(
                 vcGen,
                 sorts,
+                varTypes,
                 new LinkedHashMap<>(),
                 new LinkedHashMap<>(),
                 longVars,
@@ -821,6 +888,7 @@ public final class ProofChecker {
             return new CallSiteCtx(
                 vcGen,
                 sorts,
+                varTypes,
                 new LinkedHashMap<>(ssaEnv),
                 ssaCounter,
                 new LinkedHashSet<>(longVars),
@@ -843,15 +911,23 @@ public final class ProofChecker {
 
         void bindLocal(String name, TypeExpr explicitType, EvalResult initializer) {
             SmtExpr init = initializer != null ? initializer.smt() : new SmtExpr.UnsupportedExpr("null");
-            boolean longInit = vcGen.isLong(explicitType) || (initializer != null && initializer.isLong());
+            TypeExpr resolvedType = explicitType != null
+                ? vcGen.resolveAliasType(explicitType)
+                : (initializer != null ? initializer.type() : null);
+            boolean longInit = vcGen.isLong(explicitType) || vcGen.isLong(resolvedType) || (initializer != null && initializer.isLong());
             SmtExpr.Sort sort = explicitType != null
                 ? vcGen.sortOf(explicitType)
-                : (!VcGenerator.containsUnsupported(init) ? VcGenerator.inferSort(init) : SmtExpr.Sort.INT);
+                : (resolvedType != null
+                    ? vcGen.sortOf(resolvedType)
+                    : (!VcGenerator.containsUnsupported(init) ? VcGenerator.inferSort(init) : SmtExpr.Sort.INT));
             String lhs = (ssaEnv.containsKey(name) || sorts.containsKey(name))
                 ? freshSsa(name, sort)
                 : name;
             sorts.put(lhs, sort);
             ssaEnv.put(name, lhs);
+            if (resolvedType != null) {
+                varTypes.put(lhs, resolvedType);
+            }
             if (longInit) {
                 longVars.add(lhs);
             }
@@ -862,11 +938,19 @@ public final class ProofChecker {
 
         void bindVar(String name, TypeExpr explicitType, EvalResult initializer) {
             SmtExpr init = initializer != null ? initializer.smt() : new SmtExpr.UnsupportedExpr("null");
-            boolean longInit = vcGen.isLong(explicitType) || (initializer != null && initializer.isLong());
+            TypeExpr resolvedType = explicitType != null
+                ? vcGen.resolveAliasType(explicitType)
+                : (initializer != null ? initializer.type() : null);
+            boolean longInit = vcGen.isLong(explicitType) || vcGen.isLong(resolvedType) || (initializer != null && initializer.isLong());
             SmtExpr.Sort sort = explicitType != null
                 ? vcGen.sortOf(explicitType)
-                : (!VcGenerator.containsUnsupported(init) ? VcGenerator.inferSort(init) : SmtExpr.Sort.INT);
+                : (resolvedType != null
+                    ? vcGen.sortOf(resolvedType)
+                    : (!VcGenerator.containsUnsupported(init) ? VcGenerator.inferSort(init) : SmtExpr.Sort.INT));
             String lhs = freshSsa(name, sort);
+            if (resolvedType != null) {
+                varTypes.put(lhs, resolvedType);
+            }
             if (longInit) {
                 longVars.add(lhs);
             }
@@ -877,16 +961,27 @@ public final class ProofChecker {
 
         void bindTupleDestructure(TupleDestructureStmt td, EvalResult initializer) {
             List<EvalResult> elems = initializer != null ? initializer.tupleElements() : null;
+            TupleTypeExpr tupType = initializer != null && initializer.type() instanceof TupleTypeExpr tt ? tt : null;
             for (int i = 0; i < td.names().size(); i++) {
                 String name = td.names().get(i);
                 TypeExpr explicitType = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
                 EvalResult elemRes = elems != null && i < elems.size() ? elems.get(i) : null;
+                TypeExpr resolvedType = explicitType != null
+                    ? vcGen.resolveAliasType(explicitType)
+                    : (elemRes != null && elemRes.type() != null
+                        ? elemRes.type()
+                        : (tupType != null && i < tupType.elements().size() ? vcGen.resolveAliasType(tupType.elements().get(i)) : null));
                 SmtExpr rhs = elemRes != null ? elemRes.smt() : null;
                 SmtExpr.Sort sort = explicitType != null
                     ? vcGen.sortOf(explicitType)
-                    : (rhs != null && !VcGenerator.containsUnsupported(rhs) ? VcGenerator.inferSort(rhs) : SmtExpr.Sort.INT);
+                    : (resolvedType != null
+                        ? vcGen.sortOf(resolvedType)
+                        : (rhs != null && !VcGenerator.containsUnsupported(rhs) ? VcGenerator.inferSort(rhs) : SmtExpr.Sort.INT));
                 String lhs = freshSsa(name, sort);
-                if (vcGen.isLong(explicitType) || (elemRes != null && elemRes.isLong())) {
+                if (resolvedType != null) {
+                    varTypes.put(lhs, resolvedType);
+                }
+                if (vcGen.isLong(explicitType) || vcGen.isLong(resolvedType) || (elemRes != null && elemRes.isLong())) {
                     longVars.add(lhs);
                 }
                 if (rhs != null && !VcGenerator.containsUnsupported(rhs)) {
@@ -898,12 +993,16 @@ public final class ProofChecker {
         void assignVar(String name, EvalResult value) {
             SmtExpr rhs = value != null ? value.smt() : new SmtExpr.UnsupportedExpr("null");
             String prevName = ssaEnv.getOrDefault(name, name);
-            boolean longRhs = longVars.contains(prevName) || (value != null && value.isLong());
+            TypeExpr rhsType = varTypes.getOrDefault(prevName, value != null ? value.type() : null);
+            boolean longRhs = longVars.contains(prevName) || vcGen.isLong(rhsType) || (value != null && value.isLong());
             SmtExpr.Sort sort = sorts.getOrDefault(
                 prevName,
                 !VcGenerator.containsUnsupported(rhs) ? VcGenerator.inferSort(rhs) : SmtExpr.Sort.INT
             );
             String lhs = freshSsa(name, sort);
+            if (rhsType != null) {
+                varTypes.put(lhs, rhsType);
+            }
             if (longRhs) {
                 longVars.add(lhs);
             }
@@ -913,7 +1012,7 @@ public final class ProofChecker {
         }
 
         void addAssumption(Expr condExpr) {
-            SmtExpr cond = vcGen.translateExpr(condExpr, sorts, ssaEnv);
+            SmtExpr cond = vcGen.translateExpr(condExpr, sorts, ssaEnv, varTypes);
             if (!VcGenerator.containsUnsupported(cond)) {
                 premises.add(cond);
             }
@@ -923,7 +1022,11 @@ public final class ProofChecker {
             for (String v : vars) {
                 String prevName = ssaEnv.getOrDefault(v, v);
                 SmtExpr.Sort sort = sorts.getOrDefault(prevName, SmtExpr.Sort.INT);
+                TypeExpr prevType = varTypes.get(prevName);
                 String lhs = freshSsa(v, sort);
+                if (prevType != null) {
+                    varTypes.put(lhs, prevType);
+                }
                 if (longVars.contains(prevName) || longVars.contains(v)) {
                     longVars.add(lhs);
                 }
@@ -1041,17 +1144,18 @@ public final class ProofChecker {
 
     private void verifyFnWithSmt(FnDecl fn, VcGenerator vcGen) {
         Map<String, SmtExpr.Sort> sorts = vcGen.collectSorts(fn.params(), fn.returnType());
+        Map<String, TypeExpr> varTypes = vcGen.collectVarTypes(fn.params());
         List<SmtExpr> requires = new ArrayList<>();
         List<ContractClause> ensuresList = new ArrayList<>();
         for (var c : fn.contracts()) {
             if (c.kind() == ContractClause.Kind.REQUIRES) {
-                requires.add(vcGen.translateExpr(c.condition(), sorts));
+                requires.add(vcGen.translateExpr(c.condition(), sorts, Map.of(), varTypes));
             } else {
                 ensuresList.add(c);
             }
         }
         for (var ens : ensuresList) {
-            SmtExpr ensExpr = vcGen.translateExpr(ens.condition(), sorts);
+            SmtExpr ensExpr = vcGen.translateExpr(ens.condition(), sorts, Map.of(), varTypes);
             SmtExpr vc = vcGen.buildFnPostconditionVc(fn, requires, ensExpr);
             runSmtAndReport(vc, fn.name(), ens.span());
         }
@@ -1059,17 +1163,18 @@ public final class ProofChecker {
 
     private void verifyLemmaWithSmt(LemmaDecl lm, VcGenerator vcGen) {
         Map<String, SmtExpr.Sort> sorts = vcGen.collectSorts(lm.params(), null);
+        Map<String, TypeExpr> varTypes = vcGen.collectVarTypes(lm.params());
         List<SmtExpr> requires = new ArrayList<>();
         List<ContractClause> ensuresList = new ArrayList<>();
         for (var c : lm.contracts()) {
             if (c.kind() == ContractClause.Kind.REQUIRES) {
-                requires.add(vcGen.translateExpr(c.condition(), sorts));
+                requires.add(vcGen.translateExpr(c.condition(), sorts, Map.of(), varTypes));
             } else {
                 ensuresList.add(c);
             }
         }
         for (var ens : ensuresList) {
-            SmtExpr ensExpr = vcGen.translateExpr(ens.condition(), sorts);
+            SmtExpr ensExpr = vcGen.translateExpr(ens.condition(), sorts, Map.of(), varTypes);
             SmtExpr vc = vcGen.buildLemmaVc(lm, requires, ensExpr);
             runSmtAndReport(vc, lm.name(), ens.span());
         }
