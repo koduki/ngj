@@ -13,9 +13,14 @@ import java.util.*;
  */
 public final class VcGenerator {
     private final Map<String, SpecFnDecl> specFns;
+    private int alphaCounter = 0;
 
     public VcGenerator(Map<String, SpecFnDecl> specFns) {
         this.specFns = specFns != null ? specFns : Map.of();
+    }
+
+    private String freshAlphaName(String base) {
+        return "__alpha$" + (++alphaCounter) + "$" + base;
     }
 
     public SmtExpr translateExpr(Expr expr, Map<String, Sort> varSorts) {
@@ -519,8 +524,8 @@ public final class VcGenerator {
                 substituteExpr(m.scrutinee(), subst),
                 m.arms().stream().map(arm -> {
                     Map<String, Expr> armSubst = new LinkedHashMap<>(subst);
-                    removePatternBindings(arm.pattern(), armSubst);
-                    return new MatchExpr.MatchArm(arm.pattern(), substituteExpr(arm.body(), armSubst), arm.span());
+                    Pattern renamedPattern = alphaRenamePattern(arm.pattern(), armSubst);
+                    return new MatchExpr.MatchArm(renamedPattern, substituteExpr(arm.body(), armSubst), arm.span());
                 }).toList(),
                 m.span()
             );
@@ -531,33 +536,50 @@ public final class VcGenerator {
     }
 
     private BlockExpr substituteBlock(BlockExpr block, Map<String, Expr> subst) {
-        if (block == null || subst.isEmpty()) return block;
+        if (block == null) return null;
         Map<String, Expr> curSubst = new LinkedHashMap<>(subst);
+        Map<String, String> renamedVars = new LinkedHashMap<>();
         List<Statement> newStmts = new ArrayList<>(block.statements().size());
         for (var st : block.statements()) {
             switch (st) {
                 case ValStmt v -> {
                     Expr newInit = substituteExpr(v.initializer(), curSubst);
-                    curSubst.remove(v.name());
-                    newStmts.add(new ValStmt(v.name(), v.explicitType(), newInit, v.span()));
+                    String fresh = freshAlphaName(v.name());
+                    curSubst.put(v.name(), new IdentExpr(fresh, v.span()));
+                    renamedVars.put(v.name(), fresh);
+                    newStmts.add(new ValStmt(fresh, v.explicitType(), newInit, v.span()));
                 }
                 case LetStmt l -> {
                     Expr newInit = substituteExpr(l.initializer(), curSubst);
-                    curSubst.remove(l.name());
-                    newStmts.add(new LetStmt(l.name(), l.explicitType(), newInit, l.span()));
+                    String fresh = freshAlphaName(l.name());
+                    curSubst.put(l.name(), new IdentExpr(fresh, l.span()));
+                    renamedVars.put(l.name(), fresh);
+                    newStmts.add(new LetStmt(fresh, l.explicitType(), newInit, l.span()));
                 }
                 case VarStmt v -> {
                     Expr newInit = substituteExpr(v.initializer(), curSubst);
-                    curSubst.remove(v.name());
-                    newStmts.add(new VarStmt(v.name(), v.explicitType(), newInit, v.span()));
+                    String fresh = freshAlphaName(v.name());
+                    curSubst.put(v.name(), new IdentExpr(fresh, v.span()));
+                    renamedVars.put(v.name(), fresh);
+                    newStmts.add(new VarStmt(fresh, v.explicitType(), newInit, v.span()));
                 }
-                case AssignStmt a -> newStmts.add(new AssignStmt(a.name(), substituteExpr(a.value(), curSubst), a.span()));
+                case AssignStmt a -> newStmts.add(new AssignStmt(
+                    renamedVars.getOrDefault(a.name(), a.name()),
+                    substituteExpr(a.value(), curSubst),
+                    a.span()
+                ));
                 case ReturnStmt r -> newStmts.add(new ReturnStmt(substituteExpr(r.value(), curSubst), r.span()));
                 case ExprStmt es -> newStmts.add(new ExprStmt(substituteExpr(es.expr(), curSubst), es.span()));
                 case TupleDestructureStmt td -> {
                     Expr newInit = substituteExpr(td.initializer(), curSubst);
-                    for (String n : td.names()) curSubst.remove(n);
-                    newStmts.add(new TupleDestructureStmt(td.names(), td.explicitTypes(), newInit, td.span()));
+                    List<String> freshNames = new ArrayList<>(td.names().size());
+                    for (String n : td.names()) {
+                        String fresh = freshAlphaName(n);
+                        curSubst.put(n, new IdentExpr(fresh, td.span()));
+                        renamedVars.put(n, fresh);
+                        freshNames.add(fresh);
+                    }
+                    newStmts.add(new TupleDestructureStmt(freshNames, td.explicitTypes(), newInit, td.span()));
                 }
                 case InvariantStmt inv -> newStmts.add(new InvariantStmt(substituteExpr(inv.condition(), curSubst), inv.span()));
                 case AssumeStmt a -> newStmts.add(new AssumeStmt(substituteExpr(a.condition(), curSubst), a.span()));
@@ -568,21 +590,31 @@ public final class VcGenerator {
         return new BlockExpr(newStmts, newTail, block.span());
     }
 
-    private void removePatternBindings(Pattern pattern, Map<String, Expr> subst) {
-        if (pattern == null) return;
-        switch (pattern) {
-            case BindingPattern bp -> subst.remove(bp.name());
+    private Pattern alphaRenamePattern(Pattern pattern, Map<String, Expr> subst) {
+        if (pattern == null) return null;
+        return switch (pattern) {
+            case BindingPattern bp -> {
+                String fresh = freshAlphaName(bp.name());
+                subst.put(bp.name(), new IdentExpr(fresh, bp.span()));
+                yield new BindingPattern(fresh, bp.span());
+            }
             case ConstructorPattern cp -> {
+                List<ConstructorPattern.PatternField> fields = new ArrayList<>(cp.fields().size());
                 for (var f : cp.fields()) {
                     if (f.pattern() != null) {
-                        removePatternBindings(f.pattern(), subst);
+                        fields.add(new ConstructorPattern.PatternField(f.name(), alphaRenamePattern(f.pattern(), subst), f.span()));
                     } else if (f.name() != null) {
-                        subst.remove(f.name());
+                        String fresh = freshAlphaName(f.name());
+                        subst.put(f.name(), new IdentExpr(fresh, f.span()));
+                        fields.add(new ConstructorPattern.PatternField(f.name(), new BindingPattern(fresh, f.span()), f.span()));
+                    } else {
+                        fields.add(f);
                     }
                 }
+                yield new ConstructorPattern(cp.typePath(), fields, cp.span());
             }
-            default -> {}
-        }
+            default -> pattern;
+        };
     }
 
     private SmtExpr translateBranchExpr(

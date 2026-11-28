@@ -771,4 +771,35 @@ class CodexRegressionTest {
         assertEquals(1, code, "Spending both b and conditional alias c must fail with NGJ-CAP-002: " + stdout);
         assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
     }
+
+    @Test
+    void specPredicateInliningAvoidsVariableCapture() throws Exception {
+        Path file = tempDir.resolve("spec_capture_avoid.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public spec predicate zero(a: MathInt) {
+                val x: MathInt = 0;
+                a == x
+            }
+
+            public fn bad(x: Int) -> Int effects()
+                requires (x == 1)
+                ensures (zero(x))
+            {
+                return 1;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Inlining zero(x) must not capture caller x with local val x = 0: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
 }
