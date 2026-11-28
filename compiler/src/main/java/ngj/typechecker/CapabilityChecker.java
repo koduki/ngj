@@ -1200,10 +1200,13 @@ public final class CapabilityChecker {
         }
 
         void markConsumed(String name) {
+            // Phase 1 (UP): find all possible root owners that `name` may alias
+            Set<String> roots = resolveAllRoots(name);
+            // Phase 2 (DOWN): invalidate `name`, its possible roots, and all aliases derived from them
             Set<String> visited = new LinkedHashSet<>();
             Deque<String> worklist = new ArrayDeque<>();
             worklist.add(name);
-            worklist.addAll(resolveAllRoots(name));
+            worklist.addAll(roots);
             while (!worklist.isEmpty()) {
                 String cur = worklist.poll();
                 if (!visited.add(cur)) continue;
@@ -1211,14 +1214,6 @@ public final class CapabilityChecker {
                 Set<String> al = aliases.get(cur);
                 if (al != null) {
                     worklist.addAll(al);
-                }
-                Set<String> roots = aliasRoots.get(cur);
-                if (roots != null) {
-                    worklist.addAll(roots);
-                }
-                String parent = aliasOf.get(cur);
-                if (parent != null) {
-                    worklist.add(parent);
                 }
             }
         }
@@ -1249,12 +1244,59 @@ public final class CapabilityChecker {
             return c;
         }
 
+        private void mergeBranchRelationsFrom(CapEnv branch) {
+            Set<String> outerVars = states.keySet();
+            for (var key : outerVars) {
+                Set<String> bRoots = branch.aliasRoots.get(key);
+                if (bRoots != null) {
+                    for (String r : bRoots) {
+                        if (outerVars.contains(r)) {
+                            aliasOf.putIfAbsent(key, r);
+                            aliasRoots.computeIfAbsent(key, k -> new LinkedHashSet<>()).add(r);
+                            aliases.computeIfAbsent(r, k -> new LinkedHashSet<>()).add(key);
+                        }
+                    }
+                }
+                String bParent = branch.aliasOf.get(key);
+                if (bParent != null && outerVars.contains(bParent)) {
+                    aliasOf.putIfAbsent(key, bParent);
+                    aliasRoots.computeIfAbsent(key, k -> new LinkedHashSet<>()).add(bParent);
+                    aliases.computeIfAbsent(bParent, k -> new LinkedHashSet<>()).add(key);
+                }
+                Set<String> bAliases = branch.aliases.get(key);
+                if (bAliases != null) {
+                    for (String al : bAliases) {
+                        if (outerVars.contains(al)) {
+                            aliasOf.putIfAbsent(al, key);
+                            aliasRoots.computeIfAbsent(al, k -> new LinkedHashSet<>()).add(key);
+                            aliases.computeIfAbsent(key, k -> new LinkedHashSet<>()).add(al);
+                        }
+                    }
+                }
+                String bViewOwner = branch.viewOf.get(key);
+                if (bViewOwner != null && outerVars.contains(bViewOwner)) {
+                    viewOf.putIfAbsent(key, bViewOwner);
+                    views.computeIfAbsent(bViewOwner, k -> new LinkedHashSet<>()).add(key);
+                }
+                if (branch.linearVars.contains(key)) {
+                    linearVars.add(key);
+                }
+                if (branch.secretVars.contains(key)) {
+                    secretVars.add(key);
+                }
+                if (branch.modes.get(key) == VarMode.READ) {
+                    modes.put(key, VarMode.READ);
+                }
+            }
+        }
+
         void copyStatesFrom(CapEnv other) {
             for (var key : states.keySet()) {
                 if (other.states.containsKey(key)) {
                     states.put(key, other.states.get(key));
                 }
             }
+            mergeBranchRelationsFrom(other);
         }
 
         void mergeStates(CapEnv a, CapEnv b) {
@@ -1267,6 +1309,8 @@ public final class CapabilityChecker {
                     states.put(key, CapState.MAYBE_CONSUMED);
                 }
             }
+            mergeBranchRelationsFrom(a);
+            mergeBranchRelationsFrom(b);
         }
     }
 }

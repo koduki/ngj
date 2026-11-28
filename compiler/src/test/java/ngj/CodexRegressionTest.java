@@ -802,4 +802,62 @@ class CodexRegressionTest {
         assertEquals(1, code, "Inlining zero(x) must not capture caller x with local val x = 0: " + stdout);
         assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
     }
+
+    @Test
+    void branchAssignedBudgetAliasRevokesOwnership() throws Exception {
+        Path file = tempDir.resolve("branch_alias_budget.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(consume other: Budget<Fuel>, consume b: Budget<Fuel>) -> Unit effects() {
+                var c: Budget<Fuel> = other;
+                if (true) {
+                    c = b;
+                }
+                val b1: Budget<Fuel> = b.spend(1L);
+                val c1: Budget<Fuel> = c.spend(1L);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Branch-assigned alias c = b must be invalidated when b is spent: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void nestedBlockEarlyReturnFailsPostconditionVc() throws Exception {
+        Path file = tempDir.resolve("nested_block_return.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad() -> Int effects()
+                requires (true)
+                ensures (result == 0)
+            {
+                {
+                    return 1;
+                };
+                return 0;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Nested block early return 1 must fail ensures(result == 0): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
 }

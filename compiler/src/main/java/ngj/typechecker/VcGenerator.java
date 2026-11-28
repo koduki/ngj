@@ -328,11 +328,29 @@ public final class VcGenerator {
                     if (thenRes != null && ifExpr.elseBranch() == null) {
                         return new SmtExpr.UnsupportedExpr("partial_return_if");
                     }
-                    if (containsMutationOrWhile(ifExpr)) {
+                    if (containsMutationOrWhileOrReturn(ifExpr)) {
                         return new SmtExpr.UnsupportedExpr("if_mutated_state");
                     }
-                } else if (containsMutationOrWhile(es.expr())) {
-                    return new SmtExpr.UnsupportedExpr("expr_mutated_state");
+                } else if (es.expr() instanceof BlockExpr nestedBlock) {
+                    if (containsMutationOrWhile(nestedBlock)) {
+                        return new SmtExpr.UnsupportedExpr("block_mutated_state");
+                    }
+                    List<SmtExpr> blockPremises = new ArrayList<>();
+                    SmtExpr blockRes = translateBlockResult(
+                        nestedBlock.statements(), 0, null,
+                        sorts, blockPremises, new LinkedHashMap<>(ssaEnv), ssaCounter, longVars);
+                    if (blockRes instanceof SmtExpr.UnsupportedExpr) {
+                        return blockRes;
+                    }
+                    if (blockRes != null) {
+                        premises.addAll(blockPremises);
+                        return blockRes;
+                    }
+                    if (containsReturn(nestedBlock)) {
+                        return new SmtExpr.UnsupportedExpr("block_partial_return");
+                    }
+                } else if (containsMutationOrWhileOrReturn(es.expr())) {
+                    return new SmtExpr.UnsupportedExpr("expr_mutated_or_return_state");
                 }
                 return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
@@ -340,6 +358,41 @@ public final class VcGenerator {
                 return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
         }
+    }
+
+    private boolean containsMutationOrWhileOrReturn(Expr expr) {
+        return containsMutationOrWhile(expr) || containsReturn(expr);
+    }
+
+    private boolean containsReturn(Expr expr) {
+        if (expr == null) return false;
+        return switch (expr) {
+            case BlockExpr b -> {
+                for (var st : b.statements()) {
+                    if (st instanceof ReturnStmt) yield true;
+                    if (st instanceof ExprStmt es && containsReturn(es.expr())) yield true;
+                    if (st instanceof ValStmt v && containsReturn(v.initializer())) yield true;
+                    if (st instanceof LetStmt l && containsReturn(l.initializer())) yield true;
+                    if (st instanceof VarStmt v && containsReturn(v.initializer())) yield true;
+                    if (st instanceof AssignStmt a && containsReturn(a.value())) yield true;
+                }
+                yield containsReturn(b.tailExpr());
+            }
+            case IfExpr i -> containsReturn(i.condition()) || containsReturn(i.thenBranch()) || containsReturn(i.elseBranch());
+            case WhileExpr w -> containsReturn(w.condition()) || containsReturn(w.body());
+            case ForExpr f -> containsReturn(f.iterable()) || containsReturn(f.body());
+            case MatchExpr m -> {
+                if (containsReturn(m.scrutinee())) yield true;
+                for (var arm : m.arms()) {
+                    if (containsReturn(arm.body())) yield true;
+                }
+                yield false;
+            }
+            case ScopeExpr s -> containsReturn(s.body());
+            case ForkExpr f -> containsReturn(f.body());
+            case ParenExpr p -> containsReturn(p.inner());
+            default -> false;
+        };
     }
 
     private boolean containsMutationOrWhile(Expr expr) {
@@ -368,6 +421,7 @@ public final class VcGenerator {
             }
             case ScopeExpr s -> containsMutationOrWhile(s.body());
             case ForkExpr f -> containsMutationOrWhile(f.body());
+            case ParenExpr p -> containsMutationOrWhile(p.inner());
             default -> false;
         };
     }
