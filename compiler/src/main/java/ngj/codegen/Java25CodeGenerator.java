@@ -2462,9 +2462,14 @@ public final class Java25CodeGenerator {
         var okDesc = ClassDesc.ofInternalName(classDesc.packageName().replace('.', '/') + "/" + record.name() + "$Ok");
         var errDesc = ClassDesc.ofInternalName(classDesc.packageName().replace('.', '/') + "/" + record.name() + "$Err");
         var codecDesc = ClassDesc.of("ngj.runtime.BoundaryCodec");
+        var rawJsonDesc = ClassDesc.of("ngj.runtime.BoundaryCodec$RawJson");
         var secretDesc = ClassDesc.of("ngj.runtime.SecretValue");
         var mapDesc = ClassDesc.of("java.util.Map");
         var linkedMapDesc = ClassDesc.of("java.util.LinkedHashMap");
+        var baosDesc = ClassDesc.of("java.io.ByteArrayOutputStream");
+        var dosDesc = ClassDesc.of("java.io.DataOutputStream");
+        var baisDesc = ClassDesc.of("java.io.ByteArrayInputStream");
+        var disDesc = ClassDesc.of("java.io.DataInputStream");
 
         // 1. public String toJson()
         classBuilder.withMethod("toJson", MethodTypeDesc.of(ConstantDescs.CD_String), ACC_PUBLIC, mb -> {
@@ -2474,11 +2479,18 @@ public final class Java25CodeGenerator {
                 code.invokespecial(linkedMapDesc, ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void));
                 code.astore(1);
                 for (var param : record.params()) {
+                    String tName = getTypeName(param.type());
+                    ClassDesc fieldDesc = typeToClassDesc(param.type());
                     code.aload(1);
                     code.ldc(param.name());
                     code.aload(0);
-                    code.getfield(classDesc, param.name(), typeToClassDesc(param.type()));
-                    boxSlotIfPrimitive(code, getTypeName(param.type()));
+                    code.getfield(classDesc, param.name(), fieldDesc);
+                    if (isNestedBoundarySchemaRecord(tName)) {
+                        code.invokevirtual(fieldDesc, "toJson", MethodTypeDesc.of(ConstantDescs.CD_String));
+                        code.invokestatic(codecDesc, "rawJson", MethodTypeDesc.of(rawJsonDesc, ConstantDescs.CD_String));
+                    } else {
+                        boxSlotIfPrimitive(code, tName);
+                    }
                     code.invokeinterface(mapDesc, "put",
                         MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object, ConstantDescs.CD_Object));
                     code.pop();
@@ -2490,25 +2502,15 @@ public final class Java25CodeGenerator {
             });
         });
 
-        // 2. public static Object decodeJson(String json)
-        classBuilder.withMethod("decodeJson", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_String),
+        // 2a. public static <Record> decodeJsonMap(Map<String, Object> map)
+        classBuilder.withMethod("decodeJsonMap", MethodTypeDesc.of(classDesc, mapDesc),
             ACC_PUBLIC | ACC_STATIC, mb -> {
             mb.withCode(code -> {
-                var tryStart = code.newLabel();
-                var tryEnd = code.newLabel();
-                var catchStart = code.newLabel();
-                code.exceptionCatch(tryStart, tryEnd, catchStart, ClassDesc.of("java.lang.Exception"));
-
-                code.labelBinding(tryStart);
-                code.aload(0);
-                code.invokestatic(codecDesc, "decodeJsonObject", MethodTypeDesc.of(mapDesc, ConstantDescs.CD_String));
-                code.astore(1);
-
                 code.new_(classDesc);
                 code.dup();
-                int tempSlot = 2;
+                int tempSlot = 1;
                 for (var param : record.params()) {
-                    code.aload(1);
+                    code.aload(0);
                     code.ldc(param.name());
                     code.invokeinterface(mapDesc, "get",
                         MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object));
@@ -2525,16 +2527,17 @@ public final class Java25CodeGenerator {
                     code.labelBinding(nonNullLabel);
 
                     String tName = getTypeName(param.type());
+                    ClassDesc fieldDesc = typeToClassDesc(param.type());
                     switch (tName) {
                         case "Int" -> {
                             code.aload(tempSlot);
-                            code.invokestatic(ClassDesc.of("ngj.runtime.BoundaryCodec"), "requireInt",
+                            code.invokestatic(codecDesc, "requireInt",
                                 MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_Object));
                         }
                         case "Long" -> {
                             code.aload(tempSlot);
-                            code.checkcast(ClassDesc.of("java.lang.Number"));
-                            code.invokevirtual(ClassDesc.of("java.lang.Number"), "longValue", MethodTypeDesc.of(ConstantDescs.CD_long));
+                            code.invokestatic(codecDesc, "requireLong",
+                                MethodTypeDesc.of(ConstantDescs.CD_long, ConstantDescs.CD_Object));
                         }
                         case "Bool" -> {
                             code.aload(tempSlot);
@@ -2549,14 +2552,39 @@ public final class Java25CodeGenerator {
                             code.aload(tempSlot);
                             code.invokestatic(secretDesc, "of", MethodTypeDesc.of(secretDesc, ConstantDescs.CD_Object));
                         }
-                        default -> code.aload(tempSlot);
+                        default -> {
+                            code.aload(tempSlot);
+                            if (isNestedBoundarySchemaRecord(tName)) {
+                                code.checkcast(mapDesc);
+                                code.invokestatic(fieldDesc, "decodeJsonMap", MethodTypeDesc.of(fieldDesc, mapDesc));
+                            } else if (!fieldDesc.equals(ConstantDescs.CD_Object)) {
+                                code.checkcast(fieldDesc);
+                            }
+                        }
                     }
                 }
                 code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
-                code.astore(tempSlot);
+                code.areturn();
+            });
+        });
+
+        // 2b. public static Object decodeJson(String json)
+        classBuilder.withMethod("decodeJson", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_String),
+            ACC_PUBLIC | ACC_STATIC, mb -> {
+            mb.withCode(code -> {
+                var tryStart = code.newLabel();
+                var tryEnd = code.newLabel();
+                var catchStart = code.newLabel();
+                code.exceptionCatch(tryStart, tryEnd, catchStart, ClassDesc.of("java.lang.Exception"));
+
+                code.labelBinding(tryStart);
+                code.aload(0);
+                code.invokestatic(codecDesc, "decodeJsonObject", MethodTypeDesc.of(mapDesc, ConstantDescs.CD_String));
+                code.invokestatic(classDesc, "decodeJsonMap", MethodTypeDesc.of(classDesc, mapDesc));
+                code.astore(1);
                 code.new_(okDesc);
                 code.dup();
-                code.aload(tempSlot);
+                code.aload(1);
                 code.invokespecial(okDesc, ConstantDescs.INIT_NAME,
                     MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object));
                 code.labelBinding(tryEnd);
@@ -2573,27 +2601,22 @@ public final class Java25CodeGenerator {
             });
         });
 
-        // 3. public byte[] encodeBinary()
-        var baosDesc = ClassDesc.of("java.io.ByteArrayOutputStream");
-        var dosDesc = ClassDesc.of("java.io.DataOutputStream");
-        classBuilder.withMethod("encodeBinary", MethodTypeDesc.of(ConstantDescs.CD_byte.arrayType()), ACC_PUBLIC, mb -> {
+        // 3a. public void encodeBinaryStream(DataOutputStream dos)
+        classBuilder.withMethod("encodeBinaryStream", MethodTypeDesc.of(ConstantDescs.CD_void, dosDesc), ACC_PUBLIC, mb -> {
             mb.withCode(code -> {
-                code.new_(baosDesc);
-                code.dup();
-                code.invokespecial(baosDesc, ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void));
-                code.astore(1);
-                code.new_(dosDesc);
-                code.dup();
-                code.aload(1);
-                code.invokespecial(dosDesc, ConstantDescs.INIT_NAME,
-                    MethodTypeDesc.of(ConstantDescs.CD_void, ClassDesc.of("java.io.OutputStream")));
-                code.astore(2);
-
                 for (var param : record.params()) {
                     String tName = getTypeName(param.type());
-                    code.aload(2);
+                    ClassDesc fieldDesc = typeToClassDesc(param.type());
+                    if (isNestedBoundarySchemaRecord(tName)) {
+                        code.aload(0);
+                        code.getfield(classDesc, param.name(), fieldDesc);
+                        code.aload(1);
+                        code.invokevirtual(fieldDesc, "encodeBinaryStream", MethodTypeDesc.of(ConstantDescs.CD_void, dosDesc));
+                        continue;
+                    }
+                    code.aload(1);
                     code.aload(0);
-                    code.getfield(classDesc, param.name(), typeToClassDesc(param.type()));
+                    code.getfield(classDesc, param.name(), fieldDesc);
                     switch (tName) {
                         case "Int" -> code.invokevirtual(dosDesc, "writeInt", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_int));
                         case "Long" -> code.invokevirtual(dosDesc, "writeLong", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_long));
@@ -2610,6 +2633,28 @@ public final class Java25CodeGenerator {
                         }
                     }
                 }
+                code.return_();
+            });
+        });
+
+        // 3b. public byte[] encodeBinary()
+        classBuilder.withMethod("encodeBinary", MethodTypeDesc.of(ConstantDescs.CD_byte.arrayType()), ACC_PUBLIC, mb -> {
+            mb.withCode(code -> {
+                code.new_(baosDesc);
+                code.dup();
+                code.invokespecial(baosDesc, ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void));
+                code.astore(1);
+                code.new_(dosDesc);
+                code.dup();
+                code.aload(1);
+                code.invokespecial(dosDesc, ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, ClassDesc.of("java.io.OutputStream")));
+                code.astore(2);
+
+                code.aload(0);
+                code.aload(2);
+                code.invokevirtual(classDesc, "encodeBinaryStream", MethodTypeDesc.of(ConstantDescs.CD_void, dosDesc));
+
                 code.aload(2);
                 code.invokevirtual(dosDesc, "flush", MethodTypeDesc.of(ConstantDescs.CD_void));
                 code.aload(1);
@@ -2618,9 +2663,43 @@ public final class Java25CodeGenerator {
             });
         });
 
-        // 4. public static Object decodeBinary(byte[] bytes)
-        var baisDesc = ClassDesc.of("java.io.ByteArrayInputStream");
-        var disDesc = ClassDesc.of("java.io.DataInputStream");
+        // 4a. public static <Record> decodeBinaryStream(DataInputStream dis)
+        classBuilder.withMethod("decodeBinaryStream", MethodTypeDesc.of(classDesc, disDesc),
+            ACC_PUBLIC | ACC_STATIC, mb -> {
+            mb.withCode(code -> {
+                code.new_(classDesc);
+                code.dup();
+                for (var param : record.params()) {
+                    String tName = getTypeName(param.type());
+                    ClassDesc fieldDesc = typeToClassDesc(param.type());
+                    code.aload(0);
+                    switch (tName) {
+                        case "Int" -> code.invokevirtual(disDesc, "readInt", MethodTypeDesc.of(ConstantDescs.CD_int));
+                        case "Long" -> code.invokevirtual(disDesc, "readLong", MethodTypeDesc.of(ConstantDescs.CD_long));
+                        case "Bool" -> code.invokevirtual(disDesc, "readBoolean", MethodTypeDesc.of(ConstantDescs.CD_boolean));
+                        case "String" -> code.invokevirtual(disDesc, "readUTF", MethodTypeDesc.of(ConstantDescs.CD_String));
+                        case "Secret" -> {
+                            code.invokevirtual(disDesc, "readUTF", MethodTypeDesc.of(ConstantDescs.CD_String));
+                            code.invokestatic(secretDesc, "of", MethodTypeDesc.of(secretDesc, ConstantDescs.CD_Object));
+                        }
+                        default -> {
+                            if (isNestedBoundarySchemaRecord(tName)) {
+                                code.invokestatic(fieldDesc, "decodeBinaryStream", MethodTypeDesc.of(fieldDesc, disDesc));
+                            } else {
+                                code.invokevirtual(disDesc, "readUTF", MethodTypeDesc.of(ConstantDescs.CD_String));
+                                if (!fieldDesc.equals(ConstantDescs.CD_String) && !fieldDesc.equals(ConstantDescs.CD_Object)) {
+                                    code.checkcast(fieldDesc);
+                                }
+                            }
+                        }
+                    }
+                }
+                code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
+                code.areturn();
+            });
+        });
+
+        // 4b. public static Object decodeBinary(byte[] bytes)
         classBuilder.withMethod("decodeBinary", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_byte.arrayType()),
             ACC_PUBLIC | ACC_STATIC, mb -> {
             mb.withCode(code -> {
@@ -2639,29 +2718,11 @@ public final class Java25CodeGenerator {
                     MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_byte.arrayType()));
                 code.invokespecial(disDesc, ConstantDescs.INIT_NAME,
                     MethodTypeDesc.of(ConstantDescs.CD_void, ClassDesc.of("java.io.InputStream")));
+                code.invokestatic(classDesc, "decodeBinaryStream", MethodTypeDesc.of(classDesc, disDesc));
                 code.astore(1);
-
-                code.new_(classDesc);
-                code.dup();
-                for (var param : record.params()) {
-                    String tName = getTypeName(param.type());
-                    code.aload(1);
-                    switch (tName) {
-                        case "Int" -> code.invokevirtual(disDesc, "readInt", MethodTypeDesc.of(ConstantDescs.CD_int));
-                        case "Long" -> code.invokevirtual(disDesc, "readLong", MethodTypeDesc.of(ConstantDescs.CD_long));
-                        case "Bool" -> code.invokevirtual(disDesc, "readBoolean", MethodTypeDesc.of(ConstantDescs.CD_boolean));
-                        case "Secret" -> {
-                            code.invokevirtual(disDesc, "readUTF", MethodTypeDesc.of(ConstantDescs.CD_String));
-                            code.invokestatic(secretDesc, "of", MethodTypeDesc.of(secretDesc, ConstantDescs.CD_Object));
-                        }
-                        default -> code.invokevirtual(disDesc, "readUTF", MethodTypeDesc.of(ConstantDescs.CD_String));
-                    }
-                }
-                code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
-                code.astore(2);
                 code.new_(okDesc);
                 code.dup();
-                code.aload(2);
+                code.aload(1);
                 code.invokespecial(okDesc, ConstantDescs.INIT_NAME,
                     MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object));
                 code.labelBinding(tryEnd);
@@ -2677,6 +2738,11 @@ public final class Java25CodeGenerator {
                 code.areturn();
             });
         });
+    }
+
+    private boolean isNestedBoundarySchemaRecord(String typeName) {
+        RecordDecl rec = records.get(typeName);
+        return rec != null && rec.annotations().stream().anyMatch(a -> a.name().equals("boundary_schema"));
     }
     
     /**

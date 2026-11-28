@@ -993,4 +993,174 @@ class CodexRegressionTest {
         Object result = clazz.getMethod("invoke").invoke(null);
         assertEquals(42, result);
     }
+
+    @Test
+    void whileConditionPreconditionIsRecheckedAgainstLoopHeaderState() throws Exception {
+        Path file = tempDir.resolve("while_cond_pre.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int) -> Bool effects()
+                requires (x > 0)
+            {
+                return x == 1;
+            }
+
+            public fn bad() -> Unit effects() {
+                var y: Int = 1;
+                while (positive(y)) {
+                    y = 0;
+                };
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "while (positive(y)) { y = 0; } must fail loop-header precondition check: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void forLoopVariableShadowsOuterProofBinding() throws Exception {
+        Path file = tempDir.resolve("for_shadow_pre.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int) -> Int effects()
+                requires (x > 0)
+                ensures (result > 0)
+            {
+                return x;
+            }
+
+            public fn bad(x: Int, xs: List<Int>) -> Unit effects()
+                requires (x == 1)
+            {
+                for (x <- xs) {
+                    val ignored: Int = positive(x);
+                };
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "for (x <- xs) must shadow outer x == 1 and fail positive(x): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void matchPatternBindingShadowsOuterProofBinding() throws Exception {
+        Path file = tempDir.resolve("match_shadow_pre.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int) -> Int effects()
+                requires (x > 0)
+                ensures (result > 0)
+            {
+                return x;
+            }
+
+            public fn bad(x: Int, opt: Option<Int>) -> Int effects()
+                requires (x == 1)
+            {
+                return match (opt) {
+                    case Some(x) => { positive(x) }
+                    case None() => { 1 }
+                };
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "match Some(x) must shadow outer x == 1 and fail positive(x): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void nestedBoundarySchemaRecordsVerifyAndRoundTripWithoutVerifyError() throws Exception {
+        String source = """
+            package test.codex.nestedschema;
+
+            @boundary_schema
+            public record Inner(value: Int[1..100]);
+
+            @boundary_schema
+            public record Outer(inner: Inner);
+            """;
+        var lexer = new ngj.parser.Lexer(source, "nestedschema.ngj");
+        var parser = new ngj.parser.Parser(lexer, "nestedschema.ngj");
+        var unit = parser.parse();
+        var resolver = new ngj.typechecker.NameResolver();
+        resolver.resolve(unit);
+        var tc = new ngj.typechecker.TypeChecker();
+        tc.check(unit);
+
+        var gen = new ngj.codegen.Java25CodeGenerator();
+        Path outDir = tempDir.resolve("nestedschema_out");
+        Files.createDirectories(outDir);
+        gen.setOutputDir(outDir);
+        var outputs = gen.generate(unit);
+
+        java.util.Map<String, byte[]> classMap = new java.util.LinkedHashMap<>();
+        for (Path p : outputs) {
+            byte[] raw = Files.readAllBytes(p);
+            byte[] patched = raw.clone();
+            // Clear preview minor version (65535 -> 0) and clamp major to host JDK 25 (69) for host verification
+            patched[4] = 0;
+            patched[5] = 0;
+            patched[6] = 0;
+            patched[7] = 69;
+            var cm = java.lang.classfile.ClassFile.of().parse(raw);
+            String fqcn = cm.thisClass().asInternalName().replace('/', '.');
+            classMap.put(fqcn, patched);
+        }
+
+        ClassLoader loader = new ClassLoader(getClass().getClassLoader()) {
+            @Override
+            protected Class<?> findClass(String name) throws ClassNotFoundException {
+                byte[] b = classMap.get(name);
+                if (b != null) {
+                    return defineClass(name, b, 0, b.length);
+                }
+                return super.findClass(name);
+            }
+        };
+        Class<?> outerClass = loader.loadClass("test.codex.nestedschema.Outer");
+        Object okRes = outerClass.getMethod("decodeJson", String.class).invoke(null, "{\"inner\":{\"value\":42}}");
+        assertTrue(okRes.getClass().getSimpleName().endsWith("$Ok"), "Expected Outer$Ok, got: " + okRes.getClass());
+        Object outerObj = okRes.getClass().getField("value").get(okRes);
+
+        String json = (String) outerClass.getMethod("toJson").invoke(outerObj);
+        assertEquals("{\"inner\":{\"value\":42}}", json);
+
+        byte[] bin = (byte[]) outerClass.getMethod("encodeBinary").invoke(outerObj);
+        Object binOkRes = outerClass.getMethod("decodeBinary", byte[].class).invoke(null, (Object) bin);
+        assertTrue(binOkRes.getClass().getSimpleName().endsWith("$Ok"), "Expected Outer$Ok from binary decode");
+        Object binOuterObj = binOkRes.getClass().getField("value").get(binOkRes);
+        assertEquals(outerObj, binOuterObj);
+
+        Object badRes = outerClass.getMethod("decodeJson", String.class).invoke(null, "{\"inner\":{\"value\":0}}");
+        assertTrue(badRes.getClass().getSimpleName().endsWith("$Err"), "Out-of-range nested Inner value=0 must return Err");
+    }
 }

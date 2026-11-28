@@ -27,6 +27,12 @@ public final class BoundaryCodec {
 
     private BoundaryCodec() {}
 
+    public record RawJson(String json) {}
+
+    public static RawJson rawJson(String json) {
+        return new RawJson(Objects.requireNonNull(json, "json"));
+    }
+
     public static int requireInt(Object value) {
         if (!(value instanceof Number n)) {
             throw new IllegalArgumentException("Expected numeric Int value, got: " + value);
@@ -36,6 +42,13 @@ public final class BoundaryCodec {
             throw new IllegalArgumentException("Int overflow: " + lv);
         }
         return (int) lv;
+    }
+
+    public static long requireLong(Object value) {
+        if (!(value instanceof Number n)) {
+            throw new IllegalArgumentException("Expected numeric Long value, got: " + value);
+        }
+        return n.longValue();
     }
 
     // -------------------------------------------------------------------------
@@ -89,6 +102,14 @@ public final class BoundaryCodec {
                 sb.append(encodeJsonSecret(sec));
             } else if (v instanceof ValidatedValue<?> vv) {
                 sb.append(encodeScalar(vv.value()));
+            } else if (v instanceof RawJson rj) {
+                sb.append(rj.json());
+            } else if (v instanceof Map<?, ?> nested) {
+                Map<String, Object> nestedFields = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> ne : nested.entrySet()) {
+                    nestedFields.put(String.valueOf(ne.getKey()), ne.getValue());
+                }
+                sb.append(encodeJsonObject(nestedFields));
             } else {
                 throw new IllegalArgumentException(
                     "Unsupported BoundaryCodec JSON value type: " + (v == null ? "null" : v.getClass().getName())
@@ -417,6 +438,9 @@ public final class BoundaryCodec {
                 throw new IllegalArgumentException("Unexpected end of JSON input");
             }
             char c = input.charAt(pos);
+            if (c == '{') {
+                return readObject();
+            }
             if (c == '"') {
                 return readString();
             }

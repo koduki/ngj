@@ -293,7 +293,11 @@ public final class ProofChecker {
                 checkRuntimeOrProofExpr(m.scrutinee(), inProofContext, ctx);
                 Set<String> mutated = new LinkedHashSet<>();
                 for (var arm : m.arms()) {
-                    checkRuntimeOrProofExpr(arm.body(), inProofContext, ctx != null ? ctx.fork(null) : null);
+                    CallSiteCtx armCtx = (!inProofContext && ctx != null) ? ctx.fork(null) : null;
+                    if (armCtx != null) {
+                        bindPatternVars(arm.pattern(), armCtx);
+                    }
+                    checkRuntimeOrProofExpr(arm.body(), inProofContext, armCtx);
                     if (!inProofContext && ctx != null) {
                         collectAssignedVars(arm.body(), mutated);
                     }
@@ -303,19 +307,21 @@ public final class ProofChecker {
                 }
             }
             case WhileExpr w -> {
-                checkRuntimeOrProofExpr(w.condition(), inProofContext, ctx);
                 if (!inProofContext && ctx != null) {
                     Set<String> mutated = new LinkedHashSet<>();
+                    collectAssignedVars(w.condition(), mutated);
                     collectAssignedVars(w.body(), mutated);
-                    CallSiteCtx bodyCtx = ctx.fork(null);
-                    bodyCtx.havocVars(mutated);
-                    SmtExpr cond = bodyCtx.vcGen.translateExecutableExpr(w.condition(), bodyCtx.sorts, bodyCtx.ssaEnv, bodyCtx.longVars);
+                    CallSiteCtx headerCtx = ctx.fork(null);
+                    headerCtx.havocVars(mutated);
+                    checkRuntimeOrProofExpr(w.condition(), false, headerCtx);
+                    SmtExpr cond = headerCtx.vcGen.translateExecutableExpr(w.condition(), headerCtx.sorts, headerCtx.ssaEnv, headerCtx.longVars);
                     if (!VcGenerator.containsUnsupported(cond)) {
-                        bodyCtx.premises.add(cond);
+                        headerCtx.premises.add(cond);
                     }
-                    checkBlock(w.body(), false, bodyCtx);
+                    checkBlock(w.body(), false, headerCtx);
                     ctx.havocVars(mutated);
                 } else {
+                    checkRuntimeOrProofExpr(w.condition(), inProofContext, null);
                     checkBlock(w.body(), inProofContext, null);
                 }
             }
@@ -326,6 +332,7 @@ public final class ProofChecker {
                     collectAssignedVars(f.body(), mutated);
                     CallSiteCtx bodyCtx = ctx.fork(null);
                     bodyCtx.havocVars(mutated);
+                    bodyCtx.freshSsa(f.varName(), SmtExpr.Sort.INT);
                     checkBlock(f.body(), false, bodyCtx);
                     ctx.havocVars(mutated);
                 } else {
@@ -370,7 +377,35 @@ public final class ProofChecker {
                 for (var field : c.fields()) checkRuntimeOrProofExpr(field.value(), inProofContext, ctx);
             }
             case LambdaExpr l -> {
-                checkBlock(l.body(), inProofContext, !inProofContext && ctx != null ? ctx.fork(null) : null);
+                CallSiteCtx lambdaCtx = (!inProofContext && ctx != null) ? ctx.fork(null) : null;
+                if (lambdaCtx != null) {
+                    for (var p : l.params()) {
+                        SmtExpr.Sort pSort = VcGenerator.sortOfType(p.type());
+                        String lhs = lambdaCtx.freshSsa(p.name(), pSort);
+                        if (VcGenerator.isLongType(p.type())) {
+                            lambdaCtx.longVars.add(lhs);
+                            lambdaCtx.longVars.add(p.name());
+                        }
+                    }
+                }
+                checkBlock(l.body(), inProofContext, lambdaCtx);
+            }
+            default -> {}
+        }
+    }
+
+    private static void bindPatternVars(Pattern pattern, CallSiteCtx ctx) {
+        if (pattern == null) return;
+        switch (pattern) {
+            case BindingPattern bp -> ctx.freshSsa(bp.name(), SmtExpr.Sort.INT);
+            case ConstructorPattern cp -> {
+                for (var f : cp.fields()) {
+                    if (f.pattern() != null) {
+                        bindPatternVars(f.pattern(), ctx);
+                    } else if (f.name() != null) {
+                        ctx.freshSsa(f.name(), SmtExpr.Sort.INT);
+                    }
+                }
             }
             default -> {}
         }
