@@ -94,7 +94,7 @@ their implementation status, and explicit exclusions.
 | Feature | MVP Required | Status | Notes |
 |---------|-------------|--------|-------|
 | Pure `effects()` | Yes | ✅ | v0.3 syntax, no external effects |
-| Named effects `effects(Effect1)` | **No - Reject** | ✅ | Unsupported feature error (`NGJ-EFFECT-001`) |
+| Named effects `effects(Effect1)` | Phase 2 (`CAP-02`) | ✅ | Effect subtyping enforced (`NGJ-EFFECT-001` when exceeded) |
 | Legacy `! {}` syntax | **No - Reject** | ✅ | Migration diagnostic `NGJ-MIGRATE-004` |
 
 ### Collections
@@ -147,41 +147,39 @@ their implementation status, and explicit exclusions.
 | 3 | Revision mismatch / bad input | ✅ |
 | 4 | Internal compiler error | ✅ |
 
-## Explicitly NOT in MVP
+## Phase 2–4 Coverage Matrix
 
-The following features are explicitly excluded and must be rejected with
+| Phase | Feature ID | Feature | Status | Notes |
+|-------|------------|---------|--------|-------|
+| Phase 2 | `CAP-02` | Capability tracking (`caps(...)`, `read`/`update`/`consume`, effect subtyping) | ✅ | Implemented in compiler; `NGJ-EFFECT-001` on effect exceedance |
+| Phase 2 | `SEP-01` | Separation / ownership & region/borrow checking (`build`/freeze, `Bytes`/`Slice`/`Arena`) | ✅ | Implemented in compiler |
+| Phase 2 | `REF-01` | First-class refinement types (`{v: T where expr}`, `Int[lo..hi]`) | ✅ | Implemented in compiler |
+| Phase 2 | `DIAG-01` | Structured diagnostics & agent protocol (`--format=json`, UTF-8 byte spans) | ✅ | Implemented in compiler & CLI |
+| Phase 2 | `GATE-01` | Compiler gate enforcement (`check`, `build` release gates) | ✅ | Implemented in compiler & CLI |
+| Phase 3 | `PROTO-01` | Finite-state `protocol` types & `refines` checks | ✅ | Implemented in compiler |
+| Phase 3 | `BUDGET-01` | `resource` declarations & `Budget<K>` tracking | ✅ | Implemented in compiler |
+| Phase 3 | `IFC-03` | Information flow control (`Secret`, `Untrusted`, `Declassify`, PC-guard) | ✅ | Implemented in compiler |
+| Phase 4 | `PROOF-01` | Contracts & proofs (`spec fn`, `spec predicate`, `requires`/`ensures`, `proof`/`invariant`/`lemma`) | ✅ | Implemented in compiler |
+| Phase 4 | `CERT-01` | Spec certification (`ngjc certify-spec`, `Post2Exe`) | ✅ | Implemented in compiler & CLI |
+
+> **Runtime Note:** JDK 28 EA Valhalla `--enable-preview` execution & Docker runtime checks are verified in CI (host JDK 25 unit tests do not execute JDK 28 EA preview bytecode).
+
+## Explicitly NOT in MVP / Remaining Exclusions
+
+The following features remain excluded and must be rejected with
 `unsupported_feature` diagnostic:
-
-### Ownership, Capabilities & Refinements (Phase 2+)
-- Capability tracking (`caps(...)`, `read`/`update` separation, `consume` revocation)
-- `resource` declarations and `Budget<K>`
-- `actor` declarations  
-- `build` / freeze blocks
-- `Bytes` / `Slice` / `Arena`
-- First-class refinement types (`{v: T where expr}`, `Int[lo..hi]`)
-
-### Effects & Information Flow
-- Effect declarations other than `effects()`
-- Capability types and `caps(...)` polymorphism
-- `Declassify` / `Secret` / `Untrusted` / Selective PC-Guard
 
 ### Concurrency
 - `scope` / `fork` / `join`
 - `Channel`
 - `Task` handles
 - Cancellation
-
-### Contracts & Verification
-- `spec fn` / `spec predicate` and `requires` / `ensures` clauses
-- `proof` / `invariant` / `lemma` / `?proof_hole`
-- Property testing and `ngjc certify-spec` (`Post2Exe`)
-- SMT proof obligations and Surface A/B/C gates
+- `actor` declarations
 
 ### Advanced Types
 - User-defined generics (beyond Result/Option)
 - Higher-order functions
 - Closures / lambdas (typed lambdas in sequential profile)
-- Finite-state `protocol` types and `refines` checks
 
 ### Java Interop
 - Direct Java method calls
@@ -202,8 +200,8 @@ The following features are explicitly excluded and must be rejected with
 
 ### Compiler Migration Checklist
 
-- [ ] Update Gradle/build to use JDK 28 EA toolchain when available
-- [ ] Add `--enable-preview` to compile and runtime flags for `ACC_VALUE` classfile bits
+- [ ] Update Gradle/build to use JDK 28 EA toolchain when available (JDK 28 EA Valhalla `--enable-preview` & Docker runtime checks are verified in CI)
+- [ ] Add `--enable-preview` to compile and runtime flags for `ACC_VALUE` classfile bits (verified in CI)
 - [x] Implement structural `equals`/`hashCode` for `record` and `enum` variants
 - [x] Implement sealed hierarchy for enum variants
 - [x] Enforce no-`null` rule (`NGJ-TYPE-020`)

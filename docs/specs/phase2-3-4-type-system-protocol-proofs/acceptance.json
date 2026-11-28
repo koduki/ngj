@@ -1,0 +1,150 @@
+{
+  "slug": "phase2-3-4-type-system-protocol-proofs",
+  "oracleFile": "compiler/src/test/java/ngj/oracle/Phase2To4TypeSystemAndFormalSpecOracleTest.java",
+  "criteria": [
+    {
+      "id": "AC-1",
+      "requirement": "CAP-02",
+      "description": "Accept valid consume + caps(...) usage; reject stale use/alias/branch-merge consumption with NGJ-CAP-002 and escaping local view with NGJ-CAP-001.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-2",
+      "requirement": "CAP-02",
+      "description": "Accept pure Secret.map/List.map closures; reject capability-capturing or effectful closures and direct Secret exposure with NGJ-CAP-003, Safe Mode violations with NGJ-SAFE-001, and unallowlisted @trusted_pure with NGJ-CAP-004.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-3",
+      "requirement": "CAP-02",
+      "description": "Allow pure body inside effects(DbRead) and reject actual effect exceedance with NGJ-EFFECT-001.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-4",
+      "requirement": "SEP-01",
+      "description": "Accept concurrent read captures across multiple forks; reject concurrent update conflict across forks and Arena.close(consume arena) with live Bytes<caps(arena)> or unjoined fork with NGJ-SEP-001 (and orphan fork with NGJ-SEP-002).",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-5",
+      "requirement": "REF-01",
+      "description": "Accept Int[lo..hi], Int[lo..<hi], Int[lo..], Long[lo..hi], {v: T where expr}, T where expr, type aliases, and dependent parameter bounds; reject impure predicates (NGJ-REF-002), cyclic aliases (NGJ-TYPE-026), and unproven bounds (NGJ-REF-001).",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-6",
+      "requirement": "REF-01",
+      "description": "Tier 1 solver accepts selfified val equivalence, E-graph congruence, if/else & early-return guard narrowing, match narrowing, and monotonic while index loops; rejects non-monotonic or violated bounds with NGJ-REF-001.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-7",
+      "requirement": "REF-01",
+      "description": "refine::<T>(expr) returns Result<T, RefinementError> (positive compile + runtime Ok/Err execution); Valhalla record .class omits ACC_IDENTITY, sets preview minor 65535, and enforces field refinement invariant in <init> at runtime.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-8",
+      "requirement": "DIAG-01",
+      "description": "check emits ngj.diagnostics/2 with matching IDs between human and agent; agent emits expr_snippet, derivation_trace, solver_diagnosis, exact UTF-8 byte spans, Secret(****) masking, and requires_review on authority hints.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-9",
+      "requirement": "DIAG-01",
+      "description": "context emits ngj.context/2 with capability_mode, capture_lifetime obligations, v0.3 signatures, non-hardcoded source_revision/policy_digest, and obeys --max-bytes with truncated: true.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-10",
+      "requirement": "GATE-01",
+      "description": "obligations enumerates holes/refinements/capture obligations accurately; --profile=restricted sets target_profile to valhalla/restricted and enforces Safe Mode.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-11",
+      "requirement": "GATE-01",
+      "description": "check-patch --policy=strict-gates rejects mismatched --base-revision (exit 3), preserves disk files unchanged, accepts valid patch (exit 0), and rejects each of the 5 gates (NGJ-GATE-SPEC-DRIFT, NGJ-GATE-AXIOM-DRIFT, NGJ-GATE-FORBIDDEN, NGJ-GATE-SIBLING, NGJ-GATE-OBLIGATION) with exit 1.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-12",
+      "requirement": "PROTO-01",
+      "description": "protocol definitions reject unreachable/dead-end/missing-final states (NGJ-PROTO-001), enforce consume state transitions, instance identity (NGJ-PROTO-004), and @must_resolve final-state completion across normal, error, and ? exits (NGJ-PROTO-002).",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-13",
+      "requirement": "PROTO-01",
+      "description": "protocol Sub refines Super accepts valid refinements and rejects transitions bypassing Super steps (NGJ-PROTO-003); ngjc inspect --protocol=<id> --format=mermaid outputs deterministic stateDiagram-v2 and rejects stale --revision with exit 3.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-14",
+      "requirement": "BUDGET-01",
+      "description": "Budget<Kind> enforces Budget.split(consume b, share) conservation (0L <= share <= b.remaining()), rejects negative/over-limit splits (NGJ-BUDGET-001), double-consume (NGJ-CAP-002), unsplit parallel fork reuse (NGJ-SEP-001), and unauthorized minting (NGJ-BUDGET-002).",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-15",
+      "requirement": "IFC-03",
+      "description": "Selective PC-Guard rejects privileged_effects inside if/match/while conditioned on Untrusted<T> (NGJ-IFC-PC-001) and allows after Result<Validated<T>, ValidationError> validation; @boundary_schema compiles JSON/binary decode + runtime refinement checks and masks Secret<T> as Secret(****) (NGJ-SCHEMA-001 on invalid capability fields).",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-16",
+      "requirement": "PROOF-01",
+      "description": "spec fn/spec predicate, requires/ensures/invariant, proof/lemma, and ?proof_hole typecheck while isolating MathInt/spec/lemma from executable code (NGJ-PROOF-002); ?proof_hole yields CheckStatus.INCOMPLETE_PROOF (exit 2 on check, rejected in --profile=proof-required and build with exit 2); ngjc context --proof-hole=<id> retrieves spec/lemma contracts; JVM .class contains zero spec/proof/lemma/invariant artifacts.",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-17",
+      "requirement": "CERT-01",
+      "description": "--verify=smt runs deterministic pure-JVM DPLL(T)/QF-LIA branch-and-bound distinguishing proved, counterexample (Secret-masked), unproven, timeout, and unsupported; ngjc certify-spec emits ngj.certify/2 validating Surface A, Surface B (NGJ-CERT-VACUOUS-PRE, NGJ-CERT-WEAK-ENSURES, NGJ-CERT-ASSUME-PRESENT), and Surface C (Post2Exe negative rejection + 2-call uniqueness / mutation+PBT strength witness).",
+      "automated": true,
+      "passed": true,
+      "status": "PASSED (oracle 21/21, gradle 174/174)"
+    },
+    {
+      "id": "AC-18",
+      "requirement": "CI-VALHALLA",
+      "description": "GitHub Actions CI build, Valhalla JDK 28 EA --enable-preview integration test, and Docker container-build jobs pass.",
+      "automated": false,
+      "status": "NOT RUN",
+      "passed": false
+    }
+  ]
+}

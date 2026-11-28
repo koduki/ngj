@@ -8,7 +8,8 @@ import ngj.diagnostic.SourceSpan;
 public sealed interface Node permits 
     CompilationUnit, ModuleDecl, ImportDecl, TopLevelDecl,
     Statement, Expr, TypeExpr, Pattern,
-    FieldDecl, Variant, Param {
+    FieldDecl, Variant, Param,
+    Annotation, ContractClause, ProtocolDecl.Transition {
     
     SourceSpan span();
 }

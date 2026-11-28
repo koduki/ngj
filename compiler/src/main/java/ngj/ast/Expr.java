@@ -7,4 +7,5 @@ public sealed interface Expr extends Node permits
     LiteralExpr, IdentExpr, HoleExpr, BinaryExpr, UnaryExpr, 
     CallExpr, FieldAccessExpr, ConstructorExpr, IfExpr, 
     MatchExpr, BlockExpr, PropagateExpr, ParenExpr,
-    ForExpr, WhileExpr, LambdaExpr {}
+    ForExpr, WhileExpr, LambdaExpr,
+    ScopeExpr, ForkExpr, ConsumeExpr, TupleExpr {}

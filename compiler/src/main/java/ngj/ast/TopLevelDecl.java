@@ -1,4 +1,4 @@
 package ngj.ast;
 
 public sealed interface TopLevelDecl extends Node 
-    permits FnDecl, DataDecl, EnumDecl, RecordDecl {}
+    permits FnDecl, DataDecl, EnumDecl, RecordDecl, TypeAliasDecl, ProtocolDecl, SpecFnDecl, LemmaDecl {}

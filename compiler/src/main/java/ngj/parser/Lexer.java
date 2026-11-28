@@ -10,6 +10,7 @@ import java.util.Map;
 public final class Lexer {
     private final String source;
     private final String fileName;
+    private final int[] charToUtf8Byte;
     private int pos = 0;
     private int line = 1;
     private int column = 1;
@@ -52,6 +53,34 @@ public final class Lexer {
     public Lexer(String source, String fileName) {
         this.source = source;
         this.fileName = fileName;
+        this.charToUtf8Byte = computeCharToUtf8Byte(source);
+    }
+
+    private static int[] computeCharToUtf8Byte(String source) {
+        int[] map = new int[source.length() + 1];
+        int byteOffset = 0;
+        for (int i = 0; i < source.length(); ) {
+            map[i] = byteOffset;
+            int cp = source.codePointAt(i);
+            int charCount = Character.charCount(cp);
+            int utf8Len;
+            if (cp <= 0x7F) {
+                utf8Len = 1;
+            } else if (cp <= 0x7FF) {
+                utf8Len = 2;
+            } else if (cp <= 0xFFFF) {
+                utf8Len = 3;
+            } else {
+                utf8Len = 4;
+            }
+            if (charCount == 2) {
+                map[i + 1] = byteOffset;
+            }
+            byteOffset += utf8Len;
+            i += charCount;
+        }
+        map[source.length()] = byteOffset;
+        return map;
     }
     
     public List<Diagnostic> getDiagnostics() {
@@ -91,6 +120,12 @@ public final class Lexer {
         // Note: () as unit literal is handled in parser, not lexer
         // because we need to distinguish between fn main() and ()
         
+        // Three-character tokens
+        if (pos + 2 < source.length() && source.charAt(pos) == '.' && source.charAt(pos + 1) == '.' && source.charAt(pos + 2) == '<') {
+            pos += 3;
+            return new Token(TokenType.DOT_DOT_LT, "..<", span(start, pos));
+        }
+
         // Two-character tokens
         if (pos + 1 < source.length()) {
             String two = source.substring(pos, pos + 2);
@@ -105,6 +140,7 @@ public final class Lexer {
                 case ">=" -> TokenType.GE;
                 case "&&" -> TokenType.AND;
                 case "||" -> TokenType.OR;
+                case ".." -> TokenType.DOT_DOT;
                 default -> null;
             };
             if (twoType != null) {
@@ -136,6 +172,7 @@ public final class Lexer {
             case '=' -> new Token(TokenType.ASSIGN, "=", span(start, pos));
             case '!' -> new Token(TokenType.BANG, "!", span(start, pos));
             case '?' -> new Token(TokenType.QUESTION, "?", span(start, pos));
+            case '@' -> new Token(TokenType.AT, "@", span(start, pos));
             default -> {
                 diagnostics.add(Diagnostic.error(
                     "NGJ-LEX-001",
@@ -300,6 +337,8 @@ public final class Lexer {
     }
     
     private SourceSpan span(int start, int end) {
-        return new SourceSpan(fileName, start, end);
+        int s = Math.max(0, Math.min(start, source.length()));
+        int e = Math.max(s, Math.min(end, source.length()));
+        return new SourceSpan(fileName, charToUtf8Byte[s], charToUtf8Byte[e]);
     }
 }

@@ -53,7 +53,7 @@ class CliTest {
         );
         
         assertEquals(ExitCode.SUCCESS, exitCode);
-        assertTrue(stdout.toString().contains("0.1.0-mvp"));
+        assertTrue(stdout.toString().contains("0.3.0-valhalla"));
     }
     
     @Test

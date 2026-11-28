@@ -1,0 +1,377 @@
+package ngj.typechecker;
+
+import ngj.ast.*;
+import ngj.diagnostic.*;
+
+import java.util.*;
+
+/**
+ * Phase 3 Selective PC-Guard & Boundary Schema Checker (IFC-03):
+ * - Tracks Untrusted<T> taint in if/match/while conditions
+ * - Rejects privileged_effects inside untrusted PC (NGJ-IFC-PC-001)
+ * - Allows validated values from Result<Validated<T>, ValidationError>
+ * - Validates @boundary_schema records/data/enums for serializability & cycles (NGJ-SCHEMA-001)
+ */
+public final class IfcPcChecker {
+    public static final Set<String> DEFAULT_PRIVILEGED_EFFECTS = Set.of(
+        "PaymentWrite", "DbWrite", "FsWrite", "Net", "Declassify"
+    );
+
+    private static final Set<String> NON_SERIALIZABLE_TYPES = Set.of(
+        "Arena", "OwnedBytes", "Bytes", "Slice", "Task", "Budget", "MutableList",
+        "DbRead", "DbWrite", "FsRead", "FsWrite", "Net", "PaymentWrite", "Declassify"
+    );
+
+    private final List<Diagnostic> diagnostics = new ArrayList<>();
+    private final Set<String> privilegedEffects;
+    private final Map<String, FnDecl> fnDecls = new HashMap<>();
+    private final Map<String, TopLevelDecl> typeDecls = new HashMap<>();
+
+    public IfcPcChecker() {
+        this(DEFAULT_PRIVILEGED_EFFECTS);
+    }
+
+    public IfcPcChecker(Set<String> privilegedEffects) {
+        this.privilegedEffects = privilegedEffects != null && !privilegedEffects.isEmpty()
+            ? Set.copyOf(privilegedEffects)
+            : DEFAULT_PRIVILEGED_EFFECTS;
+    }
+
+    public List<Diagnostic> getDiagnostics() {
+        return diagnostics;
+    }
+
+    public void checkAll(List<CompilationUnit> units) {
+        fnDecls.clear();
+        typeDecls.clear();
+
+        for (var unit : units) {
+            for (var decl : unit.declarations()) {
+                switch (decl) {
+                    case FnDecl fn -> fnDecls.put(fn.name(), fn);
+                    case DataDecl d -> typeDecls.put(d.name(), d);
+                    case RecordDecl r -> typeDecls.put(r.name(), r);
+                    case EnumDecl e -> typeDecls.put(e.name(), e);
+                    default -> {}
+                }
+            }
+        }
+
+        for (var unit : units) {
+            for (var decl : unit.declarations()) {
+                switch (decl) {
+                    case RecordDecl r -> {
+                        if (hasBoundarySchema(r.annotations())) {
+                            checkBoundarySchema(r.name(), r.params().stream().map(Param::type).toList(), r.span());
+                        }
+                    }
+                    case EnumDecl e -> {
+                        if (hasBoundarySchema(e.annotations())) {
+                            List<TypeExpr> types = new ArrayList<>();
+                            for (var v : e.variants()) {
+                                for (var f : v.fields()) types.add(f.type());
+                            }
+                            checkBoundarySchema(e.name(), types, e.span());
+                        }
+                    }
+                    case FnDecl fn -> checkFn(fn);
+                    default -> {}
+                }
+            }
+        }
+    }
+
+    private boolean hasBoundarySchema(List<Annotation> annotations) {
+        return annotations.stream().anyMatch(a -> a.name().equals("boundary_schema"));
+    }
+
+    private void checkBoundarySchema(String name, List<TypeExpr> fieldTypes, SourceSpan span) {
+        for (var ft : fieldTypes) {
+            checkSerializableType(ft, span);
+        }
+        // Cycle detection in @boundary_schema types
+        if (hasSchemaCycle(name, new LinkedHashSet<>())) {
+            diagnostics.add(Diagnostic.error(
+                "NGJ-SCHEMA-001",
+                "@boundary_schema type '" + name + "' contains an unsupported recursive cycle",
+                span
+            ));
+        }
+    }
+
+    private void checkSerializableType(TypeExpr type, SourceSpan span) {
+        if (type == null) return;
+        switch (type) {
+            case CapabilityTypeExpr _, CaptureSetTypeExpr _, FunctionTypeExpr _ -> diagnostics.add(Diagnostic.error(
+                "NGJ-SCHEMA-001",
+                "@boundary_schema cannot contain capability or function field type: " + type,
+                type.span() != null ? type.span() : span
+            ));
+            case SimpleTypeExpr s -> {
+                if (NON_SERIALIZABLE_TYPES.contains(s.name())) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-SCHEMA-001",
+                        "@boundary_schema cannot contain non-serializable resource type '" + s.name() + "'",
+                        s.span() != null ? s.span() : span
+                    ));
+                }
+            }
+            case GenericTypeExpr g -> {
+                if (NON_SERIALIZABLE_TYPES.contains(g.name())) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-SCHEMA-001",
+                        "@boundary_schema cannot contain non-serializable resource type '" + g.name() + "'",
+                        g.span() != null ? g.span() : span
+                    ));
+                }
+                for (var arg : g.typeArgs()) {
+                    checkSerializableType(arg, span);
+                }
+            }
+            case RefinedTypeExpr r -> checkSerializableType(r.baseType(), span);
+            case RangeTypeExpr r -> checkSerializableType(r.baseType(), span);
+            case TupleTypeExpr t -> {
+                for (var elem : t.elements()) checkSerializableType(elem, span);
+            }
+            default -> {}
+        }
+    }
+
+    private boolean hasSchemaCycle(String typeName, Set<String> visiting) {
+        if (!visiting.add(typeName)) {
+            return true;
+        }
+        TopLevelDecl decl = typeDecls.get(typeName);
+        List<TypeExpr> refs = switch (decl) {
+            case DataDecl d -> d.fields().stream().map(FieldDecl::type).toList();
+            case RecordDecl r -> r.params().stream().map(Param::type).toList();
+            case EnumDecl e -> e.variants().stream().flatMap(v -> v.fields().stream()).map(FieldDecl::type).toList();
+            case null, default -> List.of();
+        };
+        for (var ref : refs) {
+            for (String dep : referencedTypes(ref)) {
+                if (typeDecls.containsKey(dep) && hasSchemaCycle(dep, visiting)) {
+                    return true;
+                }
+            }
+        }
+        visiting.remove(typeName);
+        return false;
+    }
+
+    private List<String> referencedTypes(TypeExpr t) {
+        if (t == null) return List.of();
+        return switch (t) {
+            case SimpleTypeExpr s -> List.of(s.name());
+            case GenericTypeExpr g -> {
+                List<String> out = new ArrayList<>();
+                out.add(g.name());
+                for (var a : g.typeArgs()) out.addAll(referencedTypes(a));
+                yield out;
+            }
+            case RefinedTypeExpr r -> referencedTypes(r.baseType());
+            case RangeTypeExpr r -> referencedTypes(r.baseType());
+            case TupleTypeExpr tup -> tup.elements().stream().flatMap(e -> referencedTypes(e).stream()).toList();
+            default -> List.of();
+        };
+    }
+
+    private void checkFn(FnDecl fn) {
+        Set<String> untrustedVars = new LinkedHashSet<>();
+        for (var p : fn.params()) {
+            if (isUntrustedType(p.type())) {
+                untrustedVars.add(p.name());
+            }
+        }
+        if (fn.body() != null) {
+            checkBlock(fn.body(), untrustedVars, false);
+        }
+    }
+
+    private void checkBlock(BlockExpr block, Set<String> untrustedVars, boolean inUntrustedPc) {
+        if (block == null) return;
+        for (var stmt : block.statements()) {
+            checkStmt(stmt, untrustedVars, inUntrustedPc);
+        }
+        if (block.tailExpr() != null) {
+            checkExpr(block.tailExpr(), untrustedVars, inUntrustedPc);
+        }
+    }
+
+    private void checkStmt(Statement stmt, Set<String> untrustedVars, boolean inUntrustedPc) {
+        switch (stmt) {
+            case ValStmt val -> {
+                checkExpr(val.initializer(), untrustedVars, inUntrustedPc);
+                if (isValidatedExpr(val.initializer())) {
+                    untrustedVars.remove(val.name());
+                } else if (isUntrustedType(val.explicitType()) || isExprUntrusted(val.initializer(), untrustedVars)) {
+                    untrustedVars.add(val.name());
+                }
+            }
+            case LetStmt let -> {
+                checkExpr(let.initializer(), untrustedVars, inUntrustedPc);
+                if (isValidatedExpr(let.initializer())) {
+                    untrustedVars.remove(let.name());
+                } else if (isUntrustedType(let.explicitType()) || isExprUntrusted(let.initializer(), untrustedVars)) {
+                    untrustedVars.add(let.name());
+                }
+            }
+            case VarStmt varStmt -> {
+                checkExpr(varStmt.initializer(), untrustedVars, inUntrustedPc);
+                if (isUntrustedType(varStmt.explicitType()) || isExprUntrusted(varStmt.initializer(), untrustedVars)) {
+                    untrustedVars.add(varStmt.name());
+                }
+            }
+            case AssignStmt assign -> {
+                checkExpr(assign.value(), untrustedVars, inUntrustedPc);
+                if (isExprUntrusted(assign.value(), untrustedVars)) {
+                    untrustedVars.add(assign.name());
+                }
+            }
+            case ReturnStmt ret -> {
+                if (ret.value() != null) checkExpr(ret.value(), untrustedVars, inUntrustedPc);
+            }
+            case ExprStmt es -> checkExpr(es.expr(), untrustedVars, inUntrustedPc);
+            default -> {}
+        }
+    }
+
+    private void checkExpr(Expr expr, Set<String> untrustedVars, boolean inUntrustedPc) {
+        if (expr == null) return;
+        switch (expr) {
+            case IfExpr ifExpr -> {
+                checkExpr(ifExpr.condition(), untrustedVars, inUntrustedPc);
+                boolean pc = inUntrustedPc || isExprUntrusted(ifExpr.condition(), untrustedVars);
+                checkBlock(ifExpr.thenBranch(), new LinkedHashSet<>(untrustedVars), pc);
+                if (ifExpr.elseBranch() != null) {
+                    if (ifExpr.elseBranch() instanceof BlockExpr eb) {
+                        checkBlock(eb, new LinkedHashSet<>(untrustedVars), pc);
+                    } else {
+                        checkExpr(ifExpr.elseBranch(), new LinkedHashSet<>(untrustedVars), pc);
+                    }
+                }
+            }
+            case MatchExpr matchExpr -> {
+                checkExpr(matchExpr.scrutinee(), untrustedVars, inUntrustedPc);
+                boolean validatedScrutinee = isValidatedExpr(matchExpr.scrutinee());
+                boolean pc = inUntrustedPc || (!validatedScrutinee && isExprUntrusted(matchExpr.scrutinee(), untrustedVars));
+                for (var arm : matchExpr.arms()) {
+                    Set<String> armUntrusted = new LinkedHashSet<>(untrustedVars);
+                    if (validatedScrutinee && arm.pattern() instanceof ConstructorPattern cp
+                        && (cp.typePath().equals("Ok") || cp.typePath().endsWith(".Ok"))) {
+                        for (var f : cp.fields()) {
+                            armUntrusted.remove(f.name());
+                        }
+                    }
+                    checkExpr(arm.body(), armUntrusted, pc);
+                }
+            }
+            case WhileExpr whileExpr -> {
+                checkExpr(whileExpr.condition(), untrustedVars, inUntrustedPc);
+                boolean pc = inUntrustedPc || isExprUntrusted(whileExpr.condition(), untrustedVars);
+                checkBlock(whileExpr.body(), new LinkedHashSet<>(untrustedVars), pc);
+            }
+            case CallExpr call -> {
+                if (inUntrustedPc) {
+                    checkPrivilegedCall(call);
+                }
+                checkExpr(call.callee(), untrustedVars, inUntrustedPc);
+                for (var arg : call.args()) {
+                    checkExpr(arg, untrustedVars, inUntrustedPc);
+                }
+            }
+            case BlockExpr b -> checkBlock(b, new LinkedHashSet<>(untrustedVars), inUntrustedPc);
+            case ScopeExpr s -> checkBlock(s.body(), new LinkedHashSet<>(untrustedVars), inUntrustedPc);
+            case ForkExpr f -> checkBlock(f.body(), new LinkedHashSet<>(untrustedVars), inUntrustedPc);
+            case BinaryExpr b -> {
+                checkExpr(b.left(), untrustedVars, inUntrustedPc);
+                checkExpr(b.right(), untrustedVars, inUntrustedPc);
+            }
+            case UnaryExpr u -> checkExpr(u.operand(), untrustedVars, inUntrustedPc);
+            case ParenExpr p -> checkExpr(p.inner(), untrustedVars, inUntrustedPc);
+            case PropagateExpr p -> checkExpr(p.inner(), untrustedVars, inUntrustedPc);
+            case FieldAccessExpr fa -> checkExpr(fa.object(), untrustedVars, inUntrustedPc);
+            default -> {}
+        }
+    }
+
+    private void checkPrivilegedCall(CallExpr call) {
+        if (call.callee() instanceof IdentExpr id) {
+            if (id.name().equals("declassify") && privilegedEffects.contains("Declassify")) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-IFC-PC-001",
+                    "Privileged effect 'Declassify' cannot be invoked under an Untrusted control-flow guard",
+                    call.span()
+                ));
+                return;
+            }
+            var fn = fnDecls.get(id.name());
+            if (fn != null) {
+                for (var eff : fn.effects()) {
+                    if (privilegedEffects.contains(eff)) {
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-IFC-PC-001",
+                            "Privileged effect '" + eff + "' in call to '" + id.name()
+                                + "' cannot be executed under an Untrusted control-flow guard",
+                            call.span()
+                        ));
+                    }
+                }
+            }
+        } else if (call.callee() instanceof FieldAccessExpr fa && fa.object() instanceof IdentExpr objId) {
+            if (privilegedEffects.contains(objId.name())) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-IFC-PC-001",
+                    "Privileged effect '" + objId.name() + "' cannot be executed under an Untrusted control-flow guard",
+                    call.span()
+                ));
+            }
+        }
+    }
+
+    private boolean isUntrustedType(TypeExpr type) {
+        if (type == null) return false;
+        return switch (type) {
+            case GenericTypeExpr g -> g.name().equals("Untrusted");
+            case SimpleTypeExpr s -> s.name().equals("Untrusted");
+            case CapabilityTypeExpr c -> isUntrustedType(c.inner());
+            default -> false;
+        };
+    }
+
+    private boolean isValidatedExpr(Expr expr) {
+        if (expr == null) return false;
+        return switch (expr) {
+            case PropagateExpr p -> isValidatedExpr(p.inner());
+            case CallExpr c -> {
+                if (c.callee() instanceof IdentExpr id && id.name().equals("validate")) yield true;
+                if (c.callee() instanceof FieldAccessExpr fa
+                    && (fa.fieldName().equals("validate") || fa.fieldName().equals("parse"))) yield true;
+                yield false;
+            }
+            case ParenExpr p -> isValidatedExpr(p.inner());
+            default -> false;
+        };
+    }
+
+    private boolean isExprUntrusted(Expr expr, Set<String> untrustedVars) {
+        if (expr == null || isValidatedExpr(expr)) return false;
+        return switch (expr) {
+            case IdentExpr id -> untrustedVars.contains(id.name());
+            case FieldAccessExpr fa -> isExprUntrusted(fa.object(), untrustedVars);
+            case CallExpr c -> {
+                if (c.callee() instanceof FieldAccessExpr fa && isExprUntrusted(fa.object(), untrustedVars)) {
+                    yield true;
+                }
+                for (var arg : c.args()) {
+                    if (isExprUntrusted(arg, untrustedVars)) yield true;
+                }
+                yield false;
+            }
+            case BinaryExpr b -> isExprUntrusted(b.left(), untrustedVars) || isExprUntrusted(b.right(), untrustedVars);
+            case UnaryExpr u -> isExprUntrusted(u.operand(), untrustedVars);
+            case ParenExpr p -> isExprUntrusted(p.inner(), untrustedVars);
+            default -> false;
+        };
+    }
+}
