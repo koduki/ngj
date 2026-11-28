@@ -19,14 +19,33 @@ public final class VcGenerator {
     }
 
     public SmtExpr translateExpr(Expr expr, Map<String, Sort> varSorts) {
-        return translateExpr(expr, varSorts, Map.of(), new LinkedHashSet<>());
+        return translateExpr(expr, varSorts, Map.of(), new LinkedHashSet<>(), false, Set.of());
+    }
+
+    public SmtExpr translateExpr(
+        Expr expr,
+        Map<String, Sort> varSorts,
+        Map<String, String> ssaEnv
+    ) {
+        return translateExpr(expr, varSorts, ssaEnv, new LinkedHashSet<>(), false, Set.of());
+    }
+
+    public SmtExpr translateExecutableExpr(
+        Expr expr,
+        Map<String, Sort> varSorts,
+        Map<String, String> ssaEnv,
+        Set<String> longVars
+    ) {
+        return translateExpr(expr, varSorts, ssaEnv, new LinkedHashSet<>(), true, longVars != null ? longVars : Set.of());
     }
 
     private SmtExpr translateExpr(
         Expr expr,
         Map<String, Sort> varSorts,
         Map<String, String> ssaEnv,
-        Set<String> inliningSpecFns
+        Set<String> inliningSpecFns,
+        boolean executableIntOverflow,
+        Set<String> longVars
     ) {
         if (expr == null) {
             return new SmtExpr.UnsupportedExpr("null expression");
@@ -42,17 +61,27 @@ public final class VcGenerator {
                 Sort sort = varSorts.getOrDefault(ssaName, varSorts.getOrDefault(id.name(), Sort.INT));
                 yield new SmtExpr.Var(ssaName, sort);
             }
-            case ParenExpr p -> translateExpr(p.inner(), varSorts, ssaEnv, inliningSpecFns);
+            case ParenExpr p -> translateExpr(p.inner(), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
             case UnaryExpr u -> {
-                SmtExpr op = translateExpr(u.operand(), varSorts, ssaEnv, inliningSpecFns);
+                SmtExpr op = translateExpr(u.operand(), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
                 yield switch (u.op()) {
-                    case NEG -> new SmtExpr.Sub(SmtExpr.intConst(0), op);
+                    case NEG -> {
+                        if (executableIntOverflow) {
+                            long minVal = isLongExpr(u.operand(), longVars) ? Long.MIN_VALUE : Integer.MIN_VALUE;
+                            yield new SmtExpr.Ite(
+                                new SmtExpr.Eq(op, SmtExpr.intConst(minVal)),
+                                SmtExpr.intConst(minVal),
+                                new SmtExpr.Sub(SmtExpr.intConst(0), op)
+                            );
+                        }
+                        yield new SmtExpr.Sub(SmtExpr.intConst(0), op);
+                    }
                     case NOT -> new SmtExpr.Not(op);
                 };
             }
             case BinaryExpr b -> {
-                SmtExpr l = translateExpr(b.left(), varSorts, ssaEnv, inliningSpecFns);
-                SmtExpr r = translateExpr(b.right(), varSorts, ssaEnv, inliningSpecFns);
+                SmtExpr l = translateExpr(b.left(), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
+                SmtExpr r = translateExpr(b.right(), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
                 yield switch (b.op()) {
                     case ADD -> new SmtExpr.Add(l, r);
                     case SUB -> new SmtExpr.Sub(l, r);
@@ -72,7 +101,7 @@ public final class VcGenerator {
                 if (ifExpr.elseBranch() == null) {
                     yield new SmtExpr.UnsupportedExpr("if without else in VC");
                 }
-                SmtExpr cond = translateExpr(ifExpr.condition(), varSorts, ssaEnv, inliningSpecFns);
+                SmtExpr cond = translateExpr(ifExpr.condition(), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
                 Expr thenTail = extractBranchReturnOrTail(ifExpr.thenBranch());
                 Expr elseTail = ifExpr.elseBranch() instanceof BlockExpr eb
                     ? extractBranchReturnOrTail(eb)
@@ -82,8 +111,8 @@ public final class VcGenerator {
                 }
                 yield new SmtExpr.Ite(
                     cond,
-                    translateExpr(thenTail, varSorts, ssaEnv, inliningSpecFns),
-                    translateExpr(elseTail, varSorts, ssaEnv, inliningSpecFns)
+                    translateExpr(thenTail, varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars),
+                    translateExpr(elseTail, varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars)
                 );
             }
             case CallExpr call -> {
@@ -99,23 +128,23 @@ public final class VcGenerator {
                         }
                         inliningSpecFns.add(id.name());
                         try {
-                            yield translateExpr(substituteExpr(spec.body().tailExpr(), subst), varSorts, ssaEnv, inliningSpecFns);
+                            yield translateExpr(substituteExpr(spec.body().tailExpr(), subst), varSorts, ssaEnv, inliningSpecFns, false, longVars);
                         } finally {
                             inliningSpecFns.remove(id.name());
                         }
                     }
                     List<SmtExpr> args = call.args().stream()
-                        .map(a -> translateExpr(a, varSorts, ssaEnv, inliningSpecFns)).toList();
+                        .map(a -> translateExpr(a, varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars)).toList();
                     yield new SmtExpr.UfApp(id.name(), args, retSort);
                 }
                 List<SmtExpr> args = call.args().stream()
-                    .map(a -> translateExpr(a, varSorts, ssaEnv, inliningSpecFns)).toList();
+                    .map(a -> translateExpr(a, varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars)).toList();
                 String fnName = call.callee() instanceof IdentExpr id ? id.name() : call.callee().toString();
                 yield new SmtExpr.UfApp(fnName, args, Sort.INT);
             }
             case FieldAccessExpr fa -> new SmtExpr.UfApp(
                 "field_" + fa.fieldName(),
-                List.of(translateExpr(fa.object(), varSorts, ssaEnv, inliningSpecFns)),
+                List.of(translateExpr(fa.object(), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars)),
                 Sort.INT
             );
             case HoleExpr h -> new SmtExpr.UnsupportedExpr("Hole present: ?" + h.name());
@@ -135,9 +164,24 @@ public final class VcGenerator {
     public SmtExpr buildFnPostconditionVc(FnDecl fn, List<SmtExpr> requires, SmtExpr ensures) {
         Map<String, Sort> sorts = collectSorts(fn.params(), fn.returnType());
         List<SmtExpr> premises = new ArrayList<>(requires);
+        Set<String> longVars = collectLongVars(fn.params());
 
         if (fn.body() != null) {
-            extractBodyFacts(fn.body(), sorts, premises);
+            if (containsNeg(fn.body())) {
+                for (var p : fn.params()) {
+                    if (sortOfType(p.type()) == Sort.INT) {
+                        SmtExpr.Var pVar = new SmtExpr.Var(p.name(), Sort.INT);
+                        if (isLongType(p.type())) {
+                            premises.add(new SmtExpr.Ge(pVar, SmtExpr.intConst(Long.MIN_VALUE)));
+                            premises.add(new SmtExpr.Le(pVar, SmtExpr.intConst(Long.MAX_VALUE)));
+                        } else {
+                            premises.add(new SmtExpr.Ge(pVar, SmtExpr.intConst(Integer.MIN_VALUE)));
+                            premises.add(new SmtExpr.Le(pVar, SmtExpr.intConst(Integer.MAX_VALUE)));
+                        }
+                    }
+                }
+            }
+            extractBodyFacts(fn.body(), sorts, premises, longVars);
         }
 
         if (premises.isEmpty()) {
@@ -155,11 +199,11 @@ public final class VcGenerator {
         return new SmtExpr.Implies(conj, ensures);
     }
 
-    private void extractBodyFacts(BlockExpr body, Map<String, Sort> sorts, List<SmtExpr> premises) {
+    private void extractBodyFacts(BlockExpr body, Map<String, Sort> sorts, List<SmtExpr> premises, Set<String> longVars) {
         Sort resSort = sorts.getOrDefault("result", Sort.INT);
         Map<String, String> ssaEnv = new LinkedHashMap<>();
         Map<String, Integer> ssaCounter = new LinkedHashMap<>();
-        SmtExpr bodyResult = translateBlockResult(body.statements(), 0, body.tailExpr(), sorts, premises, ssaEnv, ssaCounter);
+        SmtExpr bodyResult = translateBlockResult(body.statements(), 0, body.tailExpr(), sorts, premises, ssaEnv, ssaCounter, longVars);
         if (bodyResult != null && !(bodyResult instanceof SmtExpr.UnsupportedExpr)) {
             premises.add(new SmtExpr.Eq(new SmtExpr.Var("result", resSort), bodyResult));
         }
@@ -186,76 +230,92 @@ public final class VcGenerator {
         Map<String, Sort> sorts,
         List<SmtExpr> premises,
         Map<String, String> ssaEnv,
-        Map<String, Integer> ssaCounter
+        Map<String, Integer> ssaCounter,
+        Set<String> longVars
     ) {
         if (idx >= stmts.size()) {
-            return tailExpr != null ? translateExpr(tailExpr, sorts, ssaEnv, new LinkedHashSet<>()) : null;
+            return tailExpr != null ? translateExpr(tailExpr, sorts, ssaEnv, new LinkedHashSet<>(), true, longVars) : null;
         }
         Statement stmt = stmts.get(idx);
         switch (stmt) {
             case ValStmt v -> {
-                SmtExpr init = translateExpr(v.initializer(), sorts, ssaEnv, new LinkedHashSet<>());
+                SmtExpr init = translateExpr(v.initializer(), sorts, ssaEnv, new LinkedHashSet<>(), true, longVars);
                 Sort sort = sortOfType(v.explicitType());
                 String lhs = (ssaEnv.containsKey(v.name()) || sorts.containsKey(v.name()))
                     ? freshSsa(v.name(), sort, sorts, ssaEnv, ssaCounter)
                     : v.name();
                 sorts.put(lhs, sort);
                 ssaEnv.put(v.name(), lhs);
+                if (isLongType(v.explicitType())) {
+                    longVars.add(lhs);
+                    longVars.add(v.name());
+                }
                 premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), init));
-                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter);
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
             case LetStmt l -> {
-                SmtExpr init = translateExpr(l.initializer(), sorts, ssaEnv, new LinkedHashSet<>());
+                SmtExpr init = translateExpr(l.initializer(), sorts, ssaEnv, new LinkedHashSet<>(), true, longVars);
                 Sort sort = sortOfType(l.explicitType());
                 String lhs = (ssaEnv.containsKey(l.name()) || sorts.containsKey(l.name()))
                     ? freshSsa(l.name(), sort, sorts, ssaEnv, ssaCounter)
                     : l.name();
                 sorts.put(lhs, sort);
                 ssaEnv.put(l.name(), lhs);
+                if (isLongType(l.explicitType())) {
+                    longVars.add(lhs);
+                    longVars.add(l.name());
+                }
                 premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), init));
-                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter);
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
             case VarStmt v -> {
-                SmtExpr init = translateExpr(v.initializer(), sorts, ssaEnv, new LinkedHashSet<>());
+                SmtExpr init = translateExpr(v.initializer(), sorts, ssaEnv, new LinkedHashSet<>(), true, longVars);
                 Sort sort = sortOfType(v.explicitType());
                 String lhs = freshSsa(v.name(), sort, sorts, ssaEnv, ssaCounter);
+                if (isLongType(v.explicitType())) {
+                    longVars.add(lhs);
+                    longVars.add(v.name());
+                }
                 premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), init));
-                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter);
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
             case AssignStmt a -> {
-                SmtExpr rhs = translateExpr(a.value(), sorts, ssaEnv, new LinkedHashSet<>());
+                SmtExpr rhs = translateExpr(a.value(), sorts, ssaEnv, new LinkedHashSet<>(), true, longVars);
                 String prevName = ssaEnv.getOrDefault(a.name(), a.name());
                 Sort sort = sorts.getOrDefault(prevName, Sort.INT);
                 String lhs = freshSsa(a.name(), sort, sorts, ssaEnv, ssaCounter);
+                if (longVars.contains(prevName) || longVars.contains(a.name())) {
+                    longVars.add(lhs);
+                }
                 premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), rhs));
-                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter);
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
             case AssumeStmt a -> {
-                premises.add(translateExpr(a.condition(), sorts, ssaEnv, new LinkedHashSet<>()));
-                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter);
+                premises.add(translateExpr(a.condition(), sorts, ssaEnv, new LinkedHashSet<>(), false, longVars));
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
             case ReturnStmt r -> {
-                return r.value() != null ? translateExpr(r.value(), sorts, ssaEnv, new LinkedHashSet<>()) : null;
+                return r.value() != null ? translateExpr(r.value(), sorts, ssaEnv, new LinkedHashSet<>(), true, longVars) : null;
             }
             case ExprStmt es -> {
                 if (es.expr() instanceof WhileExpr) {
                     return new SmtExpr.UnsupportedExpr("while_mutated_state");
                 }
                 if (es.expr() instanceof IfExpr ifExpr) {
-                    SmtExpr cond = translateExpr(ifExpr.condition(), sorts, ssaEnv, new LinkedHashSet<>());
+                    SmtExpr cond = translateExpr(ifExpr.condition(), sorts, ssaEnv, new LinkedHashSet<>(), true, longVars);
                     List<SmtExpr> thenPremises = new ArrayList<>();
                     SmtExpr thenRes = translateBlockResult(
                         ifExpr.thenBranch().statements(), 0, ifExpr.thenBranch().tailExpr(),
-                        sorts, thenPremises, new LinkedHashMap<>(ssaEnv), ssaCounter);
+                        sorts, thenPremises, new LinkedHashMap<>(ssaEnv), ssaCounter, longVars);
                     if (thenRes instanceof SmtExpr.UnsupportedExpr) {
                         return thenRes;
                     }
                     SmtExpr elseRes = ifExpr.elseBranch() != null
                         ? (ifExpr.elseBranch() instanceof BlockExpr eb
                             ? translateBlockResult(eb.statements(), 0, eb.tailExpr(),
-                                sorts, new ArrayList<>(), new LinkedHashMap<>(ssaEnv), ssaCounter)
-                            : translateExpr(ifExpr.elseBranch(), sorts, ssaEnv, new LinkedHashSet<>()))
-                        : translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, new LinkedHashMap<>(ssaEnv), ssaCounter);
+                                sorts, new ArrayList<>(), new LinkedHashMap<>(ssaEnv), ssaCounter, longVars)
+                            : translateExpr(ifExpr.elseBranch(), sorts, ssaEnv, new LinkedHashSet<>(), true, longVars))
+                        : translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, new LinkedHashMap<>(ssaEnv), ssaCounter, longVars);
                     if (elseRes instanceof SmtExpr.UnsupportedExpr) {
                         return elseRes;
                     }
@@ -269,10 +329,10 @@ public final class VcGenerator {
                         return new SmtExpr.UnsupportedExpr("if_mutated_state");
                     }
                 }
-                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter);
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
             default -> {
-                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter);
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
         }
     }
@@ -302,6 +362,96 @@ public final class VcGenerator {
             sorts.put("result", sortOfType(returnType));
         }
         return sorts;
+    }
+
+    public static Set<String> collectLongVars(List<Param> params) {
+        Set<String> longVars = new LinkedHashSet<>();
+        for (var p : params) {
+            if (isLongType(p.type())) {
+                longVars.add(p.name());
+            }
+        }
+        return longVars;
+    }
+
+    public static boolean isLongType(TypeExpr type) {
+        if (type == null) return false;
+        return switch (type) {
+            case SimpleTypeExpr s -> s.name().equals("Long");
+            case RefinedTypeExpr r -> isLongType(r.baseType());
+            case RangeTypeExpr r -> isLongType(r.baseType());
+            case CapabilityTypeExpr c -> isLongType(c.inner());
+            default -> false;
+        };
+    }
+
+    private static boolean isLongExpr(Expr expr, Set<String> longVars) {
+        if (expr == null) return false;
+        return switch (expr) {
+            case LiteralExpr lit -> lit.kind() == LiteralExpr.LiteralKind.LONG;
+            case IdentExpr id -> longVars.contains(id.name());
+            case ParenExpr p -> isLongExpr(p.inner(), longVars);
+            case UnaryExpr u -> u.op() == UnaryExpr.UnaryOp.NEG && isLongExpr(u.operand(), longVars);
+            case BinaryExpr b -> isLongExpr(b.left(), longVars) || isLongExpr(b.right(), longVars);
+            default -> false;
+        };
+    }
+
+    private static boolean containsNeg(Expr expr) {
+        if (expr == null) return false;
+        return switch (expr) {
+            case UnaryExpr u -> u.op() == UnaryExpr.UnaryOp.NEG || containsNeg(u.operand());
+            case BinaryExpr b -> containsNeg(b.left()) || containsNeg(b.right());
+            case ParenExpr p -> containsNeg(p.inner());
+            case IfExpr i -> containsNeg(i.condition()) || containsNegBlock(i.thenBranch()) || containsNeg(i.elseBranch());
+            case BlockExpr b -> containsNegBlock(b);
+            case CallExpr c -> {
+                for (var a : c.args()) {
+                    if (containsNeg(a)) yield true;
+                }
+                yield false;
+            }
+            default -> false;
+        };
+    }
+
+    private static boolean containsNegBlock(BlockExpr block) {
+        if (block == null) return false;
+        for (var st : block.statements()) {
+            boolean found = switch (st) {
+                case ValStmt v -> containsNeg(v.initializer());
+                case LetStmt l -> containsNeg(l.initializer());
+                case VarStmt v -> containsNeg(v.initializer());
+                case AssignStmt a -> containsNeg(a.value());
+                case ReturnStmt r -> containsNeg(r.value());
+                case ExprStmt es -> containsNeg(es.expr());
+                default -> false;
+            };
+            if (found) return true;
+        }
+        return containsNeg(block.tailExpr());
+    }
+
+    public static boolean containsUnsupported(SmtExpr expr) {
+        if (expr == null) return true;
+        return switch (expr) {
+            case SmtExpr.UnsupportedExpr _ -> true;
+            case SmtExpr.IntConst _, SmtExpr.BoolConst _, SmtExpr.Var _ -> false;
+            case SmtExpr.Add a -> containsUnsupported(a.left()) || containsUnsupported(a.right());
+            case SmtExpr.Sub s -> containsUnsupported(s.left()) || containsUnsupported(s.right());
+            case SmtExpr.Mul m -> containsUnsupported(m.left()) || containsUnsupported(m.right());
+            case SmtExpr.Eq e -> containsUnsupported(e.left()) || containsUnsupported(e.right());
+            case SmtExpr.Lt l -> containsUnsupported(l.left()) || containsUnsupported(l.right());
+            case SmtExpr.Le l -> containsUnsupported(l.left()) || containsUnsupported(l.right());
+            case SmtExpr.Gt g -> containsUnsupported(g.left()) || containsUnsupported(g.right());
+            case SmtExpr.Ge g -> containsUnsupported(g.left()) || containsUnsupported(g.right());
+            case SmtExpr.Not n -> containsUnsupported(n.inner());
+            case SmtExpr.Implies i -> containsUnsupported(i.premise()) || containsUnsupported(i.conclusion());
+            case SmtExpr.Ite i -> containsUnsupported(i.cond()) || containsUnsupported(i.thenExpr()) || containsUnsupported(i.elseExpr());
+            case SmtExpr.And a -> a.conjuncts().stream().anyMatch(VcGenerator::containsUnsupported);
+            case SmtExpr.Or o -> o.disjuncts().stream().anyMatch(VcGenerator::containsUnsupported);
+            case SmtExpr.UfApp u -> u.args().stream().anyMatch(VcGenerator::containsUnsupported);
+        };
     }
 
     public static Sort sortOfType(TypeExpr type) {

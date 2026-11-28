@@ -206,4 +206,94 @@ class CodexRegressionTest {
         assertEquals(1, code, "Double consume via transitive alias must fail with NGJ-CAP-002: " + stdout);
         assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
     }
+
+    @Test
+    void calleePreconditionViolationAtCallSiteIsRejected() throws Exception {
+        Path file = tempDir.resolve("callee_precondition.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int) -> Int effects()
+                requires (x > 0)
+                ensures (result > 0)
+            {
+                return x;
+            }
+
+            public fn badCaller() -> Int effects() {
+                return positive(0);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Calling positive(0) must fail callee requires(x > 0): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void executableIntNegationModelsMinValueOverflow() throws Exception {
+        Path file = tempDir.resolve("neg_overflow.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn negPos(x: Int) -> Int effects()
+                requires (x < 0)
+                ensures (result > 0)
+            {
+                return -x;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "-Int.MIN_VALUE overflows to negative, so ensures(result > 0) must fail: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void branchAssignmentTaintMergesIntoEnclosingScope() throws Exception {
+        Path file = tempDir.resolve("branch_taint_merge.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>) -> Unit effects(PaymentWrite) {
+                var selected: Bool = false;
+                if (true) {
+                    selected = isSome(flag);
+                }
+                if (selected) {
+                    pay();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Tainted assignment inside if branch must persist after branch and reject pay(): " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
 }

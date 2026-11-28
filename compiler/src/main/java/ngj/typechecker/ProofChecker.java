@@ -99,7 +99,8 @@ public final class ProofChecker {
             checkExprPurityAndHoles(c.condition(), true, Set.of());
         }
         if (fn.body() != null) {
-            checkBlock(fn.body(), false);
+            CallSiteCtx ctx = CallSiteCtx.forFn(fn, vcGen);
+            checkBlock(fn.body(), false, ctx);
         }
         if ("smt".equals(verifyMode)) {
             verifyFnWithSmt(fn, vcGen);
@@ -144,7 +145,7 @@ public final class ProofChecker {
         }
     }
 
-    private void checkBlock(BlockExpr block, boolean inProofContext) {
+    private void checkBlock(BlockExpr block, boolean inProofContext, CallSiteCtx ctx) {
         if (block == null) return;
         for (var stmt : block.statements()) {
             switch (stmt) {
@@ -153,38 +154,62 @@ public final class ProofChecker {
                         secretVars.add(v.name());
                     }
                     if (!inProofContext) checkNoMathIntInType(v.explicitType(), v.span());
-                    checkRuntimeOrProofExpr(v.initializer(), inProofContext);
+                    checkRuntimeOrProofExpr(v.initializer(), inProofContext, ctx);
+                    if (!inProofContext && ctx != null) {
+                        ctx.bindLocal(v.name(), v.explicitType(), v.initializer());
+                    }
                 }
                 case LetStmt l -> {
                     if (!inProofContext) checkNoMathIntInType(l.explicitType(), l.span());
-                    checkRuntimeOrProofExpr(l.initializer(), inProofContext);
+                    checkRuntimeOrProofExpr(l.initializer(), inProofContext, ctx);
+                    if (!inProofContext && ctx != null) {
+                        ctx.bindLocal(l.name(), l.explicitType(), l.initializer());
+                    }
                 }
                 case VarStmt v -> {
                     if (!inProofContext) checkNoMathIntInType(v.explicitType(), v.span());
-                    checkRuntimeOrProofExpr(v.initializer(), inProofContext);
+                    checkRuntimeOrProofExpr(v.initializer(), inProofContext, ctx);
+                    if (!inProofContext && ctx != null) {
+                        ctx.bindVar(v.name(), v.explicitType(), v.initializer());
+                    }
                 }
-                case AssignStmt a -> checkRuntimeOrProofExpr(a.value(), inProofContext);
+                case AssignStmt a -> {
+                    checkRuntimeOrProofExpr(a.value(), inProofContext, ctx);
+                    if (!inProofContext && ctx != null) {
+                        ctx.assignVar(a.name(), a.value());
+                    }
+                }
                 case ReturnStmt r -> {
-                    if (r.value() != null) checkRuntimeOrProofExpr(r.value(), inProofContext);
+                    if (r.value() != null) checkRuntimeOrProofExpr(r.value(), inProofContext, ctx);
                 }
-                case ExprStmt es -> checkRuntimeOrProofExpr(es.expr(), inProofContext);
+                case ExprStmt es -> checkRuntimeOrProofExpr(es.expr(), inProofContext, ctx);
                 case TupleDestructureStmt td -> {
                     if (!inProofContext) {
                         for (var t : td.explicitTypes()) checkNoMathIntInType(t, td.span());
                     }
-                    checkRuntimeOrProofExpr(td.initializer(), inProofContext);
+                    checkRuntimeOrProofExpr(td.initializer(), inProofContext, ctx);
                 }
-                case InvariantStmt inv -> checkExprPurityAndHoles(inv.condition(), true, Set.of());
+                case InvariantStmt inv -> {
+                    checkExprPurityAndHoles(inv.condition(), true, Set.of());
+                    if (!inProofContext && ctx != null) {
+                        ctx.addAssumption(inv.condition());
+                    }
+                }
                 case ProofStmt proof -> checkBlockPurityAndHoles(proof.body(), true, Set.of());
-                case AssumeStmt assume -> checkExprPurityAndHoles(assume.condition(), true, Set.of());
+                case AssumeStmt assume -> {
+                    checkExprPurityAndHoles(assume.condition(), true, Set.of());
+                    if (!inProofContext && ctx != null) {
+                        ctx.addAssumption(assume.condition());
+                    }
+                }
             }
         }
         if (block.tailExpr() != null) {
-            checkRuntimeOrProofExpr(block.tailExpr(), inProofContext);
+            checkRuntimeOrProofExpr(block.tailExpr(), inProofContext, ctx);
         }
     }
 
-    private void checkRuntimeOrProofExpr(Expr expr, boolean inProofContext) {
+    private void checkRuntimeOrProofExpr(Expr expr, boolean inProofContext, CallSiteCtx ctx) {
         if (expr == null) return;
         switch (expr) {
             case HoleExpr hole -> {
@@ -211,42 +236,292 @@ public final class ProofChecker {
                         ));
                     }
                 }
-                checkRuntimeOrProofExpr(call.callee(), inProofContext);
-                for (var arg : call.args()) checkRuntimeOrProofExpr(arg, inProofContext);
+                checkRuntimeOrProofExpr(call.callee(), inProofContext, ctx);
+                for (var arg : call.args()) checkRuntimeOrProofExpr(arg, inProofContext, ctx);
+                if (!inProofContext && ctx != null && call.callee() instanceof IdentExpr id) {
+                    verifyCalleePreconditions(call, id.name(), ctx);
+                }
             }
-            case BlockExpr b -> checkBlock(b, inProofContext);
+            case BlockExpr b -> checkBlock(b, inProofContext, ctx != null ? ctx.fork(null) : null);
             case IfExpr i -> {
-                checkRuntimeOrProofExpr(i.condition(), inProofContext);
-                checkBlock(i.thenBranch(), inProofContext);
-                if (i.elseBranch() != null) checkRuntimeOrProofExpr(i.elseBranch(), inProofContext);
+                checkRuntimeOrProofExpr(i.condition(), inProofContext, ctx);
+                if (!inProofContext && ctx != null) {
+                    SmtExpr cond = ctx.vcGen.translateExecutableExpr(i.condition(), ctx.sorts, ctx.ssaEnv, ctx.longVars);
+                    SmtExpr thenFact = !VcGenerator.containsUnsupported(cond) ? cond : null;
+                    SmtExpr elseFact = thenFact != null ? new SmtExpr.Not(cond) : null;
+                    checkBlock(i.thenBranch(), false, ctx.fork(thenFact));
+                    if (i.elseBranch() != null) {
+                        CallSiteCtx elseCtx = ctx.fork(elseFact);
+                        if (i.elseBranch() instanceof BlockExpr eb) {
+                            checkBlock(eb, false, elseCtx);
+                        } else {
+                            checkRuntimeOrProofExpr(i.elseBranch(), false, elseCtx);
+                        }
+                    }
+                    Set<String> mutated = new LinkedHashSet<>();
+                    collectAssignedVars(i.thenBranch(), mutated);
+                    collectAssignedVars(i.elseBranch(), mutated);
+                    ctx.havocVars(mutated);
+                } else {
+                    checkBlock(i.thenBranch(), inProofContext, null);
+                    if (i.elseBranch() != null) checkRuntimeOrProofExpr(i.elseBranch(), inProofContext, null);
+                }
             }
             case MatchExpr m -> {
-                checkRuntimeOrProofExpr(m.scrutinee(), inProofContext);
-                for (var arm : m.arms()) checkRuntimeOrProofExpr(arm.body(), inProofContext);
+                checkRuntimeOrProofExpr(m.scrutinee(), inProofContext, ctx);
+                for (var arm : m.arms()) {
+                    checkRuntimeOrProofExpr(arm.body(), inProofContext, ctx != null ? ctx.fork(null) : null);
+                    if (!inProofContext && ctx != null) {
+                        Set<String> mutated = new LinkedHashSet<>();
+                        collectAssignedVars(arm.body(), mutated);
+                        ctx.havocVars(mutated);
+                    }
+                }
             }
             case WhileExpr w -> {
-                checkRuntimeOrProofExpr(w.condition(), inProofContext);
-                checkBlock(w.body(), inProofContext);
+                checkRuntimeOrProofExpr(w.condition(), inProofContext, ctx);
+                if (!inProofContext && ctx != null) {
+                    Set<String> mutated = new LinkedHashSet<>();
+                    collectAssignedVars(w.body(), mutated);
+                    CallSiteCtx bodyCtx = ctx.fork(null);
+                    bodyCtx.havocVars(mutated);
+                    SmtExpr cond = bodyCtx.vcGen.translateExecutableExpr(w.condition(), bodyCtx.sorts, bodyCtx.ssaEnv, bodyCtx.longVars);
+                    if (!VcGenerator.containsUnsupported(cond)) {
+                        bodyCtx.premises.add(cond);
+                    }
+                    checkBlock(w.body(), false, bodyCtx);
+                    ctx.havocVars(mutated);
+                } else {
+                    checkBlock(w.body(), inProofContext, null);
+                }
             }
             case ForExpr f -> {
-                checkRuntimeOrProofExpr(f.iterable(), inProofContext);
-                checkBlock(f.body(), inProofContext);
+                checkRuntimeOrProofExpr(f.iterable(), inProofContext, ctx);
+                checkBlock(f.body(), inProofContext, ctx != null ? ctx.fork(null) : null);
             }
-            case ScopeExpr s -> checkBlock(s.body(), inProofContext);
-            case ForkExpr f -> checkBlock(f.body(), inProofContext);
+            case ScopeExpr s -> checkBlock(s.body(), inProofContext, ctx != null ? ctx.fork(null) : null);
+            case ForkExpr f -> checkBlock(f.body(), inProofContext, ctx != null ? ctx.fork(null) : null);
             case BinaryExpr b -> {
-                checkRuntimeOrProofExpr(b.left(), inProofContext);
-                checkRuntimeOrProofExpr(b.right(), inProofContext);
+                checkRuntimeOrProofExpr(b.left(), inProofContext, ctx);
+                checkRuntimeOrProofExpr(b.right(), inProofContext, ctx);
             }
-            case UnaryExpr u -> checkRuntimeOrProofExpr(u.operand(), inProofContext);
-            case ParenExpr p -> checkRuntimeOrProofExpr(p.inner(), inProofContext);
-            case PropagateExpr p -> checkRuntimeOrProofExpr(p.inner(), inProofContext);
-            case ConsumeExpr c -> checkRuntimeOrProofExpr(c.target(), inProofContext);
-            case FieldAccessExpr fa -> checkRuntimeOrProofExpr(fa.object(), inProofContext);
+            case UnaryExpr u -> checkRuntimeOrProofExpr(u.operand(), inProofContext, ctx);
+            case ParenExpr p -> checkRuntimeOrProofExpr(p.inner(), inProofContext, ctx);
+            case PropagateExpr p -> checkRuntimeOrProofExpr(p.inner(), inProofContext, ctx);
+            case ConsumeExpr c -> checkRuntimeOrProofExpr(c.target(), inProofContext, ctx);
+            case FieldAccessExpr fa -> checkRuntimeOrProofExpr(fa.object(), inProofContext, ctx);
             case TupleExpr t -> {
-                for (var e : t.elements()) checkRuntimeOrProofExpr(e, inProofContext);
+                for (var e : t.elements()) checkRuntimeOrProofExpr(e, inProofContext, ctx);
             }
             default -> {}
+        }
+    }
+
+    private void verifyCalleePreconditions(CallExpr call, String calleeName, CallSiteCtx ctx) {
+        FnDecl callee = fnDecls.get(calleeName);
+        if (callee == null || callee.params().size() != call.args().size()) {
+            return;
+        }
+        List<ContractClause> calleeRequires = callee.contracts().stream()
+            .filter(c -> c.kind() == ContractClause.Kind.REQUIRES)
+            .toList();
+        if (calleeRequires.isEmpty()) {
+            return;
+        }
+
+        int callId = ctx.nextCallId();
+        Map<String, SmtExpr.Sort> callSorts = new LinkedHashMap<>(ctx.sorts);
+        List<SmtExpr> callPremises = new ArrayList<>(ctx.premises);
+        Map<String, String> calleeSsaEnv = new LinkedHashMap<>();
+
+        for (int i = 0; i < callee.params().size(); i++) {
+            Param p = callee.params().get(i);
+            SmtExpr.Sort pSort = VcGenerator.sortOfType(p.type());
+            String callParamName = "__callee$" + callId + "$" + p.name();
+            callSorts.put(callParamName, pSort);
+            calleeSsaEnv.put(p.name(), callParamName);
+
+            SmtExpr argExpr = ctx.vcGen.translateExecutableExpr(call.args().get(i), ctx.sorts, ctx.ssaEnv, ctx.longVars);
+            if (!VcGenerator.containsUnsupported(argExpr)) {
+                callPremises.add(new SmtExpr.Eq(new SmtExpr.Var(callParamName, pSort), argExpr));
+            }
+        }
+
+        for (var req : calleeRequires) {
+            SmtExpr reqExpr = ctx.vcGen.translateExpr(req.condition(), callSorts, calleeSsaEnv);
+            SmtExpr vc;
+            if (callPremises.isEmpty()) {
+                vc = reqExpr;
+            } else {
+                SmtExpr conj = callPremises.size() == 1 ? callPremises.get(0) : new SmtExpr.And(callPremises);
+                vc = new SmtExpr.Implies(conj, reqExpr);
+            }
+            runSmtAndReport(vc, callee.name(), call.span());
+        }
+    }
+
+    private static void collectAssignedVars(Expr expr, Set<String> out) {
+        if (expr == null) return;
+        switch (expr) {
+            case BlockExpr b -> {
+                for (var st : b.statements()) {
+                    switch (st) {
+                        case AssignStmt a -> out.add(a.name());
+                        case ExprStmt es -> collectAssignedVars(es.expr(), out);
+                        default -> {}
+                    }
+                }
+                collectAssignedVars(b.tailExpr(), out);
+            }
+            case IfExpr i -> {
+                collectAssignedVars(i.thenBranch(), out);
+                collectAssignedVars(i.elseBranch(), out);
+            }
+            case WhileExpr w -> collectAssignedVars(w.body(), out);
+            case MatchExpr m -> {
+                for (var arm : m.arms()) collectAssignedVars(arm.body(), out);
+            }
+            default -> {}
+        }
+    }
+
+    private static final class CallSiteCtx {
+        final VcGenerator vcGen;
+        final Map<String, SmtExpr.Sort> sorts;
+        final Map<String, String> ssaEnv;
+        final Map<String, Integer> ssaCounter;
+        final Set<String> longVars;
+        final List<SmtExpr> premises;
+        final int[] callCounter;
+
+        private CallSiteCtx(
+            VcGenerator vcGen,
+            Map<String, SmtExpr.Sort> sorts,
+            Map<String, String> ssaEnv,
+            Map<String, Integer> ssaCounter,
+            Set<String> longVars,
+            List<SmtExpr> premises,
+            int[] callCounter
+        ) {
+            this.vcGen = vcGen;
+            this.sorts = sorts;
+            this.ssaEnv = ssaEnv;
+            this.ssaCounter = ssaCounter;
+            this.longVars = longVars;
+            this.premises = premises;
+            this.callCounter = callCounter;
+        }
+
+        static CallSiteCtx forFn(FnDecl fn, VcGenerator vcGen) {
+            Map<String, SmtExpr.Sort> sorts = vcGen.collectSorts(fn.params(), fn.returnType());
+            Set<String> longVars = VcGenerator.collectLongVars(fn.params());
+            List<SmtExpr> premises = new ArrayList<>();
+            for (var c : fn.contracts()) {
+                if (c.kind() == ContractClause.Kind.REQUIRES) {
+                    SmtExpr req = vcGen.translateExpr(c.condition(), sorts);
+                    if (!VcGenerator.containsUnsupported(req)) {
+                        premises.add(req);
+                    }
+                }
+            }
+            return new CallSiteCtx(
+                vcGen,
+                sorts,
+                new LinkedHashMap<>(),
+                new LinkedHashMap<>(),
+                longVars,
+                premises,
+                new int[]{0}
+            );
+        }
+
+        CallSiteCtx fork(SmtExpr extraPremise) {
+            List<SmtExpr> nextPremises = new ArrayList<>(premises);
+            if (extraPremise != null && !VcGenerator.containsUnsupported(extraPremise)) {
+                nextPremises.add(extraPremise);
+            }
+            return new CallSiteCtx(
+                vcGen,
+                sorts,
+                new LinkedHashMap<>(ssaEnv),
+                ssaCounter,
+                new LinkedHashSet<>(longVars),
+                nextPremises,
+                callCounter
+            );
+        }
+
+        int nextCallId() {
+            return ++callCounter[0];
+        }
+
+        String freshSsa(String name, SmtExpr.Sort sort) {
+            int n = ssaCounter.merge(name, 1, Integer::sum);
+            String ssaName = name + "$ssa" + n;
+            sorts.put(ssaName, sort);
+            ssaEnv.put(name, ssaName);
+            return ssaName;
+        }
+
+        void bindLocal(String name, TypeExpr explicitType, Expr initializer) {
+            SmtExpr init = vcGen.translateExecutableExpr(initializer, sorts, ssaEnv, longVars);
+            SmtExpr.Sort sort = VcGenerator.sortOfType(explicitType);
+            String lhs = (ssaEnv.containsKey(name) || sorts.containsKey(name))
+                ? freshSsa(name, sort)
+                : name;
+            sorts.put(lhs, sort);
+            ssaEnv.put(name, lhs);
+            if (VcGenerator.isLongType(explicitType)) {
+                longVars.add(lhs);
+                longVars.add(name);
+            }
+            if (!VcGenerator.containsUnsupported(init)) {
+                premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), init));
+            }
+        }
+
+        void bindVar(String name, TypeExpr explicitType, Expr initializer) {
+            SmtExpr init = vcGen.translateExecutableExpr(initializer, sorts, ssaEnv, longVars);
+            SmtExpr.Sort sort = VcGenerator.sortOfType(explicitType);
+            String lhs = freshSsa(name, sort);
+            if (VcGenerator.isLongType(explicitType)) {
+                longVars.add(lhs);
+                longVars.add(name);
+            }
+            if (!VcGenerator.containsUnsupported(init)) {
+                premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), init));
+            }
+        }
+
+        void assignVar(String name, Expr value) {
+            SmtExpr rhs = vcGen.translateExecutableExpr(value, sorts, ssaEnv, longVars);
+            String prevName = ssaEnv.getOrDefault(name, name);
+            SmtExpr.Sort sort = sorts.getOrDefault(prevName, SmtExpr.Sort.INT);
+            String lhs = freshSsa(name, sort);
+            if (longVars.contains(prevName) || longVars.contains(name)) {
+                longVars.add(lhs);
+            }
+            if (!VcGenerator.containsUnsupported(rhs)) {
+                premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), rhs));
+            }
+        }
+
+        void addAssumption(Expr condExpr) {
+            SmtExpr cond = vcGen.translateExpr(condExpr, sorts, ssaEnv);
+            if (!VcGenerator.containsUnsupported(cond)) {
+                premises.add(cond);
+            }
+        }
+
+        void havocVars(Set<String> vars) {
+            for (String v : vars) {
+                String prevName = ssaEnv.getOrDefault(v, v);
+                SmtExpr.Sort sort = sorts.getOrDefault(prevName, SmtExpr.Sort.INT);
+                String lhs = freshSsa(v, sort);
+                if (longVars.contains(prevName) || longVars.contains(v)) {
+                    longVars.add(lhs);
+                }
+            }
         }
     }
 

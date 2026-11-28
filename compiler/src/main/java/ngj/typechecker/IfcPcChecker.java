@@ -184,23 +184,24 @@ public final class IfcPcChecker {
             }
         }
         if (fn.body() != null) {
-            checkBlock(fn.body(), untrustedVars, false);
+            checkBlock(fn.body(), untrustedVars, false, new LinkedHashSet<>());
         }
     }
 
-    private void checkBlock(BlockExpr block, Set<String> untrustedVars, boolean inUntrustedPc) {
+    private void checkBlock(BlockExpr block, Set<String> untrustedVars, boolean inUntrustedPc, Set<String> localDeclared) {
         if (block == null) return;
         for (var stmt : block.statements()) {
-            checkStmt(stmt, untrustedVars, inUntrustedPc);
+            checkStmt(stmt, untrustedVars, inUntrustedPc, localDeclared);
         }
         if (block.tailExpr() != null) {
             checkExpr(block.tailExpr(), untrustedVars, inUntrustedPc);
         }
     }
 
-    private void checkStmt(Statement stmt, Set<String> untrustedVars, boolean inUntrustedPc) {
+    private void checkStmt(Statement stmt, Set<String> untrustedVars, boolean inUntrustedPc, Set<String> localDeclared) {
         switch (stmt) {
             case ValStmt val -> {
+                localDeclared.add(val.name());
                 checkExpr(val.initializer(), untrustedVars, inUntrustedPc);
                 if (isValidatedExpr(val.initializer())) {
                     untrustedVars.remove(val.name());
@@ -209,6 +210,7 @@ public final class IfcPcChecker {
                 }
             }
             case LetStmt let -> {
+                localDeclared.add(let.name());
                 checkExpr(let.initializer(), untrustedVars, inUntrustedPc);
                 if (isValidatedExpr(let.initializer())) {
                     untrustedVars.remove(let.name());
@@ -217,6 +219,7 @@ public final class IfcPcChecker {
                 }
             }
             case VarStmt varStmt -> {
+                localDeclared.add(varStmt.name());
                 checkExpr(varStmt.initializer(), untrustedVars, inUntrustedPc);
                 if (isUntrustedType(varStmt.explicitType()) || isExprUntrusted(varStmt.initializer(), untrustedVars)) {
                     untrustedVars.add(varStmt.name());
@@ -224,7 +227,7 @@ public final class IfcPcChecker {
             }
             case AssignStmt assign -> {
                 checkExpr(assign.value(), untrustedVars, inUntrustedPc);
-                if (isExprUntrusted(assign.value(), untrustedVars)) {
+                if (inUntrustedPc || isExprUntrusted(assign.value(), untrustedVars)) {
                     untrustedVars.add(assign.name());
                 }
             }
@@ -242,34 +245,60 @@ public final class IfcPcChecker {
             case IfExpr ifExpr -> {
                 checkExpr(ifExpr.condition(), untrustedVars, inUntrustedPc);
                 boolean pc = inUntrustedPc || isExprUntrusted(ifExpr.condition(), untrustedVars);
-                checkBlock(ifExpr.thenBranch(), new LinkedHashSet<>(untrustedVars), pc);
+                Set<String> thenUntrusted = new LinkedHashSet<>(untrustedVars);
+                Set<String> thenDeclared = new LinkedHashSet<>();
+                checkBlock(ifExpr.thenBranch(), thenUntrusted, pc, thenDeclared);
+                thenUntrusted.removeAll(thenDeclared);
+
+                Set<String> elseUntrusted = new LinkedHashSet<>();
                 if (ifExpr.elseBranch() != null) {
+                    Set<String> elseBranchUntrusted = new LinkedHashSet<>(untrustedVars);
                     if (ifExpr.elseBranch() instanceof BlockExpr eb) {
-                        checkBlock(eb, new LinkedHashSet<>(untrustedVars), pc);
+                        Set<String> elseDeclared = new LinkedHashSet<>();
+                        checkBlock(eb, elseBranchUntrusted, pc, elseDeclared);
+                        elseBranchUntrusted.removeAll(elseDeclared);
                     } else {
-                        checkExpr(ifExpr.elseBranch(), new LinkedHashSet<>(untrustedVars), pc);
+                        checkExpr(ifExpr.elseBranch(), elseBranchUntrusted, pc);
                     }
+                    elseUntrusted.addAll(elseBranchUntrusted);
                 }
+
+                untrustedVars.addAll(thenUntrusted);
+                untrustedVars.addAll(elseUntrusted);
             }
             case MatchExpr matchExpr -> {
                 checkExpr(matchExpr.scrutinee(), untrustedVars, inUntrustedPc);
                 boolean validatedScrutinee = isValidatedExpr(matchExpr.scrutinee());
                 boolean pc = inUntrustedPc || (!validatedScrutinee && isExprUntrusted(matchExpr.scrutinee(), untrustedVars));
+                Set<String> mergedArms = new LinkedHashSet<>();
                 for (var arm : matchExpr.arms()) {
                     Set<String> armUntrusted = new LinkedHashSet<>(untrustedVars);
+                    Set<String> armDeclared = new LinkedHashSet<>();
                     if (validatedScrutinee && arm.pattern() instanceof ConstructorPattern cp
                         && (cp.typePath().equals("Ok") || cp.typePath().endsWith(".Ok"))) {
                         for (var f : cp.fields()) {
                             armUntrusted.remove(f.name());
+                            armDeclared.add(f.name());
                         }
                     }
-                    checkExpr(arm.body(), armUntrusted, pc);
+                    if (arm.body() instanceof BlockExpr eb) {
+                        checkBlock(eb, armUntrusted, pc, armDeclared);
+                    } else {
+                        checkExpr(arm.body(), armUntrusted, pc);
+                    }
+                    armUntrusted.removeAll(armDeclared);
+                    mergedArms.addAll(armUntrusted);
                 }
+                untrustedVars.addAll(mergedArms);
             }
             case WhileExpr whileExpr -> {
                 checkExpr(whileExpr.condition(), untrustedVars, inUntrustedPc);
                 boolean pc = inUntrustedPc || isExprUntrusted(whileExpr.condition(), untrustedVars);
-                checkBlock(whileExpr.body(), new LinkedHashSet<>(untrustedVars), pc);
+                Set<String> bodyUntrusted = new LinkedHashSet<>(untrustedVars);
+                Set<String> bodyDeclared = new LinkedHashSet<>();
+                checkBlock(whileExpr.body(), bodyUntrusted, pc, bodyDeclared);
+                bodyUntrusted.removeAll(bodyDeclared);
+                untrustedVars.addAll(bodyUntrusted);
             }
             case CallExpr call -> {
                 if (inUntrustedPc) {
@@ -280,9 +309,27 @@ public final class IfcPcChecker {
                     checkExpr(arg, untrustedVars, inUntrustedPc);
                 }
             }
-            case BlockExpr b -> checkBlock(b, new LinkedHashSet<>(untrustedVars), inUntrustedPc);
-            case ScopeExpr s -> checkBlock(s.body(), new LinkedHashSet<>(untrustedVars), inUntrustedPc);
-            case ForkExpr f -> checkBlock(f.body(), new LinkedHashSet<>(untrustedVars), inUntrustedPc);
+            case BlockExpr b -> {
+                Set<String> blockUntrusted = new LinkedHashSet<>(untrustedVars);
+                Set<String> blockDeclared = new LinkedHashSet<>();
+                checkBlock(b, blockUntrusted, inUntrustedPc, blockDeclared);
+                blockUntrusted.removeAll(blockDeclared);
+                untrustedVars.addAll(blockUntrusted);
+            }
+            case ScopeExpr s -> {
+                Set<String> scopeUntrusted = new LinkedHashSet<>(untrustedVars);
+                Set<String> scopeDeclared = new LinkedHashSet<>();
+                checkBlock(s.body(), scopeUntrusted, inUntrustedPc, scopeDeclared);
+                scopeUntrusted.removeAll(scopeDeclared);
+                untrustedVars.addAll(scopeUntrusted);
+            }
+            case ForkExpr f -> {
+                Set<String> forkUntrusted = new LinkedHashSet<>(untrustedVars);
+                Set<String> forkDeclared = new LinkedHashSet<>();
+                checkBlock(f.body(), forkUntrusted, inUntrustedPc, forkDeclared);
+                forkUntrusted.removeAll(forkDeclared);
+                untrustedVars.addAll(forkUntrusted);
+            }
             case BinaryExpr b -> {
                 checkExpr(b.left(), untrustedVars, inUntrustedPc);
                 checkExpr(b.right(), untrustedVars, inUntrustedPc);
