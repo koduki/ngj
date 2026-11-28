@@ -14,24 +14,30 @@ import java.util.regex.Pattern;
 public final class SecretRedactor {
     public static final String MASK = "Secret(****)";
 
-    private static final Pattern SECRET_WRAPPER_PATTERN = Pattern.compile("Secret\\([^)]*\\)");
+    private static final String QUOTED_STRING_REGEX = "\"(?:\\\\.|[^\"\\\\])*\"";
+    private static final String QUOTED_CHAR_REGEX = "'(?:\\\\.|[^'\\\\])*'";
+    private static final String NONSTR_LITERAL_REGEX = "(?:-?\\d+L?|" + QUOTED_CHAR_REGEX + "|true|false)\\b";
+
+    private static final Pattern SECRET_WRAPPER_PATTERN = Pattern.compile(
+        "Secret\\((?:" + QUOTED_STRING_REGEX + "|[^)])*\\)"
+    );
     private static final Pattern STACK_TRACE_AT_PATTERN = Pattern.compile("(?m)^\\s*at\\s+[\\w.$<>]+\\([^)]*\\)\\r?\\n?");
     private static final Pattern STACK_TRACE_MORE_PATTERN = Pattern.compile("(?m)^\\s*\\.\\.\\.\\s+\\d+\\s+more\\r?\\n?");
     private static final Pattern CAUSED_BY_PATTERN = Pattern.compile("(?m)^Caused by:\\s+.*\\r?\\n?");
     private static final Pattern SECRET_TYPED_INIT_PATTERN = Pattern.compile(
-        "(Secret\\s*(?:<[^>]+>)?\\s*=\\s*)\"[^\"]*\""
+        "(Secret\\s*(?:<[^>]+>)?\\s*=\\s*)" + QUOTED_STRING_REGEX
     );
     private static final Pattern SECRET_TYPED_NONSTR_INIT_PATTERN = Pattern.compile(
-        "(Secret\\s*(?:<[^>]+>)?\\s*=\\s*)(-?\\d+L?|'[^']*'|true|false)\\b"
+        "(Secret\\s*(?:<[^>]+>)?\\s*=\\s*)(" + NONSTR_LITERAL_REGEX + ")"
     );
     private static final Pattern SECRET_OF_LITERAL_PATTERN = Pattern.compile(
-        "(Secret\\.of\\s*\\(\\s*)\"[^\"]*\"(\\s*\\))"
+        "(Secret\\.of\\s*\\(\\s*)" + QUOTED_STRING_REGEX + "(\\s*\\))"
     );
     private static final Pattern SECRET_OF_NONSTR_LITERAL_PATTERN = Pattern.compile(
-        "(Secret\\.of\\s*\\(\\s*)(-?\\d+L?|'[^']*'|true|false)(\\s*\\))"
+        "(Secret\\.of\\s*\\(\\s*)(" + NONSTR_LITERAL_REGEX + ")(\\s*\\))"
     );
     private static final Pattern ENV_SECRET_QUOTED_ASSIGN_PATTERN = Pattern.compile(
-        "(?i)(\\b[a-z_][a-z0-9_]*(?:secret|token|password|passwd|api_key|apikey|private_key|credential|auth)[a-z0-9_]*(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)\"[^\"]*\""
+        "(?i)(\\b[a-z_][a-z0-9_]*(?:secret|token|password|passwd|api_key|apikey|private_key|credential|auth)[a-z0-9_]*(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)" + QUOTED_STRING_REGEX
     );
     private static final Pattern ENV_SECRET_ASSIGN_PATTERN = Pattern.compile(
         "(?i)\\b([a-z_][a-z0-9_]*(?:secret|token|password|passwd|api_key|apikey|private_key|credential|auth)[a-z0-9_]*)\\s*(=|:)\\s*([^\\s,;\"'}]+)"
@@ -80,10 +86,10 @@ public final class SecretRedactor {
             for (String typeName : secretTypeNames) {
                 if (typeName == null || typeName.isBlank()) continue;
                 String quoted = Pattern.quote(typeName);
-                result = Pattern.compile("(\\b" + quoted + "(?:\\s*<[^>]*>)?\\s*=\\s*)\"[^\"]*\"")
+                result = Pattern.compile("(\\b" + quoted + "(?:\\s*<[^>]*>)?\\s*=\\s*)" + QUOTED_STRING_REGEX)
                     .matcher(result)
                     .replaceAll("$1\"" + MASK + "\"");
-                result = Pattern.compile("(\\b" + quoted + "(?:\\s*<[^>]*>)?\\s*=\\s*)(-?\\d+L?|'[^']*'|true|false)\\b")
+                result = Pattern.compile("(\\b" + quoted + "(?:\\s*<[^>]*>)?\\s*=\\s*)(" + NONSTR_LITERAL_REGEX + ")")
                     .matcher(result)
                     .replaceAll("$1" + MASK);
             }
@@ -92,10 +98,10 @@ public final class SecretRedactor {
             for (String key : secretKeys) {
                 if (key == null || key.isBlank()) continue;
                 String quoted = Pattern.quote(key);
-                result = Pattern.compile("(\\b" + quoted + "(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)\"[^\"]*\"")
+                result = Pattern.compile("(\\b" + quoted + "(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)" + QUOTED_STRING_REGEX)
                     .matcher(result)
                     .replaceAll("$1\"" + MASK + "\"");
-                result = Pattern.compile("(\\b" + quoted + "(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)(-?\\d+L?|'[^']*'|true|false)\\b")
+                result = Pattern.compile("(\\b" + quoted + "(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)(" + NONSTR_LITERAL_REGEX + ")")
                     .matcher(result)
                     .replaceAll("$1" + MASK);
             }

@@ -21,6 +21,8 @@ public final class CapabilityChecker {
     private final Map<String, ProtocolDecl> protocols = new HashMap<>();
     private final Map<String, TypeAliasDecl> typeAliases = new HashMap<>();
     private final Map<String, TopLevelDecl> typeDecls = new HashMap<>();
+    private final Map<String, Set<String>> fnConsumedParamPaths = new HashMap<>();
+    private final Set<String> computingConsumedParams = new LinkedHashSet<>();
     private final String profile;
     private final Set<String> trustedAllowlist;
 
@@ -42,6 +44,8 @@ public final class CapabilityChecker {
         protocols.clear();
         typeAliases.clear();
         typeDecls.clear();
+        fnConsumedParamPaths.clear();
+        computingConsumedParams.clear();
 
         for (var unit : units) {
             for (var decl : unit.declarations()) {
@@ -101,6 +105,14 @@ public final class CapabilityChecker {
             }
         }
 
+        CapEnv env = createFnEnv(fn);
+        if (fn.body() != null) {
+            checkBlock(fn.body(), env, true);
+            fnConsumedParamPaths.put(fn.name(), extractConsumedParamPaths(fn, env));
+        }
+    }
+
+    private CapEnv createFnEnv(FnDecl fn) {
         CapEnv env = new CapEnv(fn.effects(), fn.captureBounds());
         for (var param : fn.params()) {
             TypeExpr resolvedParamType = resolveTypeAlias(param.type());
@@ -113,10 +125,46 @@ public final class CapabilityChecker {
             }
             linkCaptureTargets(param.name(), resolvedParamType, env);
         }
+        return env;
+    }
 
-        if (fn.body() != null) {
-            checkBlock(fn.body(), env, true);
+    private Set<String> getConsumedParamPaths(FnDecl fn) {
+        if (fn == null || fn.body() == null) return Set.of();
+        Set<String> cached = fnConsumedParamPaths.get(fn.name());
+        if (cached != null) return cached;
+        if (!computingConsumedParams.add(fn.name())) return Set.of();
+        int diagBaseline = diagnostics.size();
+        try {
+            CapEnv summaryEnv = createFnEnv(fn);
+            checkBlock(fn.body(), summaryEnv, false);
+            Set<String> consumed = extractConsumedParamPaths(fn, summaryEnv);
+            fnConsumedParamPaths.put(fn.name(), consumed);
+            return consumed;
+        } finally {
+            computingConsumedParams.remove(fn.name());
+            while (diagnostics.size() > diagBaseline) {
+                diagnostics.remove(diagnostics.size() - 1);
+            }
         }
+    }
+
+    private Set<String> extractConsumedParamPaths(FnDecl fn, CapEnv env) {
+        Set<String> consumed = new LinkedHashSet<>();
+        for (var param : fn.params()) {
+            String pName = param.name();
+            CapState ps = env.states.get(pName);
+            if (ps == CapState.CONSUMED || ps == CapState.MAYBE_CONSUMED) {
+                consumed.add(pName);
+            }
+            String prefix = pName + ".";
+            for (var entry : env.states.entrySet()) {
+                if (entry.getKey().startsWith(prefix)
+                    && (entry.getValue() == CapState.CONSUMED || entry.getValue() == CapState.MAYBE_CONSUMED)) {
+                    consumed.add(entry.getKey());
+                }
+            }
+        }
+        return consumed;
     }
 
     private void checkBlock(BlockExpr block, CapEnv env, boolean isFunctionBody) {
@@ -471,6 +519,7 @@ public final class CapabilityChecker {
                 for (var eff : fn.effects()) {
                     requireEffect(eff, env, call.span());
                 }
+                Set<String> calleeConsumed = getConsumedParamPaths(fn);
                 for (int i = 0; i < Math.min(fn.params().size(), call.args().size()); i++) {
                     Param p = fn.params().get(i);
                     Expr arg = call.args().get(i);
@@ -506,6 +555,19 @@ public final class CapabilityChecker {
                                     ));
                                 }
                                 recordAccess(target, VarMode.UPDATE, env, arg.span());
+                            }
+                        }
+                        if (!calleeConsumed.isEmpty()) {
+                            if (calleeConsumed.contains(p.name())) {
+                                consumeExprTargets(arg, env, arg.span() != null ? arg.span() : call.span());
+                            } else {
+                                String prefix = p.name() + ".";
+                                for (String consumedPath : calleeConsumed) {
+                                    if (consumedPath.startsWith(prefix)) {
+                                        String suffix = consumedPath.substring(prefix.length());
+                                        consumeExprFieldPath(arg, suffix, env, arg.span() != null ? arg.span() : call.span());
+                                    }
+                                }
                             }
                         }
                     }
@@ -880,6 +942,21 @@ public final class CapabilityChecker {
         }
     }
 
+    private void consumeExprFieldPath(Expr baseArg, String fieldPath, CapEnv env, SourceSpan span) {
+        if (baseArg == null || fieldPath == null || fieldPath.isEmpty()) return;
+        Expr cur = baseArg;
+        while (cur instanceof ParenExpr p) cur = p.inner();
+        for (String seg : fieldPath.split("\\.")) {
+            if (!seg.isEmpty()) {
+                cur = new FieldAccessExpr(cur, seg, span);
+            }
+        }
+        if (cur instanceof FieldAccessExpr fa) {
+            checkFieldAccessOwnership(fa, env);
+        }
+        consumeExprTargets(cur, env, span);
+    }
+
     private String registerSyntheticField(String owner, String fieldName, TypeExpr fieldType, CapEnv env) {
         String key = owner + "." + fieldName;
         env.syntheticChildren.computeIfAbsent(owner, k -> new LinkedHashSet<>()).add(key);
@@ -1005,14 +1082,28 @@ public final class CapabilityChecker {
     }
 
     private AliasGraph computeAliasGraph(Expr init, CapEnv env, Map<String, AliasGraph> localGraphs) {
+        return computeAliasGraph(init, env, localGraphs, Map.of(), false, new LinkedHashSet<>());
+    }
+
+    private AliasGraph computeAliasGraph(
+        Expr init,
+        CapEnv env,
+        Map<String, AliasGraph> localGraphs,
+        Map<String, TypeExpr> localTypes,
+        boolean inCalleeBody,
+        Set<String> visitingFns
+    ) {
         if (init == null) return AliasGraph.EMPTY;
         return switch (init) {
             case ConsumeExpr _ -> AliasGraph.EMPTY; // Ownership transferred; source already consumed
-            case ParenExpr p -> computeAliasGraph(p.inner(), env, localGraphs);
-            case PropagateExpr p -> computeAliasGraph(p.inner(), env, localGraphs);
+            case ParenExpr p -> computeAliasGraph(p.inner(), env, localGraphs, localTypes, inCalleeBody, visitingFns);
+            case PropagateExpr p -> computeAliasGraph(p.inner(), env, localGraphs, localTypes, inCalleeBody, visitingFns);
             case IdentExpr id -> {
                 if (localGraphs.containsKey(id.name())) {
                     yield localGraphs.get(id.name());
+                }
+                if (inCalleeBody) {
+                    yield AliasGraph.EMPTY;
                 }
                 Set<String> roots = env.resolveAllRoots(id.name());
                 AliasGraph stored = env.aliasGraphs.get(id.name());
@@ -1026,7 +1117,7 @@ public final class CapabilityChecker {
             case TupleExpr t -> {
                 Map<Integer, AliasGraph> elems = new LinkedHashMap<>();
                 for (int i = 0; i < t.elements().size(); i++) {
-                    AliasGraph eg = computeAliasGraph(t.elements().get(i), env, localGraphs);
+                    AliasGraph eg = computeAliasGraph(t.elements().get(i), env, localGraphs, localTypes, inCalleeBody, visitingFns);
                     if (!eg.isEmpty()) {
                         elems.put(i, eg);
                     }
@@ -1036,7 +1127,7 @@ public final class CapabilityChecker {
             case ConstructorExpr c -> {
                 Map<String, AliasGraph> fields = new LinkedHashMap<>();
                 for (var f : c.fields()) {
-                    AliasGraph fg = computeAliasGraph(f.value(), env, localGraphs);
+                    AliasGraph fg = computeAliasGraph(f.value(), env, localGraphs, localTypes, inCalleeBody, visitingFns);
                     if (!fg.isEmpty()) {
                         fields.put(f.name(), fg);
                     }
@@ -1044,12 +1135,14 @@ public final class CapabilityChecker {
                 yield fields.isEmpty() ? AliasGraph.EMPTY : new AliasGraph(Set.of(), Map.of(), fields);
             }
             case CallExpr c -> {
-                if (c.callee() instanceof IdentExpr id) {
+                Expr rawCallee = c.callee();
+                while (rawCallee instanceof ParenExpr p) rawCallee = p.inner();
+                if (rawCallee instanceof IdentExpr id) {
                     TopLevelDecl td = typeDecls.get(id.name());
                     if (td instanceof RecordDecl r) {
                         Map<String, AliasGraph> fields = new LinkedHashMap<>();
                         for (int i = 0; i < Math.min(r.params().size(), c.args().size()); i++) {
-                            AliasGraph fg = computeAliasGraph(c.args().get(i), env, localGraphs);
+                            AliasGraph fg = computeAliasGraph(c.args().get(i), env, localGraphs, localTypes, inCalleeBody, visitingFns);
                             if (!fg.isEmpty()) {
                                 fields.put(r.params().get(i).name(), fg);
                             }
@@ -1059,18 +1152,77 @@ public final class CapabilityChecker {
                     if (td instanceof DataDecl d) {
                         Map<String, AliasGraph> fields = new LinkedHashMap<>();
                         for (int i = 0; i < Math.min(d.fields().size(), c.args().size()); i++) {
-                            AliasGraph fg = computeAliasGraph(c.args().get(i), env, localGraphs);
+                            AliasGraph fg = computeAliasGraph(c.args().get(i), env, localGraphs, localTypes, inCalleeBody, visitingFns);
                             if (!fg.isEmpty()) {
                                 fields.put(d.fields().get(i).name(), fg);
                             }
                         }
                         yield fields.isEmpty() ? AliasGraph.EMPTY : new AliasGraph(Set.of(), Map.of(), fields);
                     }
+                    FnDecl fn = fnDecls.get(id.name());
+                    if (fn != null) {
+                        if (fn.body() != null && visitingFns.add(fn.name())) {
+                            try {
+                                Map<String, AliasGraph> paramGraphs = new LinkedHashMap<>();
+                                Map<String, TypeExpr> paramTypes = new LinkedHashMap<>();
+                                Set<String> calleeConsumed = getConsumedParamPaths(fn);
+                                for (int i = 0; i < fn.params().size(); i++) {
+                                    Param p = fn.params().get(i);
+                                    TypeExpr pt = resolveTypeAlias(p.type());
+                                    if (pt != null) {
+                                        paramTypes.put(p.name(), pt);
+                                    }
+                                    if (!p.isConsume() && !calleeConsumed.contains(p.name()) && i < c.args().size()) {
+                                        paramGraphs.put(
+                                            p.name(),
+                                            computeAliasGraph(c.args().get(i), env, localGraphs, localTypes, inCalleeBody, visitingFns)
+                                        );
+                                    } else {
+                                        paramGraphs.put(p.name(), AliasGraph.EMPTY);
+                                    }
+                                }
+                                yield collectBlockReturnAliasGraph(fn.body(), env, paramGraphs, paramTypes, visitingFns);
+                            } finally {
+                                visitingFns.remove(fn.name());
+                            }
+                        }
+                        // Recursive call fallback: conservatively preserve non-consumed resource args if returning non-primitive
+                        TypeExpr retType = resolveTypeAlias(fn.returnType());
+                        if (!isPrimitiveValueType(retType)) {
+                            AliasGraph merged = AliasGraph.EMPTY;
+                            for (int i = 0; i < Math.min(fn.params().size(), c.args().size()); i++) {
+                                if (!fn.params().get(i).isConsume()) {
+                                    AliasGraph ag = computeAliasGraph(c.args().get(i), env, localGraphs, localTypes, inCalleeBody, visitingFns);
+                                    if (containsResourceOwnership(ag, env)) {
+                                        merged = AliasGraph.merge(merged, ag);
+                                    }
+                                }
+                            }
+                            yield merged;
+                        }
+                        yield AliasGraph.EMPTY;
+                    }
+                }
+                if (rawCallee instanceof FieldAccessExpr) {
+                    yield AliasGraph.EMPTY;
+                }
+                // Higher-order callback or opaque function call returning a non-primitive value
+                TypeExpr calleeType = resolveTypeAlias(inferExprType(rawCallee, env, localTypes, inCalleeBody));
+                TypeExpr retType = calleeType instanceof FunctionTypeExpr ft ? resolveTypeAlias(ft.returnType()) : null;
+                if (retType == null || !isPrimitiveValueType(retType)) {
+                    AliasGraph merged = AliasGraph.EMPTY;
+                    for (var arg : c.args()) {
+                        AliasGraph ag = computeAliasGraph(arg, env, localGraphs, localTypes, inCalleeBody, visitingFns);
+                        if (containsResourceOwnership(ag, env)) {
+                            merged = AliasGraph.merge(merged, ag);
+                        }
+                    }
+                    yield merged;
                 }
                 yield AliasGraph.EMPTY;
             }
             case FieldAccessExpr fa -> {
-                AliasGraph objGraph = computeAliasGraph(fa.object(), env, localGraphs);
+                AliasGraph objGraph = computeAliasGraph(fa.object(), env, localGraphs, localTypes, inCalleeBody, visitingFns);
                 AliasGraph fieldGraph = objGraph.fieldAt(fa.fieldName());
                 if (!fieldGraph.isEmpty()) {
                     yield fieldGraph;
@@ -1080,7 +1232,7 @@ public final class CapabilityChecker {
                     AliasGraph elemGraph = objGraph.elementAt(idx);
                     if (!elemGraph.isEmpty()) yield elemGraph;
                 } catch (NumberFormatException ignored) {}
-                TypeExpr fieldType = resolveFieldType(inferExprType(fa.object(), env), fa.fieldName());
+                TypeExpr fieldType = resolveFieldType(inferExprType(fa.object(), env, localTypes, inCalleeBody), fa.fieldName());
                 if (!objGraph.directRoots().isEmpty() && !isPrimitiveValueType(fieldType)) {
                     Set<String> synthRoots = new LinkedHashSet<>();
                     for (String owner : objGraph.directRoots()) {
@@ -1095,40 +1247,202 @@ public final class CapabilityChecker {
                 yield AliasGraph.EMPTY;
             }
             case IfExpr i -> {
-                AliasGraph thenG = computeAliasGraph(i.thenBranch(), env, localGraphs);
-                AliasGraph elseG = i.elseBranch() != null ? computeAliasGraph(i.elseBranch(), env, localGraphs) : AliasGraph.EMPTY;
+                AliasGraph thenG = computeAliasGraph(i.thenBranch(), env, localGraphs, localTypes, inCalleeBody, visitingFns);
+                AliasGraph elseG = i.elseBranch() != null
+                    ? computeAliasGraph(i.elseBranch(), env, localGraphs, localTypes, inCalleeBody, visitingFns)
+                    : AliasGraph.EMPTY;
                 yield AliasGraph.merge(thenG, elseG);
             }
             case MatchExpr m -> {
                 AliasGraph acc = AliasGraph.EMPTY;
                 for (var arm : m.arms()) {
-                    acc = AliasGraph.merge(acc, computeAliasGraph(arm.body(), env, localGraphs));
+                    acc = AliasGraph.merge(acc, computeAliasGraph(arm.body(), env, localGraphs, localTypes, inCalleeBody, visitingFns));
                 }
                 yield acc;
             }
             case BlockExpr b -> {
                 Map<String, AliasGraph> inner = new LinkedHashMap<>(localGraphs);
+                Map<String, TypeExpr> innerTypes = new LinkedHashMap<>(localTypes);
                 for (var st : b.statements()) {
                     switch (st) {
-                        case ValStmt v -> inner.put(v.name(), computeAliasGraph(v.initializer(), env, inner));
-                        case LetStmt l -> inner.put(l.name(), computeAliasGraph(l.initializer(), env, inner));
-                        case VarStmt v -> inner.put(v.name(), computeAliasGraph(v.initializer(), env, inner));
-                        case AssignStmt a -> inner.put(a.name(), computeAliasGraph(a.value(), env, inner));
+                        case ValStmt v -> {
+                            inner.put(v.name(), computeAliasGraph(v.initializer(), env, inner, innerTypes, inCalleeBody, visitingFns));
+                            TypeExpr vt = v.explicitType() != null ? resolveTypeAlias(v.explicitType()) : inferExprType(v.initializer(), env, innerTypes, inCalleeBody);
+                            if (vt != null) innerTypes.put(v.name(), vt);
+                        }
+                        case LetStmt l -> {
+                            inner.put(l.name(), computeAliasGraph(l.initializer(), env, inner, innerTypes, inCalleeBody, visitingFns));
+                            TypeExpr lt = l.explicitType() != null ? resolveTypeAlias(l.explicitType()) : inferExprType(l.initializer(), env, innerTypes, inCalleeBody);
+                            if (lt != null) innerTypes.put(l.name(), lt);
+                        }
+                        case VarStmt v -> {
+                            inner.put(v.name(), computeAliasGraph(v.initializer(), env, inner, innerTypes, inCalleeBody, visitingFns));
+                            TypeExpr vt = v.explicitType() != null ? resolveTypeAlias(v.explicitType()) : inferExprType(v.initializer(), env, innerTypes, inCalleeBody);
+                            if (vt != null) innerTypes.put(v.name(), vt);
+                        }
+                        case AssignStmt a -> inner.put(a.name(), computeAliasGraph(a.value(), env, inner, innerTypes, inCalleeBody, visitingFns));
                         case TupleDestructureStmt td -> {
-                            AliasGraph tg = computeAliasGraph(td.initializer(), env, inner);
+                            AliasGraph tg = computeAliasGraph(td.initializer(), env, inner, innerTypes, inCalleeBody, visitingFns);
                             for (int i = 0; i < td.names().size(); i++) {
                                 inner.put(td.names().get(i), tg.elementAt(i));
+                                TypeExpr et = i < td.explicitTypes().size() ? resolveTypeAlias(td.explicitTypes().get(i)) : null;
+                                if (et != null) innerTypes.put(td.names().get(i), et);
                             }
                         }
                         default -> {}
                     }
                 }
-                yield b.tailExpr() != null ? computeAliasGraph(b.tailExpr(), env, inner) : AliasGraph.EMPTY;
+                yield b.tailExpr() != null ? computeAliasGraph(b.tailExpr(), env, inner, innerTypes, inCalleeBody, visitingFns) : AliasGraph.EMPTY;
             }
-            case ScopeExpr s -> computeAliasGraph(s.body(), env, localGraphs);
-            case ForkExpr f -> computeAliasGraph(f.body(), env, localGraphs);
+            case ScopeExpr s -> computeAliasGraph(s.body(), env, localGraphs, localTypes, inCalleeBody, visitingFns);
+            case ForkExpr f -> computeAliasGraph(f.body(), env, localGraphs, localTypes, inCalleeBody, visitingFns);
             default -> AliasGraph.EMPTY;
         };
+    }
+
+    private AliasGraph collectBlockReturnAliasGraph(
+        BlockExpr block,
+        CapEnv env,
+        Map<String, AliasGraph> localGraphs,
+        Map<String, TypeExpr> localTypes,
+        Set<String> visitingFns
+    ) {
+        if (block == null) return AliasGraph.EMPTY;
+        Map<String, AliasGraph> inner = new LinkedHashMap<>(localGraphs);
+        Map<String, TypeExpr> innerTypes = new LinkedHashMap<>(localTypes);
+        AliasGraph acc = AliasGraph.EMPTY;
+        for (var st : block.statements()) {
+            switch (st) {
+                case ValStmt v -> {
+                    acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(v.initializer(), env, inner, innerTypes, visitingFns));
+                    inner.put(v.name(), computeAliasGraph(v.initializer(), env, inner, innerTypes, true, visitingFns));
+                    TypeExpr vt = v.explicitType() != null ? resolveTypeAlias(v.explicitType()) : inferExprType(v.initializer(), env, innerTypes, true);
+                    if (vt != null) innerTypes.put(v.name(), vt);
+                }
+                case LetStmt l -> {
+                    acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(l.initializer(), env, inner, innerTypes, visitingFns));
+                    inner.put(l.name(), computeAliasGraph(l.initializer(), env, inner, innerTypes, true, visitingFns));
+                    TypeExpr lt = l.explicitType() != null ? resolveTypeAlias(l.explicitType()) : inferExprType(l.initializer(), env, innerTypes, true);
+                    if (lt != null) innerTypes.put(l.name(), lt);
+                }
+                case VarStmt v -> {
+                    acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(v.initializer(), env, inner, innerTypes, visitingFns));
+                    inner.put(v.name(), computeAliasGraph(v.initializer(), env, inner, innerTypes, true, visitingFns));
+                    TypeExpr vt = v.explicitType() != null ? resolveTypeAlias(v.explicitType()) : inferExprType(v.initializer(), env, innerTypes, true);
+                    if (vt != null) innerTypes.put(v.name(), vt);
+                }
+                case AssignStmt a -> {
+                    acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(a.value(), env, inner, innerTypes, visitingFns));
+                    inner.put(a.name(), computeAliasGraph(a.value(), env, inner, innerTypes, true, visitingFns));
+                }
+                case TupleDestructureStmt td -> {
+                    acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(td.initializer(), env, inner, innerTypes, visitingFns));
+                    AliasGraph tg = computeAliasGraph(td.initializer(), env, inner, innerTypes, true, visitingFns);
+                    for (int i = 0; i < td.names().size(); i++) {
+                        inner.put(td.names().get(i), tg.elementAt(i));
+                        TypeExpr et = i < td.explicitTypes().size() ? resolveTypeAlias(td.explicitTypes().get(i)) : null;
+                        if (et != null) innerTypes.put(td.names().get(i), et);
+                    }
+                }
+                case ReturnStmt r -> {
+                    if (r.value() != null) {
+                        acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(r.value(), env, inner, innerTypes, visitingFns));
+                        acc = AliasGraph.merge(acc, computeAliasGraph(r.value(), env, inner, innerTypes, true, visitingFns));
+                    }
+                }
+                case ExprStmt es -> acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(es.expr(), env, inner, innerTypes, visitingFns));
+                default -> {}
+            }
+        }
+        if (block.tailExpr() != null) {
+            acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(block.tailExpr(), env, inner, innerTypes, visitingFns));
+            acc = AliasGraph.merge(acc, computeAliasGraph(block.tailExpr(), env, inner, innerTypes, true, visitingFns));
+        }
+        return acc;
+    }
+
+    private AliasGraph collectExprReturnAliasGraph(
+        Expr expr,
+        CapEnv env,
+        Map<String, AliasGraph> localGraphs,
+        Map<String, TypeExpr> localTypes,
+        Set<String> visitingFns
+    ) {
+        if (expr == null) return AliasGraph.EMPTY;
+        return switch (expr) {
+            case BlockExpr b -> collectBlockReturnAliasGraph(b, env, localGraphs, localTypes, visitingFns);
+            case ScopeExpr s -> collectBlockReturnAliasGraph(s.body(), env, localGraphs, localTypes, visitingFns);
+            case IfExpr i -> AliasGraph.merge(
+                collectExprReturnAliasGraph(i.condition(), env, localGraphs, localTypes, visitingFns),
+                AliasGraph.merge(
+                    collectBlockReturnAliasGraph(i.thenBranch(), env, localGraphs, localTypes, visitingFns),
+                    collectExprReturnAliasGraph(i.elseBranch(), env, localGraphs, localTypes, visitingFns)
+                )
+            );
+            case MatchExpr m -> {
+                AliasGraph acc = collectExprReturnAliasGraph(m.scrutinee(), env, localGraphs, localTypes, visitingFns);
+                for (var arm : m.arms()) {
+                    acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(arm.body(), env, localGraphs, localTypes, visitingFns));
+                }
+                yield acc;
+            }
+            case WhileExpr w -> AliasGraph.merge(
+                collectExprReturnAliasGraph(w.condition(), env, localGraphs, localTypes, visitingFns),
+                collectBlockReturnAliasGraph(w.body(), env, localGraphs, localTypes, visitingFns)
+            );
+            case ForExpr f -> AliasGraph.merge(
+                collectExprReturnAliasGraph(f.iterable(), env, localGraphs, localTypes, visitingFns),
+                collectBlockReturnAliasGraph(f.body(), env, localGraphs, localTypes, visitingFns)
+            );
+            case ParenExpr p -> collectExprReturnAliasGraph(p.inner(), env, localGraphs, localTypes, visitingFns);
+            case PropagateExpr p -> collectExprReturnAliasGraph(p.inner(), env, localGraphs, localTypes, visitingFns);
+            case ConsumeExpr c -> collectExprReturnAliasGraph(c.target(), env, localGraphs, localTypes, visitingFns);
+            case UnaryExpr u -> collectExprReturnAliasGraph(u.operand(), env, localGraphs, localTypes, visitingFns);
+            case FieldAccessExpr fa -> collectExprReturnAliasGraph(fa.object(), env, localGraphs, localTypes, visitingFns);
+            case BinaryExpr b -> AliasGraph.merge(
+                collectExprReturnAliasGraph(b.left(), env, localGraphs, localTypes, visitingFns),
+                collectExprReturnAliasGraph(b.right(), env, localGraphs, localTypes, visitingFns)
+            );
+            case CallExpr c -> {
+                AliasGraph acc = collectExprReturnAliasGraph(c.callee(), env, localGraphs, localTypes, visitingFns);
+                for (var a : c.args()) {
+                    acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(a, env, localGraphs, localTypes, visitingFns));
+                }
+                yield acc;
+            }
+            case TupleExpr t -> {
+                AliasGraph acc = AliasGraph.EMPTY;
+                for (var e : t.elements()) {
+                    acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(e, env, localGraphs, localTypes, visitingFns));
+                }
+                yield acc;
+            }
+            case ConstructorExpr c -> {
+                AliasGraph acc = AliasGraph.EMPTY;
+                for (var f : c.fields()) {
+                    acc = AliasGraph.merge(acc, collectExprReturnAliasGraph(f.value(), env, localGraphs, localTypes, visitingFns));
+                }
+                yield acc;
+            }
+            case LambdaExpr _, ForkExpr _ -> AliasGraph.EMPTY;
+            default -> AliasGraph.EMPTY;
+        };
+    }
+
+    private boolean containsResourceOwnership(AliasGraph graph, CapEnv env) {
+        if (graph == null || graph.isEmpty()) return false;
+        for (String r : graph.directRoots()) {
+            if (env.isLinear(r) || env.isCapabilityOrBorrowed(r)) {
+                return true;
+            }
+        }
+        for (var sub : graph.tupleElems().values()) {
+            if (containsResourceOwnership(sub, env)) return true;
+        }
+        for (var sub : graph.fieldElems().values()) {
+            if (containsResourceOwnership(sub, env)) return true;
+        }
+        return false;
     }
 
     private void linkViewCalls(String varName, Expr init, CapEnv env, Map<String, Expr> localBindings) {
@@ -1249,16 +1563,35 @@ public final class CapabilityChecker {
     }
 
     private TypeExpr inferExprType(Expr expr, CapEnv env) {
+        return inferExprType(expr, env, Map.of(), false);
+    }
+
+    private TypeExpr inferExprType(Expr expr, CapEnv env, Map<String, TypeExpr> localTypes, boolean inCalleeBody) {
         if (expr == null) return null;
         return switch (expr) {
-            case IdentExpr id -> resolveTypeAlias(env.types.get(id.name()));
-            case ParenExpr p -> inferExprType(p.inner(), env);
-            case FieldAccessExpr fa -> resolveFieldType(inferExprType(fa.object(), env), fa.fieldName());
+            case IdentExpr id -> {
+                if (localTypes.containsKey(id.name())) {
+                    yield resolveTypeAlias(localTypes.get(id.name()));
+                }
+                if (inCalleeBody) {
+                    yield null;
+                }
+                yield resolveTypeAlias(env.types.get(id.name()));
+            }
+            case ParenExpr p -> inferExprType(p.inner(), env, localTypes, inCalleeBody);
+            case ConsumeExpr c -> inferExprType(c.target(), env, localTypes, inCalleeBody);
+            case FieldAccessExpr fa -> resolveFieldType(inferExprType(fa.object(), env, localTypes, inCalleeBody), fa.fieldName());
             case CallExpr c -> {
-                if (c.callee() instanceof IdentExpr id) {
+                Expr rawCallee = c.callee();
+                while (rawCallee instanceof ParenExpr p) rawCallee = p.inner();
+                if (rawCallee instanceof IdentExpr id) {
                     FnDecl fn = fnDecls.get(id.name());
                     if (fn != null) yield resolveTypeAlias(fn.returnType());
                     if (typeDecls.containsKey(id.name())) yield new SimpleTypeExpr(id.name(), c.span());
+                }
+                TypeExpr calleeT = resolveTypeAlias(inferExprType(rawCallee, env, localTypes, inCalleeBody));
+                if (calleeT instanceof FunctionTypeExpr ft) {
+                    yield resolveTypeAlias(ft.returnType());
                 }
                 yield null;
             }
@@ -1268,6 +1601,18 @@ public final class CapabilityChecker {
                     : c.typePath();
                 yield new SimpleTypeExpr(shortName, c.span());
             }
+            case IfExpr i -> {
+                TypeExpr thenT = inferExprType(i.thenBranch(), env, localTypes, inCalleeBody);
+                yield thenT != null ? thenT : inferExprType(i.elseBranch(), env, localTypes, inCalleeBody);
+            }
+            case MatchExpr m -> {
+                for (var arm : m.arms()) {
+                    TypeExpr at = inferExprType(arm.body(), env, localTypes, inCalleeBody);
+                    if (at != null) yield at;
+                }
+                yield null;
+            }
+            case BlockExpr b -> inferExprType(b.tailExpr(), env, localTypes, inCalleeBody);
             default -> null;
         };
     }

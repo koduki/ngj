@@ -626,11 +626,11 @@ public final class Compiler {
         for (Diagnostic d : diagnostics) {
             Diagnostic cur = d;
             if (cur.exprSnippet() == null || cur.exprSnippet().isBlank()) {
-                String snippet = extractSnippet(cur.primarySpan());
+                String snippet = extractMaskedSnippet(cur.primarySpan(), secretCtx);
                 if (snippet != null && !snippet.isBlank()) {
-                    cur = cur.withExprSnippet(maskIfSecretSpan(snippet, cur.primarySpan(), secretCtx));
+                    cur = cur.withExprSnippet(snippet);
                 }
-            } else if (secretCtx.isSpanInsideSecretValue(cur.primarySpan())) {
+            } else if (cur.primarySpan() != null) {
                 cur = cur.withExprSnippet(maskIfSecretSpan(cur.exprSnippet(), cur.primarySpan(), secretCtx));
             }
             if (cur.derivationTrace().isEmpty() && cur.primarySpan() != null) {
@@ -685,15 +685,65 @@ public final class Compiler {
         diagnostics.addAll(enriched);
     }
 
+    private String extractMaskedSnippet(SourceSpan span, SecretRedactionContext secretCtx) {
+        if (span == null || span.file() == null) return null;
+        byte[] bytes = sourceUtf8ByFile.get(span.file());
+        if (bytes == null) return null;
+        int start = Math.max(0, Math.min(span.startByte(), bytes.length));
+        int end = Math.max(start, Math.min(span.endByte(), bytes.length));
+        if (end <= start) return null;
+        List<int[]> overlaps = new ArrayList<>();
+        for (SourceSpan sv : secretCtx.secretValueSpans()) {
+            if (sv != null && Objects.equals(span.file(), sv.file())) {
+                int s = Math.max(start, Math.min(sv.startByte(), bytes.length));
+                int e = Math.max(start, Math.min(sv.endByte(), bytes.length));
+                if (e > s) {
+                    overlaps.add(new int[]{s, e, sv.startByte(), sv.endByte()});
+                }
+            }
+        }
+        if (overlaps.isEmpty()) {
+            return new String(bytes, start, end - start, StandardCharsets.UTF_8);
+        }
+        overlaps.sort(Comparator.comparingInt(a -> a[0]));
+        StringBuilder sb = new StringBuilder();
+        int cursor = start;
+        for (int[] range : overlaps) {
+            int s = Math.max(cursor, range[0]);
+            int e = range[1];
+            if (e <= s) continue;
+            if (s > cursor) {
+                sb.append(new String(bytes, cursor, s - cursor, StandardCharsets.UTF_8));
+            }
+            int origStart = Math.max(0, Math.min(range[2], bytes.length));
+            boolean isQuoted = origStart < bytes.length && bytes[origStart] == '"';
+            sb.append(isQuoted ? "\"" + SecretRedactor.MASK + "\"" : SecretRedactor.MASK);
+            cursor = e;
+        }
+        if (cursor < end) {
+            sb.append(new String(bytes, cursor, end - cursor, StandardCharsets.UTF_8));
+        }
+        return sb.toString();
+    }
+
     private String maskIfSecretSpan(String snippet, SourceSpan span, SecretRedactionContext secretCtx) {
-        if (snippet == null || !secretCtx.isSpanInsideSecretValue(span)) {
-            return snippet;
+        if (snippet == null) {
+            return null;
         }
-        String trimmed = snippet.trim();
-        if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-            return "\"" + SecretRedactor.MASK + "\"";
+        if (secretCtx.isSpanInsideSecretValue(span)) {
+            String trimmed = snippet.trim();
+            if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+                return "\"" + SecretRedactor.MASK + "\"";
+            }
+            return SecretRedactor.MASK;
         }
-        return SecretRedactor.MASK;
+        if (span != null && secretCtx.hasOverlappingSecretValue(span)) {
+            String masked = extractMaskedSnippet(span, secretCtx);
+            if (masked != null && !masked.isBlank()) {
+                return masked;
+            }
+        }
+        return snippet;
     }
 
     private Map<String, TypeAliasDecl> collectTypeAliases() {
@@ -721,6 +771,18 @@ public final class Compiler {
                 if (sv != null && Objects.equals(span.file(), sv.file())
                     && span.startByte() >= sv.startByte()
                     && span.endByte() <= sv.endByte()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        boolean hasOverlappingSecretValue(SourceSpan span) {
+            if (span == null || span.file() == null) return false;
+            for (SourceSpan sv : secretValueSpans) {
+                if (sv != null && Objects.equals(span.file(), sv.file())
+                    && span.startByte() < sv.endByte()
+                    && sv.startByte() < span.endByte()) {
                     return true;
                 }
             }
@@ -1007,6 +1069,13 @@ public final class Compiler {
             case LiteralExpr lit -> {
                 if (lit.span() != null) {
                     secretValueSpans.add(lit.span());
+                    String raw = extractSnippet(lit.span());
+                    if (raw != null && raw.length() >= 2 && raw.startsWith("\"") && raw.endsWith("\"")) {
+                        String rawInner = raw.substring(1, raw.length() - 1);
+                        if (!rawInner.isEmpty()) {
+                            secretLiterals.add(rawInner);
+                        }
+                    }
                 }
                 if (lit.kind() == LiteralExpr.LiteralKind.STRING && lit.value() instanceof String s && !s.isEmpty()) {
                     secretLiterals.add(s);

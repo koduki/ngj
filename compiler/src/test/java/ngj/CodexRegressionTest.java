@@ -2547,4 +2547,182 @@ class CodexRegressionTest {
         String stdout = out.toString(StandardCharsets.UTF_8);
         assertEquals(0, code, "Negating Long field at -2147483648L must not overflow and should prove result > 0: " + stdout);
     }
+
+    @Test
+    void functionReturnPreservesBudgetOwnershipAlias() throws Exception {
+        Path file = tempDir.resolve("echo_budget_alias.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn echoBudget(b: Budget<Fuel>) -> Budget<Fuel> effects() {
+                return b;
+            }
+
+            public fn bad(consume b: Budget<Fuel>) -> Unit effects() {
+                val c: Budget<Fuel> = echoBudget(b);
+                val b1: Budget<Fuel> = b.spend(1L);
+                val c1: Budget<Fuel> = c.spend(1L);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "echoBudget(b) must preserve ownership alias so spending both b and c fails: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void functionWrappingBudgetInRecordPreservesOwnershipAlias() throws Exception {
+        Path file = tempDir.resolve("wrap_budget_alias.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record Wallet(b: Budget<Fuel>);
+
+            public fn wrapBudget(b: Budget<Fuel>) -> Wallet effects() {
+                return Wallet(b);
+            }
+
+            public fn bad(consume b: Budget<Fuel>) -> Unit effects() {
+                val w: Wallet = wrapBudget(b);
+                val b1: Budget<Fuel> = b.spend(1L);
+                val b2: Budget<Fuel> = w.b.spend(1L);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "wrapBudget(b) must preserve Wallet.b ownership alias so spending both b and w.b fails: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void functionSpendingBudgetParamConsumesCallerArgument() throws Exception {
+        Path file = tempDir.resolve("callee_spends_budget_twice.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn spendOne(b: Budget<Fuel>) -> Budget<Fuel> effects() {
+                return b.spend(1L);
+            }
+
+            public fn bad(consume b: Budget<Fuel>) -> Unit effects() {
+                val c1: Budget<Fuel> = spendOne(b);
+                val c2: Budget<Fuel> = spendOne(b);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Calling spendOne(b) twice must fail because callee consumes b: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void functionSpendingBudgetParamAllowsSpendingReturnedRemainder() throws Exception {
+        Path file = tempDir.resolve("callee_spends_budget_chain_ok.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn spendOne(b: Budget<Fuel>) -> Budget<Fuel> effects() {
+                return b.spend(1L);
+            }
+
+            public fn ok(consume b: Budget<Fuel>) -> Budget<Fuel> effects() {
+                val c1: Budget<Fuel> = spendOne(b);
+                return c1.spend(1L);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(0, code, "Spending the fresh remainder returned by spendOne(b) must succeed: " + stdout);
+    }
+
+    @Test
+    void secretLiteralWithEscapedQuoteIsCompletelyRedacted() throws Exception {
+        Path file = tempDir.resolve("secret_escaped_quote_redaction.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad() -> Unit effects() {
+                val value: Secret<String> = "prefix\\"confidential-suffix-98765";
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Type mismatch on Secret<String> = String must fail: " + stdout);
+        assertFalse(stdout.contains("confidential-suffix-98765"),
+            "Diagnostic must not leak suffix after escaped quote: " + stdout);
+        assertFalse(stdout.contains("prefix"),
+            "Diagnostic must not leak prefix before escaped quote: " + stdout);
+        assertTrue(stdout.contains("Secret(****)"),
+            "Diagnostic must mask escaped-quote secret literal with Secret(****): " + stdout);
+    }
+
+    @Test
+    void secretAliasLiteralWithEscapedQuoteIsCompletelyRedacted() throws Exception {
+        Path file = tempDir.resolve("secret_alias_escaped_quote_redaction.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public type Hidden = Secret<String>;
+
+            public fn bad() -> Unit effects() {
+                val value: Hidden = "alpha\\"beta-secret-54321";
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Type mismatch on Hidden = String must fail: " + stdout);
+        assertFalse(stdout.contains("beta-secret-54321"),
+            "Diagnostic must not leak suffix after escaped quote on alias: " + stdout);
+        assertFalse(stdout.contains("alpha"),
+            "Diagnostic must not leak prefix before escaped quote on alias: " + stdout);
+        assertTrue(stdout.contains("Secret(****)"),
+            "Diagnostic must mask aliased escaped-quote secret literal with Secret(****): " + stdout);
+    }
 }
