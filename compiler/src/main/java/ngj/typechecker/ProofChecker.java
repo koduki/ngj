@@ -252,7 +252,16 @@ public final class ProofChecker {
                     verifyCalleePreconditions(call, id.name(), ctx);
                 }
             }
-            case BlockExpr b -> checkBlock(b, inProofContext, ctx != null ? ctx.fork(null) : null);
+            case BlockExpr b -> {
+                if (!inProofContext && ctx != null) {
+                    int origPremisesSize = ctx.premises.size();
+                    CallSiteCtx inner = ctx.fork(null);
+                    checkBlock(b, false, inner);
+                    ctx.mergeBlockExit(inner, b, origPremisesSize);
+                } else {
+                    checkBlock(b, inProofContext, null);
+                }
+            }
             case IfExpr i -> {
                 checkRuntimeOrProofExpr(i.condition(), inProofContext, ctx);
                 if (!inProofContext && ctx != null) {
@@ -279,13 +288,15 @@ public final class ProofChecker {
             }
             case MatchExpr m -> {
                 checkRuntimeOrProofExpr(m.scrutinee(), inProofContext, ctx);
+                Set<String> mutated = new LinkedHashSet<>();
                 for (var arm : m.arms()) {
                     checkRuntimeOrProofExpr(arm.body(), inProofContext, ctx != null ? ctx.fork(null) : null);
                     if (!inProofContext && ctx != null) {
-                        Set<String> mutated = new LinkedHashSet<>();
                         collectAssignedVars(arm.body(), mutated);
-                        ctx.havocVars(mutated);
                     }
+                }
+                if (!inProofContext && ctx != null) {
+                    ctx.havocVars(mutated);
                 }
             }
             case WhileExpr w -> {
@@ -307,10 +318,39 @@ public final class ProofChecker {
             }
             case ForExpr f -> {
                 checkRuntimeOrProofExpr(f.iterable(), inProofContext, ctx);
-                checkBlock(f.body(), inProofContext, ctx != null ? ctx.fork(null) : null);
+                if (!inProofContext && ctx != null) {
+                    Set<String> mutated = new LinkedHashSet<>();
+                    collectAssignedVars(f.body(), mutated);
+                    CallSiteCtx bodyCtx = ctx.fork(null);
+                    bodyCtx.havocVars(mutated);
+                    checkBlock(f.body(), false, bodyCtx);
+                    ctx.havocVars(mutated);
+                } else {
+                    checkBlock(f.body(), inProofContext, null);
+                }
             }
-            case ScopeExpr s -> checkBlock(s.body(), inProofContext, ctx != null ? ctx.fork(null) : null);
-            case ForkExpr f -> checkBlock(f.body(), inProofContext, ctx != null ? ctx.fork(null) : null);
+            case ScopeExpr s -> {
+                if (!inProofContext && ctx != null) {
+                    int origPremisesSize = ctx.premises.size();
+                    CallSiteCtx inner = ctx.fork(null);
+                    checkBlock(s.body(), false, inner);
+                    ctx.mergeBlockExit(inner, s.body(), origPremisesSize);
+                } else {
+                    checkBlock(s.body(), inProofContext, null);
+                }
+            }
+            case ForkExpr f -> {
+                if (!inProofContext && ctx != null) {
+                    Set<String> mutated = new LinkedHashSet<>();
+                    collectAssignedVars(f.body(), mutated);
+                    CallSiteCtx forkCtx = ctx.fork(null);
+                    forkCtx.havocVars(mutated);
+                    checkBlock(f.body(), false, forkCtx);
+                    ctx.havocVars(mutated);
+                } else {
+                    checkBlock(f.body(), inProofContext, null);
+                }
+            }
             case BinaryExpr b -> {
                 checkRuntimeOrProofExpr(b.left(), inProofContext, ctx);
                 checkRuntimeOrProofExpr(b.right(), inProofContext, ctx);
@@ -322,6 +362,12 @@ public final class ProofChecker {
             case FieldAccessExpr fa -> checkRuntimeOrProofExpr(fa.object(), inProofContext, ctx);
             case TupleExpr t -> {
                 for (var e : t.elements()) checkRuntimeOrProofExpr(e, inProofContext, ctx);
+            }
+            case ConstructorExpr c -> {
+                for (var field : c.fields()) checkRuntimeOrProofExpr(field.value(), inProofContext, ctx);
+            }
+            case LambdaExpr l -> {
+                checkBlock(l.body(), inProofContext, !inProofContext && ctx != null ? ctx.fork(null) : null);
             }
             default -> {}
         }
@@ -371,25 +417,84 @@ public final class ProofChecker {
     }
 
     private static void collectAssignedVars(Expr expr, Set<String> out) {
+        collectAssignedVars(expr, out, Set.of());
+    }
+
+    private static void collectAssignedVars(Expr expr, Set<String> out, Set<String> shadowed) {
         if (expr == null) return;
         switch (expr) {
             case BlockExpr b -> {
+                Set<String> innerShadowed = new LinkedHashSet<>(shadowed);
                 for (var st : b.statements()) {
                     switch (st) {
-                        case AssignStmt a -> out.add(a.name());
-                        case ExprStmt es -> collectAssignedVars(es.expr(), out);
+                        case ValStmt v -> {
+                            collectAssignedVars(v.initializer(), out, innerShadowed);
+                            innerShadowed.add(v.name());
+                        }
+                        case LetStmt l -> {
+                            collectAssignedVars(l.initializer(), out, innerShadowed);
+                            innerShadowed.add(l.name());
+                        }
+                        case VarStmt v -> {
+                            collectAssignedVars(v.initializer(), out, innerShadowed);
+                            innerShadowed.add(v.name());
+                        }
+                        case TupleDestructureStmt td -> {
+                            collectAssignedVars(td.initializer(), out, innerShadowed);
+                            innerShadowed.addAll(td.names());
+                        }
+                        case AssignStmt a -> {
+                            collectAssignedVars(a.value(), out, innerShadowed);
+                            if (!innerShadowed.contains(a.name())) {
+                                out.add(a.name());
+                            }
+                        }
+                        case ReturnStmt r -> collectAssignedVars(r.value(), out, innerShadowed);
+                        case ExprStmt es -> collectAssignedVars(es.expr(), out, innerShadowed);
                         default -> {}
                     }
                 }
-                collectAssignedVars(b.tailExpr(), out);
+                collectAssignedVars(b.tailExpr(), out, innerShadowed);
             }
             case IfExpr i -> {
-                collectAssignedVars(i.thenBranch(), out);
-                collectAssignedVars(i.elseBranch(), out);
+                collectAssignedVars(i.condition(), out, shadowed);
+                collectAssignedVars(i.thenBranch(), out, shadowed);
+                collectAssignedVars(i.elseBranch(), out, shadowed);
             }
-            case WhileExpr w -> collectAssignedVars(w.body(), out);
+            case WhileExpr w -> {
+                collectAssignedVars(w.condition(), out, shadowed);
+                collectAssignedVars(w.body(), out, shadowed);
+            }
+            case ForExpr f -> {
+                collectAssignedVars(f.iterable(), out, shadowed);
+                Set<String> inner = new LinkedHashSet<>(shadowed);
+                inner.add(f.varName());
+                collectAssignedVars(f.body(), out, inner);
+            }
             case MatchExpr m -> {
-                for (var arm : m.arms()) collectAssignedVars(arm.body(), out);
+                collectAssignedVars(m.scrutinee(), out, shadowed);
+                for (var arm : m.arms()) collectAssignedVars(arm.body(), out, shadowed);
+            }
+            case ScopeExpr s -> collectAssignedVars(s.body(), out, shadowed);
+            case ForkExpr f -> collectAssignedVars(f.body(), out, shadowed);
+            case BinaryExpr b -> {
+                collectAssignedVars(b.left(), out, shadowed);
+                collectAssignedVars(b.right(), out, shadowed);
+            }
+            case UnaryExpr u -> collectAssignedVars(u.operand(), out, shadowed);
+            case ParenExpr p -> collectAssignedVars(p.inner(), out, shadowed);
+            case PropagateExpr p -> collectAssignedVars(p.inner(), out, shadowed);
+            case ConsumeExpr c -> collectAssignedVars(c.target(), out, shadowed);
+            case FieldAccessExpr fa -> collectAssignedVars(fa.object(), out, shadowed);
+            case CallExpr c -> {
+                collectAssignedVars(c.callee(), out, shadowed);
+                for (var a : c.args()) collectAssignedVars(a, out, shadowed);
+            }
+            case TupleExpr t -> {
+                for (var e : t.elements()) collectAssignedVars(e, out, shadowed);
+            }
+            case ConstructorExpr c -> {
+                for (var f : c.fields()) collectAssignedVars(f.value(), out, shadowed);
             }
             default -> {}
         }
@@ -530,6 +635,31 @@ public final class ProofChecker {
                 String lhs = freshSsa(v, sort);
                 if (longVars.contains(prevName) || longVars.contains(v)) {
                     longVars.add(lhs);
+                }
+            }
+        }
+
+        void mergeBlockExit(CallSiteCtx inner, BlockExpr block, int origPremisesSize) {
+            Set<String> blockDeclared = new LinkedHashSet<>();
+            for (var st : block.statements()) {
+                switch (st) {
+                    case ValStmt v -> blockDeclared.add(v.name());
+                    case LetStmt l -> blockDeclared.add(l.name());
+                    case VarStmt v -> blockDeclared.add(v.name());
+                    case TupleDestructureStmt td -> blockDeclared.addAll(td.names());
+                    default -> {}
+                }
+            }
+            for (int i = origPremisesSize; i < inner.premises.size(); i++) {
+                premises.add(inner.premises.get(i));
+            }
+            for (var entry : inner.ssaEnv.entrySet()) {
+                String varName = entry.getKey();
+                if (!blockDeclared.contains(varName) && (ssaEnv.containsKey(varName) || sorts.containsKey(varName))) {
+                    ssaEnv.put(varName, entry.getValue());
+                    if (inner.longVars.contains(entry.getValue())) {
+                        longVars.add(entry.getValue());
+                    }
                 }
             }
         }

@@ -322,6 +322,8 @@ public final class VcGenerator {
                     if (containsMutationOrWhile(ifExpr)) {
                         return new SmtExpr.UnsupportedExpr("if_mutated_state");
                     }
+                } else if (containsMutationOrWhile(es.expr())) {
+                    return new SmtExpr.UnsupportedExpr("expr_mutated_state");
                 }
                 return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
@@ -335,14 +337,28 @@ public final class VcGenerator {
         if (expr == null) return false;
         return switch (expr) {
             case WhileExpr _ -> true;
+            case ForExpr f -> containsMutationOrWhile(f.iterable()) || containsMutationOrWhile(f.body());
             case BlockExpr b -> {
                 for (var st : b.statements()) {
                     if (st instanceof AssignStmt) yield true;
                     if (st instanceof ExprStmt es && containsMutationOrWhile(es.expr())) yield true;
+                    if (st instanceof ValStmt v && containsMutationOrWhile(v.initializer())) yield true;
+                    if (st instanceof LetStmt l && containsMutationOrWhile(l.initializer())) yield true;
+                    if (st instanceof VarStmt v && containsMutationOrWhile(v.initializer())) yield true;
+                    if (st instanceof ReturnStmt r && containsMutationOrWhile(r.value())) yield true;
                 }
                 yield containsMutationOrWhile(b.tailExpr());
             }
-            case IfExpr i -> containsMutationOrWhile(i.thenBranch()) || containsMutationOrWhile(i.elseBranch());
+            case IfExpr i -> containsMutationOrWhile(i.condition()) || containsMutationOrWhile(i.thenBranch()) || containsMutationOrWhile(i.elseBranch());
+            case MatchExpr m -> {
+                if (containsMutationOrWhile(m.scrutinee())) yield true;
+                for (var arm : m.arms()) {
+                    if (containsMutationOrWhile(arm.body())) yield true;
+                }
+                yield false;
+            }
+            case ScopeExpr s -> containsMutationOrWhile(s.body());
+            case ForkExpr f -> containsMutationOrWhile(f.body());
             default -> false;
         };
     }

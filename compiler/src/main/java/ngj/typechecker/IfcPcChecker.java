@@ -359,6 +359,33 @@ public final class IfcPcChecker {
                 forkUntrusted.removeAll(forkDeclared);
                 untrustedVars.addAll(forkUntrusted);
             }
+            case ForExpr f -> {
+                checkExpr(f.iterable(), untrustedVars, inUntrustedPc);
+                boolean iterUntrusted = isExprUntrusted(f.iterable(), untrustedVars);
+                boolean pc = inUntrustedPc || iterUntrusted;
+                Set<String> loopUntrusted = new LinkedHashSet<>(untrustedVars);
+                if (iterUntrusted) {
+                    loopUntrusted.add(f.varName());
+                }
+                int diagBaseline = diagnostics.size();
+                while (true) {
+                    while (diagnostics.size() > diagBaseline) {
+                        diagnostics.remove(diagnostics.size() - 1);
+                    }
+                    Set<String> prev = new LinkedHashSet<>(loopUntrusted);
+                    Set<String> bodyUntrusted = new LinkedHashSet<>(loopUntrusted);
+                    Set<String> bodyDeclared = new LinkedHashSet<>();
+                    bodyDeclared.add(f.varName());
+                    checkBlock(f.body(), bodyUntrusted, pc, bodyDeclared);
+                    bodyUntrusted.removeAll(bodyDeclared);
+                    loopUntrusted.addAll(bodyUntrusted);
+                    if (loopUntrusted.equals(prev)) {
+                        break;
+                    }
+                }
+                loopUntrusted.remove(f.varName());
+                untrustedVars.addAll(loopUntrusted);
+            }
             case BinaryExpr b -> {
                 checkExpr(b.left(), untrustedVars, inUntrustedPc);
                 checkExpr(b.right(), untrustedVars, inUntrustedPc);
@@ -367,6 +394,30 @@ public final class IfcPcChecker {
             case ParenExpr p -> checkExpr(p.inner(), untrustedVars, inUntrustedPc);
             case PropagateExpr p -> checkExpr(p.inner(), untrustedVars, inUntrustedPc);
             case FieldAccessExpr fa -> checkExpr(fa.object(), untrustedVars, inUntrustedPc);
+            case ConsumeExpr c -> checkExpr(c.target(), untrustedVars, inUntrustedPc);
+            case TupleExpr t -> {
+                for (var elem : t.elements()) {
+                    checkExpr(elem, untrustedVars, inUntrustedPc);
+                }
+            }
+            case ConstructorExpr c -> {
+                for (var field : c.fields()) {
+                    checkExpr(field.value(), untrustedVars, inUntrustedPc);
+                }
+            }
+            case LambdaExpr l -> {
+                Set<String> lambdaUntrusted = new LinkedHashSet<>(untrustedVars);
+                Set<String> lambdaDeclared = new LinkedHashSet<>();
+                for (var p : l.params()) {
+                    lambdaDeclared.add(p.name());
+                    if (isUntrustedType(p.type())) {
+                        lambdaUntrusted.add(p.name());
+                    } else {
+                        lambdaUntrusted.remove(p.name());
+                    }
+                }
+                checkBlock(l.body(), lambdaUntrusted, inUntrustedPc, lambdaDeclared);
+            }
             default -> {}
         }
     }
@@ -510,6 +561,11 @@ public final class IfcPcChecker {
                 }
                 yield false;
             }
+            case ForExpr f -> {
+                if (isExprUntrusted(f.iterable(), untrustedVars)) yield true;
+                yield isBlockUntrusted(f.body(), untrustedVars);
+            }
+            case ConsumeExpr c -> isExprUntrusted(c.target(), untrustedVars);
             default -> false;
         };
     }

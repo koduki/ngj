@@ -619,4 +619,100 @@ class CodexRegressionTest {
         assertThrows(IllegalArgumentException.class, () -> ngj.runtime.BoundaryCodec.requireInt(4294967297L));
         assertEquals(8443, ngj.runtime.BoundaryCodec.requireInt(8443L));
     }
+
+    @Test
+    void forLoopBodyUnderUntrustedPcIsRejected() throws Exception {
+        Path file = tempDir.resolve("for_untrusted_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>, xs: List<Int>) -> Unit effects(PaymentWrite) {
+                if (isSome(flag)) {
+                    for (x <- xs) {
+                        pay();
+                    };
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "for-loop calling pay() under Untrusted PC must fail with NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void nestedBlockMutationUpdatesPreconditionContext() throws Exception {
+        Path file = tempDir.resolve("block_mutation_pre.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int) -> Int effects()
+                requires (x > 0)
+                ensures (result > 0)
+            {
+                return x;
+            }
+
+            public fn bad() -> Int effects() {
+                var y: Int = 1;
+                {
+                    y = 0;
+                };
+                return positive(y);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Nested block assigning y = 0 must invalidate y > 0 at positive(y): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void nestedBlockMutationFailsPostconditionVc() throws Exception {
+        Path file = tempDir.resolve("block_mutation_post.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad() -> Int effects()
+                requires (true)
+                ensures (result == 1)
+            {
+                var y: Int = 1;
+                {
+                    y = 0;
+                };
+                return y;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Nested block assigning y = 0 must fail ensures(result == 1): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
 }
