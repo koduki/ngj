@@ -185,8 +185,12 @@ public final class CapabilityChecker {
             case TupleDestructureStmt td -> {
                 checkExpr(td.initializer(), env);
                 boolean isBudgetSplit = isBudgetSplitCall(td.initializer(), env);
-                TupleExpr tupleInit = td.initializer() instanceof TupleExpr te ? te : null;
+                Expr unwrappedInit = td.initializer();
+                while (unwrappedInit instanceof ParenExpr p) unwrappedInit = p.inner();
+                TupleExpr tupleInit = unwrappedInit instanceof TupleExpr te ? te : null;
+                AliasGraph initGraph = !isBudgetSplit ? computeAliasGraph(td.initializer(), env, Map.of()) : AliasGraph.EMPTY;
                 for (int i = 0; i < td.names().size(); i++) {
+                    String elemName = td.names().get(i);
                     Expr compInit = (tupleInit != null && i < tupleInit.elements().size()) ? tupleInit.elements().get(i) : null;
                     TypeExpr t = i < td.explicitTypes().size() ? resolveTypeAlias(td.explicitTypes().get(i)) : null;
                     if (t == null && isBudgetSplit) {
@@ -194,11 +198,23 @@ public final class CapabilityChecker {
                     } else if (t == null && compInit != null) {
                         t = inferResourceType(compInit, env);
                     }
-                    boolean isLin = isLinearType(t) || (!isBudgetSplit && compInit != null && isLinearExpr(compInit, env));
-                    boolean isSec = isSecretType(t) || (compInit != null && isSecretExpr(compInit, env));
-                    env.declare(td.names().get(i), t, modeFromType(t, false), isLin, isSec, env.depth);
-                    if (!isBudgetSplit && compInit != null) {
-                        linkAliasOrView(td.names().get(i), compInit, env);
+                    AliasGraph elemGraph = !isBudgetSplit ? initGraph.elementAt(i) : AliasGraph.EMPTY;
+                    boolean isLin = isLinearType(t)
+                        || (!isBudgetSplit && compInit != null && isLinearExpr(compInit, env))
+                        || (!isBudgetSplit && elemGraph.directRoots().stream().anyMatch(env::isLinear));
+                    boolean isSec = isSecretType(t)
+                        || (compInit != null && isSecretExpr(compInit, env))
+                        || elemGraph.directRoots().stream().anyMatch(env::isSecret);
+                    env.declare(elemName, t, modeFromType(t, false), isLin, isSec, env.depth);
+                    if (!isBudgetSplit) {
+                        if (compInit != null) {
+                            linkAliasOrView(elemName, compInit, env);
+                        } else if (!elemGraph.isEmpty()) {
+                            bindAliasGraph(elemName, elemGraph, env);
+                        } else if (!initGraph.directRoots().isEmpty()
+                            && (isLin || isSec || env.isCapabilityOrBorrowed(elemName))) {
+                            bindAliasGraph(elemName, new AliasGraph(initGraph.directRoots(), Map.of(), Map.of()), env);
+                        }
                     }
                 }
             }
@@ -827,43 +843,162 @@ public final class CapabilityChecker {
     }
 
     private void linkAliasOrView(String varName, Expr init, CapEnv env) {
-        linkAliasOrView(varName, init, env, new LinkedHashMap<>());
+        AliasGraph graph = computeAliasGraph(init, env, Map.of());
+        if (!graph.isEmpty()) {
+            bindAliasGraph(varName, graph, env);
+        }
+        linkViewCalls(varName, init, env, new LinkedHashMap<>());
     }
 
-    private void linkAliasOrView(String varName, Expr init, CapEnv env, Map<String, Expr> localBindings) {
+    private void bindAliasGraph(String varName, AliasGraph graph, CapEnv env) {
+        if (graph == null || graph.isEmpty()) return;
+        AliasGraph existing = env.aliasGraphs.get(varName);
+        env.aliasGraphs.put(varName, existing == null ? graph : AliasGraph.merge(existing, graph));
+        for (String root : graph.directRoots()) {
+            if (root.equals(varName)) continue;
+            env.aliasOf.putIfAbsent(varName, root);
+            env.aliasRoots.computeIfAbsent(varName, k -> new LinkedHashSet<>()).add(root);
+            env.aliases.computeIfAbsent(root, k -> new LinkedHashSet<>()).add(varName);
+            if (env.isLinear(root)) {
+                env.linearVars.add(varName);
+            }
+            if (env.isSecret(root)) {
+                env.secretVars.add(varName);
+            }
+            if (env.modes.get(root) == VarMode.READ) {
+                env.modes.put(varName, VarMode.READ);
+            }
+            if (env.viewOf.containsKey(root)) {
+                String viewOwner = env.viewOf.get(root);
+                env.viewOf.put(varName, viewOwner);
+                env.views.computeIfAbsent(viewOwner, k -> new LinkedHashSet<>()).add(varName);
+            }
+            CapState rootState = env.states.get(root);
+            if (rootState == CapState.CONSUMED) {
+                env.states.put(varName, CapState.CONSUMED);
+            } else if (rootState == CapState.MAYBE_CONSUMED && env.states.get(varName) != CapState.CONSUMED) {
+                env.states.put(varName, CapState.MAYBE_CONSUMED);
+            }
+        }
+    }
+
+    private AliasGraph computeAliasGraph(Expr init, CapEnv env, Map<String, AliasGraph> localGraphs) {
+        if (init == null) return AliasGraph.EMPTY;
+        return switch (init) {
+            case ConsumeExpr _ -> AliasGraph.EMPTY; // Ownership transferred; source already consumed
+            case ParenExpr p -> computeAliasGraph(p.inner(), env, localGraphs);
+            case PropagateExpr p -> computeAliasGraph(p.inner(), env, localGraphs);
+            case IdentExpr id -> {
+                if (localGraphs.containsKey(id.name())) {
+                    yield localGraphs.get(id.name());
+                }
+                Set<String> roots = env.resolveAllRoots(id.name());
+                AliasGraph stored = env.aliasGraphs.get(id.name());
+                if (stored != null && !stored.isEmpty()) {
+                    Set<String> combined = new LinkedHashSet<>(stored.directRoots());
+                    combined.addAll(roots);
+                    yield new AliasGraph(combined, stored.tupleElems(), stored.fieldElems());
+                }
+                yield new AliasGraph(roots, Map.of(), Map.of());
+            }
+            case TupleExpr t -> {
+                Map<Integer, AliasGraph> elems = new LinkedHashMap<>();
+                for (int i = 0; i < t.elements().size(); i++) {
+                    AliasGraph eg = computeAliasGraph(t.elements().get(i), env, localGraphs);
+                    if (!eg.isEmpty()) {
+                        elems.put(i, eg);
+                    }
+                }
+                yield elems.isEmpty() ? AliasGraph.EMPTY : new AliasGraph(Set.of(), elems, Map.of());
+            }
+            case ConstructorExpr c -> {
+                Map<String, AliasGraph> fields = new LinkedHashMap<>();
+                for (var f : c.fields()) {
+                    AliasGraph fg = computeAliasGraph(f.value(), env, localGraphs);
+                    if (!fg.isEmpty()) {
+                        fields.put(f.name(), fg);
+                    }
+                }
+                yield fields.isEmpty() ? AliasGraph.EMPTY : new AliasGraph(Set.of(), Map.of(), fields);
+            }
+            case CallExpr c -> {
+                if (c.callee() instanceof IdentExpr id) {
+                    TopLevelDecl td = typeDecls.get(id.name());
+                    if (td instanceof RecordDecl r) {
+                        Map<String, AliasGraph> fields = new LinkedHashMap<>();
+                        for (int i = 0; i < Math.min(r.params().size(), c.args().size()); i++) {
+                            AliasGraph fg = computeAliasGraph(c.args().get(i), env, localGraphs);
+                            if (!fg.isEmpty()) {
+                                fields.put(r.params().get(i).name(), fg);
+                            }
+                        }
+                        yield fields.isEmpty() ? AliasGraph.EMPTY : new AliasGraph(Set.of(), Map.of(), fields);
+                    }
+                }
+                yield AliasGraph.EMPTY;
+            }
+            case FieldAccessExpr fa -> {
+                AliasGraph objGraph = computeAliasGraph(fa.object(), env, localGraphs);
+                AliasGraph fieldGraph = objGraph.fieldAt(fa.fieldName());
+                if (!fieldGraph.isEmpty()) {
+                    yield fieldGraph;
+                }
+                try {
+                    int idx = Integer.parseInt(fa.fieldName());
+                    AliasGraph elemGraph = objGraph.elementAt(idx);
+                    if (!elemGraph.isEmpty()) yield elemGraph;
+                } catch (NumberFormatException ignored) {}
+                yield AliasGraph.EMPTY;
+            }
+            case IfExpr i -> {
+                AliasGraph thenG = computeAliasGraph(i.thenBranch(), env, localGraphs);
+                AliasGraph elseG = i.elseBranch() != null ? computeAliasGraph(i.elseBranch(), env, localGraphs) : AliasGraph.EMPTY;
+                yield AliasGraph.merge(thenG, elseG);
+            }
+            case MatchExpr m -> {
+                AliasGraph acc = AliasGraph.EMPTY;
+                for (var arm : m.arms()) {
+                    acc = AliasGraph.merge(acc, computeAliasGraph(arm.body(), env, localGraphs));
+                }
+                yield acc;
+            }
+            case BlockExpr b -> {
+                Map<String, AliasGraph> inner = new LinkedHashMap<>(localGraphs);
+                for (var st : b.statements()) {
+                    switch (st) {
+                        case ValStmt v -> inner.put(v.name(), computeAliasGraph(v.initializer(), env, inner));
+                        case LetStmt l -> inner.put(l.name(), computeAliasGraph(l.initializer(), env, inner));
+                        case VarStmt v -> inner.put(v.name(), computeAliasGraph(v.initializer(), env, inner));
+                        case AssignStmt a -> inner.put(a.name(), computeAliasGraph(a.value(), env, inner));
+                        case TupleDestructureStmt td -> {
+                            AliasGraph tg = computeAliasGraph(td.initializer(), env, inner);
+                            for (int i = 0; i < td.names().size(); i++) {
+                                inner.put(td.names().get(i), tg.elementAt(i));
+                            }
+                        }
+                        default -> {}
+                    }
+                }
+                yield b.tailExpr() != null ? computeAliasGraph(b.tailExpr(), env, inner) : AliasGraph.EMPTY;
+            }
+            case ScopeExpr s -> computeAliasGraph(s.body(), env, localGraphs);
+            case ForkExpr f -> computeAliasGraph(f.body(), env, localGraphs);
+            default -> AliasGraph.EMPTY;
+        };
+    }
+
+    private void linkViewCalls(String varName, Expr init, CapEnv env, Map<String, Expr> localBindings) {
         if (init == null) return;
         switch (init) {
-            case ConsumeExpr _ -> {} // Ownership transferred; source already consumed
-            case ParenExpr p -> linkAliasOrView(varName, p.inner(), env, localBindings);
-            case PropagateExpr p -> linkAliasOrView(varName, p.inner(), env, localBindings);
+            case ParenExpr p -> linkViewCalls(varName, p.inner(), env, localBindings);
+            case PropagateExpr p -> linkViewCalls(varName, p.inner(), env, localBindings);
             case IdentExpr id -> {
                 if (localBindings.containsKey(id.name())) {
                     Expr target = localBindings.get(id.name());
                     Map<String, Expr> next = new LinkedHashMap<>(localBindings);
                     next.remove(id.name());
-                    linkAliasOrView(varName, target, env, next);
+                    linkViewCalls(varName, target, env, next);
                     return;
-                }
-                if (id.name().equals(varName)) return;
-                Set<String> roots = env.resolveAllRoots(id.name());
-                for (String root : roots) {
-                    env.aliasOf.putIfAbsent(varName, root);
-                    env.aliasRoots.computeIfAbsent(varName, k -> new LinkedHashSet<>()).add(root);
-                    env.aliases.computeIfAbsent(root, k -> new LinkedHashSet<>()).add(varName);
-                    if (env.isLinear(root) || env.isLinear(id.name())) {
-                        env.linearVars.add(varName);
-                    }
-                    if (env.isSecret(root) || env.isSecret(id.name())) {
-                        env.secretVars.add(varName);
-                    }
-                    if (env.modes.get(id.name()) == VarMode.READ || env.modes.get(root) == VarMode.READ) {
-                        env.modes.put(varName, VarMode.READ);
-                    }
-                    if (env.viewOf.containsKey(root)) {
-                        String viewOwner = env.viewOf.get(root);
-                        env.viewOf.put(varName, viewOwner);
-                        env.views.computeIfAbsent(viewOwner, k -> new LinkedHashSet<>()).add(varName);
-                    }
                 }
                 if (env.viewOf.containsKey(id.name())) {
                     String viewOwner = env.viewOf.get(id.name());
@@ -885,14 +1020,14 @@ public final class CapabilityChecker {
                 }
             }
             case IfExpr i -> {
-                linkAliasOrView(varName, i.thenBranch(), env, localBindings);
+                linkViewCalls(varName, i.thenBranch(), env, localBindings);
                 if (i.elseBranch() != null) {
-                    linkAliasOrView(varName, i.elseBranch(), env, localBindings);
+                    linkViewCalls(varName, i.elseBranch(), env, localBindings);
                 }
             }
             case MatchExpr m -> {
                 for (var arm : m.arms()) {
-                    linkAliasOrView(varName, arm.body(), env, localBindings);
+                    linkViewCalls(varName, arm.body(), env, localBindings);
                 }
             }
             case BlockExpr b -> {
@@ -907,11 +1042,11 @@ public final class CapabilityChecker {
                     }
                 }
                 if (b.tailExpr() != null) {
-                    linkAliasOrView(varName, b.tailExpr(), env, inner);
+                    linkViewCalls(varName, b.tailExpr(), env, inner);
                 }
             }
-            case ScopeExpr s -> linkAliasOrView(varName, s.body(), env, localBindings);
-            case ForkExpr f -> linkAliasOrView(varName, f.body(), env, localBindings);
+            case ScopeExpr s -> linkViewCalls(varName, s.body(), env, localBindings);
+            case ForkExpr f -> linkViewCalls(varName, f.body(), env, localBindings);
             default -> {}
         }
     }
@@ -1234,6 +1369,63 @@ public final class CapabilityChecker {
         }
     }
 
+    private record AliasGraph(
+        Set<String> directRoots,
+        Map<Integer, AliasGraph> tupleElems,
+        Map<String, AliasGraph> fieldElems
+    ) {
+        static final AliasGraph EMPTY = new AliasGraph(Set.of(), Map.of(), Map.of());
+
+        boolean isEmpty() {
+            return directRoots.isEmpty() && tupleElems.isEmpty() && fieldElems.isEmpty();
+        }
+
+        AliasGraph elementAt(int idx) {
+            return tupleElems.getOrDefault(idx, EMPTY);
+        }
+
+        AliasGraph fieldAt(String field) {
+            return fieldElems.getOrDefault(field, EMPTY);
+        }
+
+        AliasGraph filterOuter(Set<String> outerVars) {
+            Set<String> filteredRoots = new LinkedHashSet<>();
+            for (String r : directRoots) {
+                if (outerVars.contains(r)) filteredRoots.add(r);
+            }
+            Map<Integer, AliasGraph> filteredTuple = new LinkedHashMap<>();
+            for (var e : tupleElems.entrySet()) {
+                AliasGraph sub = e.getValue().filterOuter(outerVars);
+                if (!sub.isEmpty()) filteredTuple.put(e.getKey(), sub);
+            }
+            Map<String, AliasGraph> filteredFields = new LinkedHashMap<>();
+            for (var e : fieldElems.entrySet()) {
+                AliasGraph sub = e.getValue().filterOuter(outerVars);
+                if (!sub.isEmpty()) filteredFields.put(e.getKey(), sub);
+            }
+            if (filteredRoots.isEmpty() && filteredTuple.isEmpty() && filteredFields.isEmpty()) {
+                return EMPTY;
+            }
+            return new AliasGraph(filteredRoots, filteredTuple, filteredFields);
+        }
+
+        static AliasGraph merge(AliasGraph a, AliasGraph b) {
+            if (a == null || a.isEmpty()) return b != null ? b : EMPTY;
+            if (b == null || b.isEmpty()) return a;
+            Set<String> roots = new LinkedHashSet<>(a.directRoots);
+            roots.addAll(b.directRoots);
+            Map<Integer, AliasGraph> tuple = new LinkedHashMap<>(a.tupleElems);
+            for (var e : b.tupleElems.entrySet()) {
+                tuple.merge(e.getKey(), e.getValue(), AliasGraph::merge);
+            }
+            Map<String, AliasGraph> fields = new LinkedHashMap<>(a.fieldElems);
+            for (var e : b.fieldElems.entrySet()) {
+                fields.merge(e.getKey(), e.getValue(), AliasGraph::merge);
+            }
+            return new AliasGraph(roots, tuple, fields);
+        }
+    }
+
     private static final class CapEnv {
         final Set<String> allowedEffects;
         final Set<String> captureBounds;
@@ -1247,6 +1439,7 @@ public final class CapabilityChecker {
         final Map<String, String> aliasOf = new LinkedHashMap<>();
         final Map<String, Set<String>> aliasRoots = new LinkedHashMap<>();
         final Map<String, Set<String>> aliases = new LinkedHashMap<>();
+        final Map<String, AliasGraph> aliasGraphs = new LinkedHashMap<>();
         final Map<String, String> viewOf = new LinkedHashMap<>();
         final Map<String, Set<String>> views = new LinkedHashMap<>();
         final Map<String, Long> budgetLimits = new LinkedHashMap<>();
@@ -1357,6 +1550,7 @@ public final class CapabilityChecker {
             c.aliasOf.putAll(aliasOf);
             for (var e : aliasRoots.entrySet()) c.aliasRoots.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
             for (var e : aliases.entrySet()) c.aliases.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
+            c.aliasGraphs.putAll(aliasGraphs);
             c.viewOf.putAll(viewOf);
             for (var e : views.entrySet()) c.views.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
             c.budgetLimits.putAll(budgetLimits);
@@ -1395,6 +1589,13 @@ public final class CapabilityChecker {
                             aliasRoots.computeIfAbsent(al, k -> new LinkedHashSet<>()).add(key);
                             aliases.computeIfAbsent(key, k -> new LinkedHashSet<>()).add(al);
                         }
+                    }
+                }
+                AliasGraph bGraph = branch.aliasGraphs.get(key);
+                if (bGraph != null && !bGraph.isEmpty()) {
+                    AliasGraph filtered = bGraph.filterOuter(outerVars);
+                    if (!filtered.isEmpty()) {
+                        aliasGraphs.merge(key, filtered, AliasGraph::merge);
                     }
                 }
                 String bViewOwner = branch.viewOf.get(key);

@@ -1833,4 +1833,201 @@ class CodexRegressionTest {
         assertEquals(1, code, "Discarded @must_resolve token from A.start() must fail with NGJ-PROTO-002: " + stdout);
         assertTrue(stdout.contains("NGJ-PROTO-002"), "Expected NGJ-PROTO-002: " + stdout);
     }
+
+    @Test
+    void tupleVariableDestructurePreservesBudgetAliasRevocation() throws Exception {
+        Path file = tempDir.resolve("tuple_var_budget_alias.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(b: Budget<Fuel>) -> Budget<Fuel> effects() {
+                val pair = (0, b);
+                val (n: Int, c: Budget<Fuel>) = pair;
+                val b2: Budget<Fuel> = b.spend(1L);
+                val c2: Budget<Fuel> = c.spend(1L);
+                return c2;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Destructuring tuple variable holding budget must preserve alias revocation: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void conditionalAndNestedTupleDestructurePreservesBudgetAliasRevocation() throws Exception {
+        Path file = tempDir.resolve("nested_cond_tuple_budget_alias.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(flag: Bool, b1: Budget<Fuel>, b2: Budget<Fuel>) -> Budget<Fuel> effects() {
+                val nested = if (flag) { ((0, b1), 1) } else { ((0, b2), 1) };
+                val (inner, tag) = nested;
+                val (n: Int, c: Budget<Fuel>) = inner;
+                val x: Budget<Fuel> = b1.spend(1L);
+                val y: Budget<Fuel> = c.spend(1L);
+                return y;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Conditional nested tuple destructure must preserve alias revocation: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void tupleVariableDestructurePreservesReadCapabilityMode() throws Exception {
+        Path file = tempDir.resolve("tuple_var_read_cap.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn mutate(a: update Arena) -> Unit effects() {
+                return ();
+            }
+
+            public fn bad(r: read Arena) -> Unit effects() {
+                val pair = (0, r);
+                val (n: Int, a: Arena) = pair;
+                mutate(a);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Destructuring read Arena through tuple variable must reject update call: " + stdout);
+        assertTrue(stdout.contains("NGJ-SEP-001"), "Expected NGJ-SEP-001: " + stdout);
+    }
+
+    @Test
+    void destructuredBudgetSplitCompilesVerifiesAndExecutesWithoutVerifyError() throws Exception {
+        String source = """
+            package test.codex.budgetdestructure;
+
+            public fn splitAndReturnLeft(b: Budget<Fuel>) -> Budget<Fuel> effects() {
+                val (left: Budget<Fuel>, right: Budget<Fuel>) = b.split(1L);
+                return left;
+            }
+
+            public fn splitAndSpendLeft(b: Budget<Fuel>) -> Budget<Fuel> effects() {
+                val (left: Budget<Fuel>, right: Budget<Fuel>) = b.split(3L);
+                return left.spend(1L);
+            }
+            """;
+        var lexer = new ngj.parser.Lexer(source, "budgetdestructure.ngj");
+        var parser = new ngj.parser.Parser(lexer, "budgetdestructure.ngj");
+        var unit = parser.parse();
+        var resolver = new ngj.typechecker.NameResolver();
+        resolver.resolve(unit);
+        var tc = new ngj.typechecker.TypeChecker();
+        tc.check(unit);
+
+        var gen = new ngj.codegen.Java25CodeGenerator();
+        Path outDir = tempDir.resolve("budgetdestructure_out");
+        Files.createDirectories(outDir);
+        gen.setOutputDir(outDir);
+        var outputs = gen.generate(unit);
+
+        java.util.Map<String, byte[]> classMap = new java.util.LinkedHashMap<>();
+        for (Path p : outputs) {
+            byte[] raw = Files.readAllBytes(p);
+            byte[] patched = raw.clone();
+            patched[4] = 0;
+            patched[5] = 0;
+            patched[6] = 0;
+            patched[7] = 69;
+            var cm = java.lang.classfile.ClassFile.of().parse(raw);
+            classMap.put(cm.thisClass().asInternalName().replace('/', '.'), patched);
+        }
+
+        ClassLoader loader = new ClassLoader(getClass().getClassLoader()) {
+            @Override
+            protected Class<?> findClass(String name) throws ClassNotFoundException {
+                byte[] b = classMap.get(name);
+                if (b != null) return defineClass(name, b, 0, b.length);
+                return super.findClass(name);
+            }
+        };
+
+        Class<?> fn1 = loader.loadClass("test.codex.budgetdestructure.splitAndReturnLeft$Fn");
+        ngj.runtime.Budget res1 = (ngj.runtime.Budget) fn1.getMethod("invoke", ngj.runtime.Budget.class)
+            .invoke(null, new ngj.runtime.Budget("Fuel", 10L));
+        assertEquals(1L, res1.remaining());
+
+        Class<?> fn2 = loader.loadClass("test.codex.budgetdestructure.splitAndSpendLeft$Fn");
+        ngj.runtime.Budget res2 = (ngj.runtime.Budget) fn2.getMethod("invoke", ngj.runtime.Budget.class)
+            .invoke(null, new ngj.runtime.Budget("Fuel", 10L));
+        assertEquals(2L, res2.remaining());
+    }
+
+    @Test
+    void destructuredTupleSecretAndStringVerifyAndExecuteWithoutVerifyError() throws Exception {
+        String source = """
+            package test.codex.secretdestructure;
+
+            public fn extractSecret() -> Secret<String> effects() {
+                val pair = ("label", Secret.of("hidden"));
+                val (label: String, sec: Secret<String>) = pair;
+                return sec;
+            }
+            """;
+        var lexer = new ngj.parser.Lexer(source, "secretdestructure.ngj");
+        var parser = new ngj.parser.Parser(lexer, "secretdestructure.ngj");
+        var unit = parser.parse();
+        var resolver = new ngj.typechecker.NameResolver();
+        resolver.resolve(unit);
+        var tc = new ngj.typechecker.TypeChecker();
+        tc.check(unit);
+
+        var gen = new ngj.codegen.Java25CodeGenerator();
+        Path outDir = tempDir.resolve("secretdestructure_out");
+        Files.createDirectories(outDir);
+        gen.setOutputDir(outDir);
+        var outputs = gen.generate(unit);
+
+        java.util.Map<String, byte[]> classMap = new java.util.LinkedHashMap<>();
+        for (Path p : outputs) {
+            byte[] raw = Files.readAllBytes(p);
+            byte[] patched = raw.clone();
+            patched[4] = 0;
+            patched[5] = 0;
+            patched[6] = 0;
+            patched[7] = 69;
+            var cm = java.lang.classfile.ClassFile.of().parse(raw);
+            classMap.put(cm.thisClass().asInternalName().replace('/', '.'), patched);
+        }
+
+        ClassLoader loader = new ClassLoader(getClass().getClassLoader()) {
+            @Override
+            protected Class<?> findClass(String name) throws ClassNotFoundException {
+                byte[] b = classMap.get(name);
+                if (b != null) return defineClass(name, b, 0, b.length);
+                return super.findClass(name);
+            }
+        };
+
+        Class<?> fn = loader.loadClass("test.codex.secretdestructure.extractSecret$Fn");
+        ngj.runtime.SecretValue sec = (ngj.runtime.SecretValue) fn.getMethod("invoke").invoke(null);
+        assertEquals("Secret(****)", sec.toString());
+    }
 }

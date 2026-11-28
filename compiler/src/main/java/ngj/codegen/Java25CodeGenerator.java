@@ -271,13 +271,44 @@ public final class Java25CodeGenerator {
     private TypeExpr resolveTypeAlias(TypeExpr type) {
         Set<String> visited = new HashSet<>();
         TypeExpr current = type;
-        while (current instanceof SimpleTypeExpr simple && typeAliases.containsKey(simple.name())) {
-            if (!visited.add(simple.name())) {
+        while (current != null) {
+            if (current instanceof SimpleTypeExpr simple && typeAliases.containsKey(simple.name())) {
+                if (!visited.add(simple.name())) {
+                    break;
+                }
+                current = typeAliases.get(simple.name()).targetType();
+            } else if (current instanceof GenericTypeExpr generic && typeAliases.containsKey(generic.name())) {
+                if (!visited.add(generic.name())) {
+                    break;
+                }
+                TypeAliasDecl alias = typeAliases.get(generic.name());
+                Map<String, TypeExpr> subst = new HashMap<>();
+                for (int i = 0; i < Math.min(alias.typeParams().size(), generic.typeArgs().size()); i++) {
+                    subst.put(alias.typeParams().get(i), generic.typeArgs().get(i));
+                }
+                current = substituteTypeParams(alias.targetType(), subst);
+            } else {
                 break;
             }
-            current = typeAliases.get(simple.name()).targetType();
         }
         return current;
+    }
+
+    private TypeExpr substituteTypeParams(TypeExpr type, Map<String, TypeExpr> subst) {
+        if (type == null || subst.isEmpty()) return type;
+        return switch (type) {
+            case SimpleTypeExpr s -> subst.getOrDefault(s.name(), s);
+            case GenericTypeExpr g -> new GenericTypeExpr(
+                g.name(),
+                g.typeArgs().stream().map(a -> substituteTypeParams(a, subst)).toList(),
+                g.span()
+            );
+            case CapabilityTypeExpr c -> new CapabilityTypeExpr(c.mode(), substituteTypeParams(c.inner(), subst), c.span());
+            case RefinedTypeExpr r -> new RefinedTypeExpr(r.binderName(), substituteTypeParams(r.baseType(), subst), r.predicate(), r.span());
+            case RangeTypeExpr r -> new RangeTypeExpr(substituteTypeParams(r.baseType(), subst), r.lowerBound(), r.upperBound(), r.upperInclusive(), r.span());
+            case TupleTypeExpr t -> new TupleTypeExpr(t.elements().stream().map(e -> substituteTypeParams(e, subst)).toList(), t.span());
+            default -> type;
+        };
     }
 
     private ClassDesc typeToClassDesc(TypeExpr type) {
@@ -519,14 +550,33 @@ public final class Java25CodeGenerator {
             case TupleDestructureStmt tds -> {
                 generateExpr(ctx, tds.initializer());
                 var initType = inferTypeName(ctx, tds.initializer());
-                int tupleSlot = ctx.allocateLocal("$tuple$" + ctx.nextSlot, "Object");
+                boolean isPair = initType.equals("Pair") && tds.names().size() == 2;
+                if (isPair) {
+                    ctx.code.checkcast(ClassDesc.of("ngj.runtime.Pair"));
+                } else {
+                    ctx.code.checkcast(ClassDesc.of("java.util.List"));
+                }
+                int tupleSlot = ctx.allocateLocal("$tuple$" + ctx.nextSlot, isPair ? "Pair" : "List");
                 ctx.code.astore(tupleSlot);
+                Expr unwrappedInit = tds.initializer();
+                while (unwrappedInit instanceof ParenExpr p) unwrappedInit = p.inner();
+                TupleExpr tupleLiteral = unwrappedInit instanceof TupleExpr te ? te : null;
+                boolean isBudgetSplit = isPair && isBudgetSplitExpr(unwrappedInit);
                 for (int i = 0; i < tds.names().size(); i++) {
                     String varName = tds.names().get(i);
                     TypeExpr explicitType = i < tds.explicitTypes().size() ? tds.explicitTypes().get(i) : null;
-                    String varType = explicitType != null ? getTypeName(explicitType) : "Object";
+                    String varType;
+                    if (explicitType != null) {
+                        varType = getTypeName(explicitType);
+                    } else if (isBudgetSplit) {
+                        varType = "Budget";
+                    } else if (tupleLiteral != null && i < tupleLiteral.elements().size()) {
+                        varType = inferTypeName(ctx, tupleLiteral.elements().get(i));
+                    } else {
+                        varType = "Object";
+                    }
                     ctx.code.aload(tupleSlot);
-                    if (initType.equals("Pair") && tds.names().size() == 2) {
+                    if (isPair) {
                         ctx.code.invokevirtual(
                             ClassDesc.of("ngj.runtime.Pair"),
                             i == 0 ? "first" : "second",
@@ -1752,6 +1802,15 @@ public final class Java25CodeGenerator {
         }
     }
     
+    private boolean isBudgetSplitExpr(Expr expr) {
+        Expr cur = expr;
+        while (cur instanceof ParenExpr p) cur = p.inner();
+        if (cur instanceof CallExpr c && c.callee() instanceof FieldAccessExpr fa && fa.fieldName().equals("split")) {
+            return true;
+        }
+        return false;
+    }
+
     private void unboxIfNeeded(CodeGenContext ctx, String targetTypeName) {
         switch (targetTypeName) {
             case "Int" -> {
@@ -1778,11 +1837,23 @@ public final class Java25CodeGenerator {
                     MethodTypeDesc.of(ConstantDescs.CD_boolean)
                 );
             }
+            case "String" -> ctx.code.checkcast(ConstantDescs.CD_String);
+            case "Budget" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.Budget"));
+            case "Secret" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.SecretValue"));
+            case "Untrusted" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.UntrustedValue"));
+            case "Validated" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.ValidatedValue"));
+            case "Pair" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.Pair"));
+            case "List", "Tuple" -> ctx.code.checkcast(ClassDesc.of("java.util.List"));
+            case "Option" -> ctx.code.checkcast(enums.containsKey("Option")
+                ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option")
+                : ClassDesc.of("java.util.Optional"));
+            case "Result" -> ctx.code.checkcast(enums.containsKey("Result")
+                ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Result")
+                : ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+            case "Function" -> ctx.code.checkcast(ClassDesc.of("java.util.function.Function"));
             default -> {
                 if (records.containsKey(targetTypeName) || datas.containsKey(targetTypeName) || enums.containsKey(targetTypeName)) {
                     ctx.code.checkcast(ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + targetTypeName));
-                } else if (targetTypeName.equals("String")) {
-                    ctx.code.checkcast(ConstantDescs.CD_String);
                 }
             }
         }
