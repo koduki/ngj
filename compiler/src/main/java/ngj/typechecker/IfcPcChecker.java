@@ -231,6 +231,20 @@ public final class IfcPcChecker {
                     untrustedVars.add(assign.name());
                 }
             }
+            case TupleDestructureStmt td -> {
+                checkExpr(td.initializer(), untrustedVars, inUntrustedPc);
+                if (td.initializer() instanceof TupleExpr te) {
+                    for (int i = 0; i < td.names().size(); i++) {
+                        boolean compUntrusted = inUntrustedPc
+                            || (i < te.elements().size() && isExprUntrusted(te.elements().get(i), untrustedVars));
+                        if (compUntrusted) {
+                            untrustedVars.add(td.names().get(i));
+                        }
+                    }
+                } else if (inUntrustedPc || isExprUntrusted(td.initializer(), untrustedVars)) {
+                    untrustedVars.addAll(td.names());
+                }
+            }
             case ReturnStmt ret -> {
                 if (ret.value() != null) checkExpr(ret.value(), untrustedVars, inUntrustedPc);
             }
@@ -292,13 +306,25 @@ public final class IfcPcChecker {
                 untrustedVars.addAll(mergedArms);
             }
             case WhileExpr whileExpr -> {
-                checkExpr(whileExpr.condition(), untrustedVars, inUntrustedPc);
-                boolean pc = inUntrustedPc || isExprUntrusted(whileExpr.condition(), untrustedVars);
-                Set<String> bodyUntrusted = new LinkedHashSet<>(untrustedVars);
-                Set<String> bodyDeclared = new LinkedHashSet<>();
-                checkBlock(whileExpr.body(), bodyUntrusted, pc, bodyDeclared);
-                bodyUntrusted.removeAll(bodyDeclared);
-                untrustedVars.addAll(bodyUntrusted);
+                Set<String> loopUntrusted = new LinkedHashSet<>(untrustedVars);
+                int diagBaseline = diagnostics.size();
+                while (true) {
+                    while (diagnostics.size() > diagBaseline) {
+                        diagnostics.remove(diagnostics.size() - 1);
+                    }
+                    Set<String> prev = new LinkedHashSet<>(loopUntrusted);
+                    checkExpr(whileExpr.condition(), loopUntrusted, inUntrustedPc);
+                    boolean pc = inUntrustedPc || isExprUntrusted(whileExpr.condition(), loopUntrusted);
+                    Set<String> bodyUntrusted = new LinkedHashSet<>(loopUntrusted);
+                    Set<String> bodyDeclared = new LinkedHashSet<>();
+                    checkBlock(whileExpr.body(), bodyUntrusted, pc, bodyDeclared);
+                    bodyUntrusted.removeAll(bodyDeclared);
+                    loopUntrusted.addAll(bodyUntrusted);
+                    if (loopUntrusted.equals(prev)) {
+                        break;
+                    }
+                }
+                untrustedVars.addAll(loopUntrusted);
             }
             case CallExpr call -> {
                 if (inUntrustedPc) {

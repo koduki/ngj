@@ -454,4 +454,98 @@ class CodexRegressionTest {
         assertEquals(1, code, "Untrusted flag flowing through if-expr must trigger NGJ-IFC-PC-001: " + stdout);
         assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
     }
+
+    @Test
+    void tupleDestructurePropagatesUntrustedTaint() throws Exception {
+        Path file = tempDir.resolve("tuple_taint.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>) -> Unit effects(PaymentWrite) {
+                val (selected, other) = (isSome(flag), 0);
+                if (selected) {
+                    pay();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Tuple destructured taint must trigger NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void whileLoopRechecksGuardAfterBodyTaint() throws Exception {
+        Path file = tempDir.resolve("while_taint.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>) -> Unit effects(PaymentWrite) {
+                var selected: Bool = true;
+                while (selected) {
+                    pay();
+                    selected = isSome(flag);
+                };
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Loop body tainting guard must trigger NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void falseInvariantIsRejectedBeforeAssuming() throws Exception {
+        Path file = tempDir.resolve("false_invariant.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int) -> Int effects()
+                requires (x > 0)
+                ensures (result > 0)
+            {
+                return x;
+            }
+
+            public fn bad() -> Int effects() {
+                invariant (false);
+                return positive(0);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "False invariant must fail verification: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
 }

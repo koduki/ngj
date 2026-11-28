@@ -192,7 +192,17 @@ public final class ProofChecker {
                 case InvariantStmt inv -> {
                     checkExprPurityAndHoles(inv.condition(), true, Set.of());
                     if (!inProofContext && ctx != null) {
-                        ctx.addAssumption(inv.condition());
+                        SmtExpr invExpr = ctx.vcGen.translateExpr(inv.condition(), ctx.sorts, ctx.ssaEnv);
+                        SmtExpr vc;
+                        if (ctx.premises.isEmpty()) {
+                            vc = invExpr;
+                        } else {
+                            SmtExpr conj = ctx.premises.size() == 1 ? ctx.premises.get(0) : new SmtExpr.And(ctx.premises);
+                            vc = new SmtExpr.Implies(conj, invExpr);
+                        }
+                        if (runSmtAndReport(vc, "<invariant>", inv.span())) {
+                            ctx.addAssumption(inv.condition());
+                        }
                     }
                 }
                 case ProofStmt proof -> checkBlockPurityAndHoles(proof.body(), true, Set.of());
@@ -644,10 +654,10 @@ public final class ProofChecker {
         }
     }
 
-    private void runSmtAndReport(SmtExpr vc, String symbolName, SourceSpan span) {
+    private boolean runSmtAndReport(SmtExpr vc, String symbolName, SourceSpan span) {
         SmtOutcome outcome = solve(vc);
         switch (outcome.status()) {
-            case PROVED -> {}
+            case PROVED -> { return true; }
             case COUNTEREXAMPLE -> {
                 Map<String, String> redacted = SecretRedactor.redactState(outcome.model(), secretVars);
                 var diagnosis = new SolverDiagnosis("counterexample_found", span, redacted);
@@ -669,6 +679,7 @@ public final class ProofChecker {
                 span
             ).withSolverDiagnosis(new SolverDiagnosis("axiomatization_gap", span, Map.of())));
         }
+        return false;
     }
 
     private SmtOutcome solve(SmtExpr vc) {
