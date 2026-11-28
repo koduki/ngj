@@ -395,9 +395,20 @@ public final class CapabilityChecker {
                     } else {
                         checkExpr(arg, env);
                         if (p.type() instanceof CapabilityTypeExpr cap
-                            && cap.mode() == CapabilityTypeExpr.CapabilityMode.UPDATE
-                            && arg instanceof IdentExpr argId) {
-                            recordAccess(argId.name(), VarMode.UPDATE, env, arg.span());
+                            && cap.mode() == CapabilityTypeExpr.CapabilityMode.UPDATE) {
+                            Expr unwrapped = arg instanceof ParenExpr pe ? pe.inner() : arg;
+                            if (unwrapped instanceof IdentExpr argId) {
+                                String root = env.resolveAlias(argId.name());
+                                if (env.modes.get(argId.name()) == VarMode.READ
+                                    || env.modes.get(root) == VarMode.READ) {
+                                    diagnostics.add(Diagnostic.error(
+                                        "NGJ-SEP-001",
+                                        "Cannot pass 'read' capability '" + argId.name() + "' to 'update' parameter '" + p.name() + "'",
+                                        arg.span() != null ? arg.span() : call.span()
+                                    ));
+                                }
+                                recordAccess(argId.name(), VarMode.UPDATE, env, arg.span());
+                            }
                         }
                     }
                 }
@@ -679,7 +690,7 @@ public final class CapabilityChecker {
     }
 
     private void recordAccess(String name, VarMode mode, CapEnv env, SourceSpan span) {
-        String root = env.aliasOf.getOrDefault(name, name);
+        String root = env.resolveAlias(name);
         if (env.currentFork != null) {
             env.currentFork.accesses.merge(root, mode, (a, b) -> a == VarMode.UPDATE || b == VarMode.UPDATE ? VarMode.UPDATE : VarMode.READ);
         } else if (env.activeScope != null) {
@@ -729,8 +740,9 @@ public final class CapabilityChecker {
 
     private void linkAliasOrView(String varName, Expr init, CapEnv env) {
         if (init instanceof IdentExpr id) {
-            env.aliasOf.put(varName, env.aliasOf.getOrDefault(id.name(), id.name()));
-            env.aliases.computeIfAbsent(id.name(), k -> new LinkedHashSet<>()).add(varName);
+            String root = env.resolveAlias(id.name());
+            env.aliasOf.put(varName, root);
+            env.aliases.computeIfAbsent(root, k -> new LinkedHashSet<>()).add(varName);
         } else if (init instanceof CallExpr c && c.callee() instanceof FieldAccessExpr fa) {
             String m = fa.fieldName();
             if ((m.equals("slice") || m.equals("sliceExact") || m.equals("alloc")
@@ -890,15 +902,29 @@ public final class CapabilityChecker {
             return false;
         }
 
-        void markConsumed(String name) {
-            states.put(name, CapState.CONSUMED);
-            String root = aliasOf.getOrDefault(name, name);
-            if (!root.equals(name)) {
-                states.put(root, CapState.CONSUMED);
+        String resolveAlias(String name) {
+            String cur = name;
+            Set<String> seen = new LinkedHashSet<>();
+            while (aliasOf.containsKey(cur) && seen.add(cur)) {
+                cur = aliasOf.get(cur);
             }
-            Set<String> al = aliases.get(root);
-            if (al != null) {
-                for (String a : al) states.put(a, CapState.CONSUMED);
+            return cur;
+        }
+
+        void markConsumed(String name) {
+            String root = resolveAlias(name);
+            Set<String> visited = new LinkedHashSet<>();
+            Deque<String> worklist = new ArrayDeque<>();
+            worklist.add(name);
+            worklist.add(root);
+            while (!worklist.isEmpty()) {
+                String cur = worklist.poll();
+                if (!visited.add(cur)) continue;
+                states.put(cur, CapState.CONSUMED);
+                Set<String> al = aliases.get(cur);
+                if (al != null) {
+                    worklist.addAll(al);
+                }
             }
         }
 

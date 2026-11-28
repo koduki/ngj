@@ -354,6 +354,7 @@ public final class RefinementChecker {
                     valInterval = valInterval.meet(intervalForType(targetType, env));
                 }
                 env.intervals.put(assign.name(), valInterval);
+                env.diff.assignInterval(assign.name(), valInterval);
             }
             case ReturnStmt ret -> {
                 if (ret.value() != null) {
@@ -564,25 +565,100 @@ public final class RefinementChecker {
         TypeExpr expanded = expandType(targetType, new LinkedHashSet<>(), span);
         if (expanded instanceof RangeTypeExpr range) {
             Interval actual = evalInterval(valueExpr, env);
-            Interval expected = intervalForRange(range, env);
-            if (!expected.isEmpty() && !actual.isEmpty() && !actual.isSubsetOf(expected)) {
-                emitRefinementFailure(expanded, valueExpr, actual, expected, env, span);
-            } else if (!expected.isEmpty() && actual.isUnbounded()) {
-                emitRefinementFailure(expanded, valueExpr, actual, expected, env, span);
+            Interval expectedOuter = intervalForRange(range, env);
+            if (!expectedOuter.isEmpty() && !actual.isEmpty() && !actual.isSubsetOf(expectedOuter)) {
+                emitRefinementFailure(expanded, valueExpr, actual, expectedOuter, env, span);
+                return;
+            }
+            if (!expectedOuter.isEmpty() && actual.isUnbounded()) {
+                emitRefinementFailure(expanded, valueExpr, actual, expectedOuter, env, span);
+                return;
+            }
+            if (range.lowerBound() != null && !isLowerBoundProved(valueExpr, range.lowerBound(), env)) {
+                Interval loI = evalInterval(range.lowerBound(), env);
+                BigInteger guaranteedLo = loI.upper();
+                if (guaranteedLo == null || actual.lower() == null || actual.lower().compareTo(guaranteedLo) < 0) {
+                    emitRefinementFailure(expanded, valueExpr, actual, strictIntervalForRange(range, env), env, span);
+                    return;
+                }
+            }
+            if (range.upperBound() != null && !isUpperBoundProved(valueExpr, range.upperBound(), range.upperInclusive(), env)) {
+                Interval hiI = evalInterval(range.upperBound(), env);
+                BigInteger guaranteedHi = hiI.lower();
+                if (guaranteedHi != null && !range.upperInclusive()) {
+                    guaranteedHi = guaranteedHi.subtract(BigInteger.ONE);
+                }
+                if (guaranteedHi == null || actual.upper() == null || actual.upper().compareTo(guaranteedHi) > 0) {
+                    emitRefinementFailure(expanded, valueExpr, actual, strictIntervalForRange(range, env), env, span);
+                    return;
+                }
             }
         } else if (expanded instanceof RefinedTypeExpr ref) {
             Interval actual = evalInterval(valueExpr, env);
             Interval expected = intervalForRefined(ref, env);
             if (!expected.isEmpty() && (actual.isUnbounded() || !actual.isSubsetOf(expected))) {
                 emitRefinementFailure(expanded, valueExpr, actual, expected, env, span);
-            } else if (expected.isUnbounded() && ref.predicate() != null) {
-                // Check boolean predicate directly if possible
+                return;
+            }
+            if (ref.predicate() != null && !isIntervalRepresentable(ref.binderName(), ref.predicate())) {
+                if (hasMatchingRefinedType(valueExpr, ref, env)) {
+                    return;
+                }
                 Boolean holds = evalPredicateHolds(ref.binderName(), valueExpr, ref.predicate(), env);
-                if (Boolean.FALSE.equals(holds)) {
+                if (!Boolean.TRUE.equals(holds)) {
                     emitRefinementFailure(expanded, valueExpr, actual, expected, env, span);
                 }
             }
         }
+    }
+
+    private boolean isLowerBoundProved(Expr actualExpr, Expr boundExpr, RefinementEnv env) {
+        if (actualExpr instanceof IdentExpr ax && boundExpr instanceof IdentExpr bx) {
+            var diffBound = env.diff.getDifferenceBound(bx.name(), ax.name());
+            if (diffBound.isPresent() && diffBound.get().signum() <= 0) {
+                return true;
+            }
+        }
+        Integer ac = env.toEClass(actualExpr);
+        Integer bc = env.toEClass(boundExpr);
+        return ac != null && bc != null && env.egraph.areEqual(ac, bc);
+    }
+
+    private boolean isUpperBoundProved(Expr actualExpr, Expr boundExpr, boolean inclusive, RefinementEnv env) {
+        if (actualExpr instanceof IdentExpr ax && boundExpr instanceof IdentExpr bx) {
+            var diffBound = env.diff.getDifferenceBound(ax.name(), bx.name());
+            if (diffBound.isPresent()) {
+                int limit = inclusive ? 0 : -1;
+                if (diffBound.get().compareTo(BigInteger.valueOf(limit)) <= 0) {
+                    return true;
+                }
+            }
+        }
+        if (inclusive) {
+            Integer ac = env.toEClass(actualExpr);
+            Integer bc = env.toEClass(boundExpr);
+            if (ac != null && bc != null && env.egraph.areEqual(ac, bc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Interval strictIntervalForRange(RangeTypeExpr range, RefinementEnv env) {
+        BigInteger lo = null;
+        if (range.lowerBound() != null) {
+            Interval loI = evalInterval(range.lowerBound(), env);
+            lo = loI.upper();
+        }
+        BigInteger hi = null;
+        if (range.upperBound() != null) {
+            Interval hiI = evalInterval(range.upperBound(), env);
+            if (hiI.lower() != null) {
+                hi = range.upperInclusive() ? hiI.lower() : hiI.lower().subtract(BigInteger.ONE);
+            }
+        }
+        BitWidth width = bitWidthOf(range.baseType());
+        return Interval.closed(lo, hi).clamp(width);
     }
 
     private void emitRefinementFailure(
@@ -779,37 +855,142 @@ public final class RefinementChecker {
         return armEnv;
     }
 
-    private Boolean evalPredicateHolds(String binder, Expr valueExpr, Expr pred, RefinementEnv env) {
-        if (pred instanceof BinaryExpr b && b.left() instanceof IdentExpr id && id.name().equals(binder)) {
-            if (b.op() == BinaryExpr.BinaryOp.EQ) {
-                Integer vc = env.toEClass(valueExpr);
-                Integer rc = env.toEClass(b.right());
-                if (vc != null && rc != null && env.egraph.areEqual(vc, rc)) {
-                    return Boolean.TRUE;
+    private boolean isIntervalRepresentable(String binder, Expr pred) {
+        if (pred == null) return true;
+        return switch (pred) {
+            case ParenExpr p -> isIntervalRepresentable(binder, p.inner());
+            case BinaryExpr b -> switch (b.op()) {
+                case AND -> isIntervalRepresentable(binder, b.left()) && isIntervalRepresentable(binder, b.right());
+                case LT, LE, GT, GE, EQ -> {
+                    if (b.left() instanceof IdentExpr id && id.name().equals(binder)) {
+                        yield isConstantNumberExpr(b.right());
+                    }
+                    if (b.right() instanceof IdentExpr id && id.name().equals(binder)) {
+                        yield isConstantNumberExpr(b.left());
+                    }
+                    yield false;
                 }
+                default -> false;
+            };
+            default -> false;
+        };
+    }
+
+    private boolean isConstantNumberExpr(Expr expr) {
+        return switch (expr) {
+            case LiteralExpr lit -> lit.kind() == LiteralExpr.LiteralKind.INT
+                || lit.kind() == LiteralExpr.LiteralKind.LONG;
+            case UnaryExpr u when u.op() == UnaryExpr.UnaryOp.NEG -> isConstantNumberExpr(u.operand());
+            case ParenExpr p -> isConstantNumberExpr(p.inner());
+            default -> false;
+        };
+    }
+
+    private boolean hasMatchingRefinedType(Expr valueExpr, RefinedTypeExpr targetRef, RefinementEnv env) {
+        if (!(valueExpr instanceof IdentExpr id)) return false;
+        TypeExpr actualType = env.types.get(id.name());
+        if (actualType == null) return false;
+        TypeExpr expandedActual = expandType(actualType, new LinkedHashSet<>(), valueExpr.span());
+        if (!(expandedActual instanceof RefinedTypeExpr actualRef)) return false;
+        if (actualRef.predicate() == null || targetRef.predicate() == null) return false;
+        Expr actualNorm = substituteExpr(actualRef.predicate(),
+            Map.of(actualRef.binderName(), new IdentExpr(targetRef.binderName(), null)));
+        return actualNorm.toString().equals(targetRef.predicate().toString());
+    }
+
+    private Boolean evalPredicateHolds(String binder, Expr valueExpr, Expr pred, RefinementEnv env) {
+        if (pred == null) return Boolean.TRUE;
+        return switch (pred) {
+            case ParenExpr p -> evalPredicateHolds(binder, valueExpr, p.inner(), env);
+            case UnaryExpr u when u.op() == UnaryExpr.UnaryOp.NOT -> {
+                Boolean inner = evalPredicateHolds(binder, valueExpr, u.operand(), env);
+                yield inner != null ? !inner : null;
             }
-            Interval v = evalInterval(valueExpr, env);
-            Interval rhs = evalInterval(b.right(), env);
-            if (!v.isUnbounded() && rhs.isSingleton()) {
-                BigInteger c = rhs.singletonValue().orElseThrow();
-                return switch (b.op()) {
-                    case GT -> v.lower() != null && v.lower().compareTo(c) > 0 ? Boolean.TRUE
-                        : (v.upper() != null && v.upper().compareTo(c) <= 0 ? Boolean.FALSE : null);
-                    case GE -> v.lower() != null && v.lower().compareTo(c) >= 0 ? Boolean.TRUE
-                        : (v.upper() != null && v.upper().compareTo(c) < 0 ? Boolean.FALSE : null);
-                    case LT -> v.upper() != null && v.upper().compareTo(c) < 0 ? Boolean.TRUE
-                        : (v.lower() != null && v.lower().compareTo(c) >= 0 ? Boolean.FALSE : null);
-                    case LE -> v.upper() != null && v.upper().compareTo(c) <= 0 ? Boolean.TRUE
-                        : (v.lower() != null && v.lower().compareTo(c) > 0 ? Boolean.FALSE : null);
-                    case EQ -> v.isSingleton() && v.lower().equals(c) ? Boolean.TRUE
-                        : (!v.contains(c) ? Boolean.FALSE : null);
-                    case NE -> !v.contains(c) ? Boolean.TRUE
-                        : (v.isSingleton() && v.lower().equals(c) ? Boolean.FALSE : null);
-                    default -> null;
-                };
-            }
-        }
-        return null;
+            case BinaryExpr b -> switch (b.op()) {
+                case AND -> {
+                    Boolean l = evalPredicateHolds(binder, valueExpr, b.left(), env);
+                    Boolean r = evalPredicateHolds(binder, valueExpr, b.right(), env);
+                    if (Boolean.FALSE.equals(l) || Boolean.FALSE.equals(r)) yield Boolean.FALSE;
+                    if (Boolean.TRUE.equals(l) && Boolean.TRUE.equals(r)) yield Boolean.TRUE;
+                    yield null;
+                }
+                case OR -> {
+                    Boolean l = evalPredicateHolds(binder, valueExpr, b.left(), env);
+                    Boolean r = evalPredicateHolds(binder, valueExpr, b.right(), env);
+                    if (Boolean.TRUE.equals(l) || Boolean.TRUE.equals(r)) yield Boolean.TRUE;
+                    if (Boolean.FALSE.equals(l) && Boolean.FALSE.equals(r)) yield Boolean.FALSE;
+                    yield null;
+                }
+                case EQ, NE, LT, LE, GT, GE -> {
+                    Expr lhsExpr = substituteExpr(b.left(), Map.of(binder, valueExpr));
+                    Expr rhsExpr = substituteExpr(b.right(), Map.of(binder, valueExpr));
+                    if (b.op() == BinaryExpr.BinaryOp.EQ) {
+                        Integer lc = env.toEClass(lhsExpr);
+                        Integer rc = env.toEClass(rhsExpr);
+                        if (lc != null && rc != null && env.egraph.areEqual(lc, rc)) {
+                            yield Boolean.TRUE;
+                        }
+                    }
+                    Interval lv = evalInterval(lhsExpr, env);
+                    Interval rv = evalInterval(rhsExpr, env);
+                    if (lv.isEmpty() || rv.isEmpty()) yield null;
+                    yield switch (b.op()) {
+                        case EQ -> {
+                            if (lv.isSingleton() && rv.isSingleton()) {
+                                yield lv.lower().equals(rv.lower());
+                            }
+                            yield !lv.intersects(rv) ? Boolean.FALSE : null;
+                        }
+                        case NE -> {
+                            if (!lv.intersects(rv)) yield Boolean.TRUE;
+                            if (lv.isSingleton() && rv.isSingleton() && lv.lower().equals(rv.lower())) {
+                                yield Boolean.FALSE;
+                            }
+                            yield null;
+                        }
+                        case LT -> {
+                            if (lv.upper() != null && rv.lower() != null && lv.upper().compareTo(rv.lower()) < 0) {
+                                yield Boolean.TRUE;
+                            }
+                            if (lv.lower() != null && rv.upper() != null && lv.lower().compareTo(rv.upper()) >= 0) {
+                                yield Boolean.FALSE;
+                            }
+                            yield null;
+                        }
+                        case LE -> {
+                            if (lv.upper() != null && rv.lower() != null && lv.upper().compareTo(rv.lower()) <= 0) {
+                                yield Boolean.TRUE;
+                            }
+                            if (lv.lower() != null && rv.upper() != null && lv.lower().compareTo(rv.upper()) > 0) {
+                                yield Boolean.FALSE;
+                            }
+                            yield null;
+                        }
+                        case GT -> {
+                            if (lv.lower() != null && rv.upper() != null && lv.lower().compareTo(rv.upper()) > 0) {
+                                yield Boolean.TRUE;
+                            }
+                            if (lv.upper() != null && rv.lower() != null && lv.upper().compareTo(rv.lower()) <= 0) {
+                                yield Boolean.FALSE;
+                            }
+                            yield null;
+                        }
+                        case GE -> {
+                            if (lv.lower() != null && rv.upper() != null && lv.lower().compareTo(rv.upper()) >= 0) {
+                                yield Boolean.TRUE;
+                            }
+                            if (lv.upper() != null && rv.lower() != null && lv.upper().compareTo(rv.lower()) < 0) {
+                                yield Boolean.FALSE;
+                            }
+                            yield null;
+                        }
+                        default -> null;
+                    };
+                }
+                default -> null;
+            };
+            default -> null;
+        };
     }
 
     private TypeExpr substituteExprParams(TypeExpr type, Map<String, Expr> subst) {
@@ -977,6 +1158,7 @@ public final class RefinementChecker {
         final Set<String> mutableVars = new LinkedHashSet<>();
         EGraph egraph = new EGraph();
         final Map<String, Integer> varClasses = new LinkedHashMap<>();
+        IntervalDomain diff = new IntervalDomain();
 
         RefinementEnv copy() {
             RefinementEnv c = new RefinementEnv();
@@ -985,6 +1167,7 @@ public final class RefinementChecker {
             c.mutableVars.addAll(this.mutableVars);
             c.egraph = this.egraph.copy();
             c.varClasses.putAll(this.varClasses);
+            c.diff = this.diff.copy();
             return c;
         }
 
@@ -998,6 +1181,7 @@ public final class RefinementChecker {
             this.egraph = other.egraph.copy();
             this.varClasses.clear();
             this.varClasses.putAll(other.varClasses);
+            this.diff = other.diff.copy();
         }
 
         void joinFrom(RefinementEnv a, RefinementEnv b) {
@@ -1006,13 +1190,25 @@ public final class RefinementChecker {
                 Interval ib = b.intervals.getOrDefault(key, Interval.top());
                 this.intervals.put(key, ia.join(ib));
             }
+            this.diff = a.diff.join(b.diff);
         }
 
         void bind(String name, TypeExpr type, Interval interval, boolean isMutable) {
             if (type != null) types.put(name, type);
-            intervals.put(name, interval != null ? interval : Interval.top());
+            Interval effective = interval != null ? interval : Interval.top();
+            intervals.put(name, effective);
             if (isMutable) mutableVars.add(name);
             varClasses.put(name, egraph.addVar(name));
+            diff.assignInterval(name, effective);
+            if (type instanceof RangeTypeExpr range) {
+                if (range.lowerBound() instanceof IdentExpr loId) {
+                    diff.addSymbolicLowerBound(name, loId.name(), BigInteger.ZERO);
+                }
+                if (range.upperBound() instanceof IdentExpr hiId) {
+                    diff.addSymbolicUpperBound(name, hiId.name(),
+                        range.upperInclusive() ? BigInteger.ZERO : BigInteger.ONE.negate());
+                }
+            }
         }
 
         void equate(String varName, Expr expr) {
@@ -1020,6 +1216,10 @@ public final class RefinementChecker {
             Integer rhs = toEClass(expr);
             if (lhs != null && rhs != null) {
                 egraph.union(lhs, rhs);
+            }
+            if (expr instanceof IdentExpr rhsId) {
+                diff.addDifferenceBound(varName, rhsId.name(), BigInteger.ZERO);
+                diff.addDifferenceBound(rhsId.name(), varName, BigInteger.ZERO);
             }
         }
 
@@ -1041,6 +1241,18 @@ public final class RefinementChecker {
                             yield egraph.addCommutativeApp(b.op().name(), l, r);
                         }
                         yield egraph.addApp(b.op().name(), l, r);
+                    }
+                    yield null;
+                }
+                case CallExpr c -> {
+                    if (c.callee() instanceof IdentExpr id) {
+                        int[] argClasses = new int[c.args().size()];
+                        for (int i = 0; i < c.args().size(); i++) {
+                            Integer ac = toEClass(c.args().get(i));
+                            if (ac == null) yield null;
+                            argClasses[i] = ac;
+                        }
+                        yield egraph.addApp(id.name(), argClasses);
                     }
                     yield null;
                 }
@@ -1066,6 +1278,26 @@ public final class RefinementChecker {
                     }
                     BinaryExpr.BinaryOp effOp = truth ? b.op() : negateOp(b.op());
                     if (effOp == null) return;
+                    if (effOp == BinaryExpr.BinaryOp.EQ) {
+                        Integer lc = toEClass(b.left());
+                        Integer rc = toEClass(b.right());
+                        if (lc != null && rc != null) {
+                            egraph.union(lc, rc);
+                        }
+                    }
+                    if (b.left() instanceof IdentExpr lx && b.right() instanceof IdentExpr rx) {
+                        switch (effOp) {
+                            case LT -> diff.addDifferenceBound(lx.name(), rx.name(), BigInteger.ONE.negate());
+                            case LE -> diff.addDifferenceBound(lx.name(), rx.name(), BigInteger.ZERO);
+                            case GT -> diff.addDifferenceBound(rx.name(), lx.name(), BigInteger.ONE.negate());
+                            case GE -> diff.addDifferenceBound(rx.name(), lx.name(), BigInteger.ZERO);
+                            case EQ -> {
+                                diff.addDifferenceBound(lx.name(), rx.name(), BigInteger.ZERO);
+                                diff.addDifferenceBound(rx.name(), lx.name(), BigInteger.ZERO);
+                            }
+                            default -> {}
+                        }
+                    }
                     if (b.left() instanceof IdentExpr id) {
                         Interval rhs = evalInterval(b.right(), this);
                         Interval cur = intervals.getOrDefault(id.name(), Interval.top());
