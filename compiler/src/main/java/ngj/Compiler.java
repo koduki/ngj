@@ -215,7 +215,8 @@ public final class Compiler {
 
         PureJvmSmtSolver jvmSolver = new PureJvmSmtSolver();
         Map<String, SpecFnDecl> specFns = lastTypedIR.specFunctions();
-        VcGenerator vcGen = new VcGenerator(specFns);
+        Map<String, TypeAliasDecl> typeAliases = collectTypeAliases();
+        VcGenerator vcGen = new VcGenerator(specFns, typeAliases);
 
         // Surface A: SMT verification of requires => ensures
         List<Expr> reqExprs = targetFn.contracts().stream()
@@ -290,7 +291,7 @@ public final class Compiler {
         boolean surfaceBPassed = surfaceBFindings.isEmpty();
 
         // Surface C: Post2Exe + 2-call uniqueness + mutation PBT
-        Post2ExeVerifier post2Exe = new Post2ExeVerifier(specFns, jvmSolver);
+        Post2ExeVerifier post2Exe = new Post2ExeVerifier(specFns, jvmSolver, typeAliases);
         Post2ExeReport surfaceCReport = post2Exe.verify(targetFn);
         boolean surfaceCPassed = surfaceCReport.passed() && surfaceCReport.uniquenessProved();
 
@@ -411,20 +412,33 @@ public final class Compiler {
     }
 
     private void enrichAndRedactDiagnostics() {
+        SecretRedactionContext secretCtx = collectSecretRedactionContext();
         List<Diagnostic> enriched = new ArrayList<>(diagnostics.size());
         for (Diagnostic d : diagnostics) {
             Diagnostic cur = d;
             if (cur.exprSnippet() == null || cur.exprSnippet().isBlank()) {
                 String snippet = extractSnippet(cur.primarySpan());
                 if (snippet != null && !snippet.isBlank()) {
-                    cur = cur.withExprSnippet(snippet);
+                    cur = cur.withExprSnippet(maskIfSecretSpan(snippet, cur.primarySpan(), secretCtx));
                 }
+            } else if (secretCtx.isSpanInsideSecretValue(cur.primarySpan())) {
+                cur = cur.withExprSnippet(maskIfSecretSpan(cur.exprSnippet(), cur.primarySpan(), secretCtx));
             }
             if (cur.derivationTrace().isEmpty() && cur.primarySpan() != null) {
                 String snippet = cur.exprSnippet() != null ? cur.exprSnippet() : "";
                 cur = cur.withDerivationTrace(List.of(
                     new DerivationStep(1, cur.primarySpan(), snippet, cur.message())
                 ));
+            } else if (!cur.derivationTrace().isEmpty()) {
+                List<DerivationStep> maskedSteps = cur.derivationTrace().stream()
+                    .map(step -> new DerivationStep(
+                        step.step(),
+                        step.span(),
+                        maskIfSecretSpan(step.exprSnippet(), step.span(), secretCtx),
+                        step.reason()
+                    ))
+                    .toList();
+                cur = cur.withDerivationTrace(maskedSteps);
             }
             if (cur.obligationId() == null) {
                 String sym = cur.symbolId() != null ? cur.symbolId() : "module";
@@ -437,10 +451,10 @@ public final class Compiler {
                     Suggestion.REQUIRES_REVIEW
                 )));
             }
-            Set<String> secretKeys = findSecretParamsForDiagnostic(cur);
-            if (cur.solverDiagnosis() != null && !secretKeys.isEmpty()) {
+            Set<String> fnSecretKeys = findSecretParamsForDiagnostic(cur, secretCtx);
+            if (cur.solverDiagnosis() != null && !fnSecretKeys.isEmpty()) {
                 Map<String, String> state = new LinkedHashMap<>(cur.solverDiagnosis().counterexampleState());
-                for (String sk : secretKeys) {
+                for (String sk : fnSecretKeys) {
                     state.put(sk, SecretRedactor.MASK);
                 }
                 cur = cur.withSolverDiagnosis(new SolverDiagnosis(
@@ -449,16 +463,421 @@ public final class Compiler {
                     state
                 ));
             }
-            enriched.add(SecretRedactor.redactDiagnostic(cur, secretKeys));
+            Set<String> redactionKeys = new LinkedHashSet<>(fnSecretKeys);
+            redactionKeys.addAll(secretCtx.allSecretKeys());
+            enriched.add(SecretRedactor.redactDiagnostic(
+                cur,
+                redactionKeys,
+                secretCtx.secretTypeNames(),
+                secretCtx.secretLiterals()
+            ));
         }
         diagnostics.clear();
         diagnostics.addAll(enriched);
     }
 
-    private Set<String> findSecretParamsForDiagnostic(Diagnostic d) {
+    private String maskIfSecretSpan(String snippet, SourceSpan span, SecretRedactionContext secretCtx) {
+        if (snippet == null || !secretCtx.isSpanInsideSecretValue(span)) {
+            return snippet;
+        }
+        String trimmed = snippet.trim();
+        if (trimmed.length() >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            return "\"" + SecretRedactor.MASK + "\"";
+        }
+        return SecretRedactor.MASK;
+    }
+
+    private Map<String, TypeAliasDecl> collectTypeAliases() {
+        Map<String, TypeAliasDecl> aliases = new LinkedHashMap<>();
+        for (var unit : parsedUnits.values()) {
+            for (var decl : unit.declarations()) {
+                if (decl instanceof TypeAliasDecl ta) {
+                    aliases.put(ta.name(), ta);
+                }
+            }
+        }
+        return aliases;
+    }
+
+    private record SecretRedactionContext(
+        Map<String, TypeAliasDecl> typeAliases,
+        Set<String> secretTypeNames,
+        Set<String> allSecretKeys,
+        Set<String> secretLiterals,
+        List<SourceSpan> secretValueSpans
+    ) {
+        boolean isSpanInsideSecretValue(SourceSpan span) {
+            if (span == null || span.file() == null) return false;
+            for (SourceSpan sv : secretValueSpans) {
+                if (sv != null && Objects.equals(span.file(), sv.file())
+                    && span.startByte() >= sv.startByte()
+                    && span.endByte() <= sv.endByte()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private SecretRedactionContext collectSecretRedactionContext() {
+        Map<String, TypeAliasDecl> aliases = collectTypeAliases();
+        Map<String, FnDecl> fnDecls = new LinkedHashMap<>();
+        Map<String, TopLevelDecl> typeDecls = new LinkedHashMap<>();
+        for (var unit : parsedUnits.values()) {
+            for (var decl : unit.declarations()) {
+                switch (decl) {
+                    case FnDecl fn -> fnDecls.put(fn.name(), fn);
+                    case RecordDecl r -> typeDecls.put(r.name(), r);
+                    case DataDecl d -> typeDecls.put(d.name(), d);
+                    case EnumDecl e -> typeDecls.put(e.name(), e);
+                    default -> {}
+                }
+            }
+        }
+
+        Set<String> secretTypeNames = new LinkedHashSet<>();
+        secretTypeNames.add("Secret");
+        for (var alias : aliases.values()) {
+            if (isSecretTypeExpr(alias.targetType(), aliases, new LinkedHashSet<>())) {
+                secretTypeNames.add(alias.name());
+            }
+        }
+
+        Set<String> allSecretKeys = new LinkedHashSet<>();
+        Set<String> secretLiterals = new LinkedHashSet<>();
+        List<SourceSpan> secretValueSpans = new ArrayList<>();
+
+        for (var decl : typeDecls.values()) {
+            if (decl instanceof RecordDecl r) {
+                for (var p : r.params()) {
+                    if (isSecretTypeExpr(p.type(), aliases, new LinkedHashSet<>())) {
+                        allSecretKeys.add(p.name());
+                    }
+                }
+            } else if (decl instanceof DataDecl d) {
+                for (var f : d.fields()) {
+                    if (isSecretTypeExpr(f.type(), aliases, new LinkedHashSet<>())) {
+                        allSecretKeys.add(f.name());
+                    }
+                }
+            } else if (decl instanceof EnumDecl e) {
+                for (var v : e.variants()) {
+                    for (var f : v.fields()) {
+                        if (isSecretTypeExpr(f.type(), aliases, new LinkedHashSet<>())) {
+                            allSecretKeys.add(f.name());
+                        }
+                    }
+                }
+            }
+        }
+
+        for (var unit : parsedUnits.values()) {
+            for (var decl : unit.declarations()) {
+                if (decl instanceof FnDecl fn) {
+                    Set<String> fnSecrets = new LinkedHashSet<>();
+                    for (var p : fn.params()) {
+                        if (SecretRedactor.isSecretVariableName(p.name())
+                            || isSecretTypeExpr(p.type(), aliases, new LinkedHashSet<>())) {
+                            fnSecrets.add(p.name());
+                            allSecretKeys.add(p.name());
+                        }
+                    }
+                    boolean secretReturn = isSecretTypeExpr(fn.returnType(), aliases, new LinkedHashSet<>());
+                    if (fn.body() != null) {
+                        collectSecretsInBlock(
+                            fn.body(), aliases, fnDecls, typeDecls,
+                            fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans
+                        );
+                    }
+                }
+            }
+        }
+
+        return new SecretRedactionContext(aliases, secretTypeNames, allSecretKeys, secretLiterals, secretValueSpans);
+    }
+
+    private void collectSecretsInBlock(
+        BlockExpr block,
+        Map<String, TypeAliasDecl> aliases,
+        Map<String, FnDecl> fnDecls,
+        Map<String, TopLevelDecl> typeDecls,
+        Set<String> fnSecrets,
+        boolean secretReturn,
+        Set<String> allSecretKeys,
+        Set<String> secretLiterals,
+        List<SourceSpan> secretValueSpans
+    ) {
+        if (block == null) return;
+        for (var stmt : block.statements()) {
+            switch (stmt) {
+                case ValStmt v -> {
+                    boolean sec = SecretRedactor.isSecretVariableName(v.name())
+                        || isSecretTypeExpr(v.explicitType(), aliases, new LinkedHashSet<>());
+                    if (sec) {
+                        fnSecrets.add(v.name());
+                        allSecretKeys.add(v.name());
+                        recordSecretExprLiterals(v.initializer(), secretLiterals, secretValueSpans);
+                    }
+                    collectSecretsInExpr(v.initializer(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                }
+                case LetStmt l -> {
+                    boolean sec = SecretRedactor.isSecretVariableName(l.name())
+                        || isSecretTypeExpr(l.explicitType(), aliases, new LinkedHashSet<>());
+                    if (sec) {
+                        fnSecrets.add(l.name());
+                        allSecretKeys.add(l.name());
+                        recordSecretExprLiterals(l.initializer(), secretLiterals, secretValueSpans);
+                    }
+                    collectSecretsInExpr(l.initializer(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                }
+                case VarStmt v -> {
+                    boolean sec = SecretRedactor.isSecretVariableName(v.name())
+                        || isSecretTypeExpr(v.explicitType(), aliases, new LinkedHashSet<>());
+                    if (sec) {
+                        fnSecrets.add(v.name());
+                        allSecretKeys.add(v.name());
+                        recordSecretExprLiterals(v.initializer(), secretLiterals, secretValueSpans);
+                    }
+                    collectSecretsInExpr(v.initializer(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                }
+                case AssignStmt a -> {
+                    if (fnSecrets.contains(a.name()) || SecretRedactor.isSecretVariableName(a.name())) {
+                        recordSecretExprLiterals(a.value(), secretLiterals, secretValueSpans);
+                    }
+                    collectSecretsInExpr(a.value(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                }
+                case TupleDestructureStmt td -> {
+                    TupleExpr te = td.initializer() instanceof TupleExpr t ? t : null;
+                    for (int i = 0; i < td.names().size(); i++) {
+                        String n = td.names().get(i);
+                        TypeExpr explicitT = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
+                        if (SecretRedactor.isSecretVariableName(n) || isSecretTypeExpr(explicitT, aliases, new LinkedHashSet<>())) {
+                            fnSecrets.add(n);
+                            allSecretKeys.add(n);
+                            if (te != null && i < te.elements().size()) {
+                                recordSecretExprLiterals(te.elements().get(i), secretLiterals, secretValueSpans);
+                            }
+                        }
+                    }
+                    collectSecretsInExpr(td.initializer(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                }
+                case ReturnStmt r -> {
+                    if (r.value() != null) {
+                        if (secretReturn) {
+                            recordSecretExprLiterals(r.value(), secretLiterals, secretValueSpans);
+                        }
+                        collectSecretsInExpr(r.value(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                    }
+                }
+                case ExprStmt es -> collectSecretsInExpr(es.expr(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                default -> {}
+            }
+        }
+        if (block.tailExpr() != null) {
+            if (secretReturn) {
+                recordSecretExprLiterals(block.tailExpr(), secretLiterals, secretValueSpans);
+            }
+            collectSecretsInExpr(block.tailExpr(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+        }
+    }
+
+    private void collectSecretsInExpr(
+        Expr expr,
+        Map<String, TypeAliasDecl> aliases,
+        Map<String, FnDecl> fnDecls,
+        Map<String, TopLevelDecl> typeDecls,
+        Set<String> fnSecrets,
+        boolean secretReturn,
+        Set<String> allSecretKeys,
+        Set<String> secretLiterals,
+        List<SourceSpan> secretValueSpans
+    ) {
+        if (expr == null) return;
+        switch (expr) {
+            case CallExpr c -> {
+                if (c.callee() instanceof FieldAccessExpr fa
+                    && fa.object() instanceof IdentExpr obj
+                    && obj.name().equals("Secret")
+                    && fa.fieldName().equals("of")) {
+                    for (var arg : c.args()) {
+                        recordSecretExprLiterals(arg, secretLiterals, secretValueSpans);
+                    }
+                } else if (c.callee() instanceof IdentExpr id) {
+                    FnDecl fn = fnDecls.get(id.name());
+                    if (fn != null) {
+                        for (int i = 0; i < Math.min(fn.params().size(), c.args().size()); i++) {
+                            if (isSecretTypeExpr(fn.params().get(i).type(), aliases, new LinkedHashSet<>())) {
+                                recordSecretExprLiterals(c.args().get(i), secretLiterals, secretValueSpans);
+                            }
+                        }
+                    }
+                    TopLevelDecl td = typeDecls.get(id.name());
+                    if (td instanceof RecordDecl r) {
+                        for (int i = 0; i < Math.min(r.params().size(), c.args().size()); i++) {
+                            if (isSecretTypeExpr(r.params().get(i).type(), aliases, new LinkedHashSet<>())) {
+                                recordSecretExprLiterals(c.args().get(i), secretLiterals, secretValueSpans);
+                            }
+                        }
+                    }
+                }
+                collectSecretsInExpr(c.callee(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                for (var arg : c.args()) {
+                    collectSecretsInExpr(arg, aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                }
+            }
+            case ConstructorExpr c -> {
+                String shortName = c.typePath().contains(".")
+                    ? c.typePath().substring(c.typePath().lastIndexOf('.') + 1)
+                    : c.typePath();
+                TopLevelDecl td = typeDecls.get(shortName);
+                for (var f : c.fields()) {
+                    if (isSecretField(td, f.name(), aliases)) {
+                        recordSecretExprLiterals(f.value(), secretLiterals, secretValueSpans);
+                    }
+                    collectSecretsInExpr(f.value(), aliases, fnDecls, typeDecls, fnSecrets, secretReturn, allSecretKeys, secretLiterals, secretValueSpans);
+                }
+            }
+            case BlockExpr b -> collectSecretsInBlock(b, aliases, fnDecls, typeDecls, new LinkedHashSet<>(fnSecrets), false, allSecretKeys, secretLiterals, secretValueSpans);
+            case IfExpr i -> {
+                collectSecretsInExpr(i.condition(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+                collectSecretsInBlock(i.thenBranch(), aliases, fnDecls, typeDecls, new LinkedHashSet<>(fnSecrets), false, allSecretKeys, secretLiterals, secretValueSpans);
+                collectSecretsInExpr(i.elseBranch(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+            }
+            case MatchExpr m -> {
+                collectSecretsInExpr(m.scrutinee(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+                for (var arm : m.arms()) {
+                    collectSecretsInExpr(arm.body(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+                }
+            }
+            case WhileExpr w -> {
+                collectSecretsInExpr(w.condition(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+                collectSecretsInBlock(w.body(), aliases, fnDecls, typeDecls, new LinkedHashSet<>(fnSecrets), false, allSecretKeys, secretLiterals, secretValueSpans);
+            }
+            case ForExpr f -> {
+                collectSecretsInExpr(f.iterable(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+                collectSecretsInBlock(f.body(), aliases, fnDecls, typeDecls, new LinkedHashSet<>(fnSecrets), false, allSecretKeys, secretLiterals, secretValueSpans);
+            }
+            case ScopeExpr s -> collectSecretsInBlock(s.body(), aliases, fnDecls, typeDecls, new LinkedHashSet<>(fnSecrets), false, allSecretKeys, secretLiterals, secretValueSpans);
+            case ForkExpr f -> collectSecretsInBlock(f.body(), aliases, fnDecls, typeDecls, new LinkedHashSet<>(fnSecrets), false, allSecretKeys, secretLiterals, secretValueSpans);
+            case LambdaExpr l -> collectSecretsInBlock(l.body(), aliases, fnDecls, typeDecls, new LinkedHashSet<>(fnSecrets), false, allSecretKeys, secretLiterals, secretValueSpans);
+            case BinaryExpr b -> {
+                collectSecretsInExpr(b.left(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+                collectSecretsInExpr(b.right(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+            }
+            case UnaryExpr u -> collectSecretsInExpr(u.operand(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+            case ParenExpr p -> collectSecretsInExpr(p.inner(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+            case PropagateExpr p -> collectSecretsInExpr(p.inner(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+            case ConsumeExpr c -> collectSecretsInExpr(c.target(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+            case FieldAccessExpr fa -> collectSecretsInExpr(fa.object(), aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+            case TupleExpr t -> {
+                for (var e : t.elements()) {
+                    collectSecretsInExpr(e, aliases, fnDecls, typeDecls, fnSecrets, false, allSecretKeys, secretLiterals, secretValueSpans);
+                }
+            }
+            default -> {}
+        }
+    }
+
+    private boolean isSecretField(TopLevelDecl td, String fieldName, Map<String, TypeAliasDecl> aliases) {
+        if (td == null || fieldName == null) return false;
+        if (td instanceof RecordDecl r) {
+            for (var p : r.params()) {
+                if (p.name().equals(fieldName)) return isSecretTypeExpr(p.type(), aliases, new LinkedHashSet<>());
+            }
+        } else if (td instanceof DataDecl d) {
+            for (var f : d.fields()) {
+                if (f.name().equals(fieldName)) return isSecretTypeExpr(f.type(), aliases, new LinkedHashSet<>());
+            }
+        }
+        return false;
+    }
+
+    private void recordSecretExprLiterals(Expr expr, Set<String> secretLiterals, List<SourceSpan> secretValueSpans) {
+        if (expr == null) return;
+        switch (expr) {
+            case LiteralExpr lit -> {
+                if (lit.span() != null) {
+                    secretValueSpans.add(lit.span());
+                }
+                if (lit.kind() == LiteralExpr.LiteralKind.STRING && lit.value() instanceof String s && !s.isEmpty()) {
+                    secretLiterals.add(s);
+                }
+            }
+            case ParenExpr p -> recordSecretExprLiterals(p.inner(), secretLiterals, secretValueSpans);
+            case UnaryExpr u -> {
+                if (u.span() != null && u.operand() instanceof LiteralExpr) {
+                    secretValueSpans.add(u.span());
+                }
+                recordSecretExprLiterals(u.operand(), secretLiterals, secretValueSpans);
+            }
+            case CallExpr c -> {
+                for (var a : c.args()) recordSecretExprLiterals(a, secretLiterals, secretValueSpans);
+            }
+            case TupleExpr t -> {
+                for (var e : t.elements()) recordSecretExprLiterals(e, secretLiterals, secretValueSpans);
+            }
+            default -> {}
+        }
+    }
+
+    private boolean isSecretTypeExpr(TypeExpr type, Map<String, TypeAliasDecl> aliases, Set<String> seen) {
+        if (type == null) return false;
+        return switch (type) {
+            case SimpleTypeExpr s -> {
+                if (s.name().equals("Secret")) yield true;
+                if (aliases.containsKey(s.name()) && seen.add(s.name())) {
+                    boolean res = isSecretTypeExpr(aliases.get(s.name()).targetType(), aliases, seen);
+                    seen.remove(s.name());
+                    yield res;
+                }
+                yield false;
+            }
+            case GenericTypeExpr g -> {
+                if (g.name().equals("Secret")) yield true;
+                if (aliases.containsKey(g.name()) && seen.add(g.name())) {
+                    TypeAliasDecl alias = aliases.get(g.name());
+                    Map<String, TypeExpr> subst = new HashMap<>();
+                    for (int i = 0; i < Math.min(alias.typeParams().size(), g.typeArgs().size()); i++) {
+                        subst.put(alias.typeParams().get(i), g.typeArgs().get(i));
+                    }
+                    TypeExpr substituted = substituteAliasTypeParams(alias.targetType(), subst);
+                    boolean res = isSecretTypeExpr(substituted, aliases, seen);
+                    seen.remove(g.name());
+                    yield res;
+                }
+                for (var arg : g.typeArgs()) {
+                    if (isSecretTypeExpr(arg, aliases, seen)) yield true;
+                }
+                yield false;
+            }
+            case CapabilityTypeExpr c -> isSecretTypeExpr(c.inner(), aliases, seen);
+            case RefinedTypeExpr r -> isSecretTypeExpr(r.baseType(), aliases, seen);
+            case RangeTypeExpr r -> isSecretTypeExpr(r.baseType(), aliases, seen);
+            default -> false;
+        };
+    }
+
+    private TypeExpr substituteAliasTypeParams(TypeExpr type, Map<String, TypeExpr> subst) {
+        if (type == null || subst.isEmpty()) return type;
+        return switch (type) {
+            case SimpleTypeExpr s -> subst.getOrDefault(s.name(), s);
+            case GenericTypeExpr g -> new GenericTypeExpr(
+                g.name(),
+                g.typeArgs().stream().map(a -> substituteAliasTypeParams(a, subst)).toList(),
+                g.span()
+            );
+            case CapabilityTypeExpr c -> new CapabilityTypeExpr(c.mode(), substituteAliasTypeParams(c.inner(), subst), c.span());
+            case RefinedTypeExpr r -> new RefinedTypeExpr(r.binderName(), substituteAliasTypeParams(r.baseType(), subst), r.predicate(), r.span());
+            case RangeTypeExpr r -> new RangeTypeExpr(substituteAliasTypeParams(r.baseType(), subst), r.lowerBound(), r.upperBound(), r.upperInclusive(), r.span());
+            default -> type;
+        };
+    }
+
+    private Set<String> findSecretParamsForDiagnostic(Diagnostic d, SecretRedactionContext secretCtx) {
         Set<String> keys = new LinkedHashSet<>();
         String symbolId = d.symbolId();
         SourceSpan span = d.primarySpan();
+        Map<String, TypeAliasDecl> aliases = secretCtx.typeAliases();
         for (var unit : parsedUnits.values()) {
             String mod = unit.modulePath();
             for (var decl : unit.declarations()) {
@@ -472,7 +891,7 @@ public final class Compiler {
                     if (symMatch || spanMatch) {
                         for (var p : fn.params()) {
                             if (SecretRedactor.isSecretVariableName(p.name())
-                                || (p.type() != null && p.type().toString().startsWith("Secret<"))) {
+                                || isSecretTypeExpr(p.type(), aliases, new LinkedHashSet<>())) {
                                 keys.add(p.name());
                             }
                         }

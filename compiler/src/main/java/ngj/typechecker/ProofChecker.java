@@ -476,7 +476,7 @@ public final class ProofChecker {
 
         for (int i = 0; i < callee.params().size(); i++) {
             Param p = callee.params().get(i);
-            SmtExpr.Sort pSort = VcGenerator.sortOfType(p.type());
+            SmtExpr.Sort pSort = ctx.vcGen.sortOf(p.type());
             String callParamName = "__callee$" + callId + "$" + p.name();
             callSorts.put(callParamName, pSort);
             calleeSsaEnv.put(p.name(), callParamName);

@@ -20,6 +20,7 @@ public final class CapabilityChecker {
     private final Map<String, FnDecl> fnDecls = new HashMap<>();
     private final Map<String, ProtocolDecl> protocols = new HashMap<>();
     private final Map<String, TypeAliasDecl> typeAliases = new HashMap<>();
+    private final Map<String, TopLevelDecl> typeDecls = new HashMap<>();
     private final String profile;
     private final Set<String> trustedAllowlist;
 
@@ -40,6 +41,7 @@ public final class CapabilityChecker {
         fnDecls.clear();
         protocols.clear();
         typeAliases.clear();
+        typeDecls.clear();
 
         for (var unit : units) {
             for (var decl : unit.declarations()) {
@@ -49,6 +51,12 @@ public final class CapabilityChecker {
                     protocols.put(proto.name(), proto);
                 } else if (decl instanceof TypeAliasDecl ta) {
                     typeAliases.put(ta.name(), ta);
+                } else if (decl instanceof RecordDecl r) {
+                    typeDecls.put(r.name(), r);
+                } else if (decl instanceof DataDecl d) {
+                    typeDecls.put(d.name(), d);
+                } else if (decl instanceof EnumDecl e) {
+                    typeDecls.put(e.name(), e);
                 }
             }
         }
@@ -935,6 +943,23 @@ public final class CapabilityChecker {
         if (expr == null) return false;
         return switch (expr) {
             case IdentExpr id -> env.isSecret(id.name());
+            case FieldAccessExpr fa -> isSecretExpr(fa.object(), env)
+                || isSecretType(resolveFieldType(inferExprType(fa.object(), env), fa.fieldName()));
+            case CallExpr c -> {
+                if (c.callee() instanceof FieldAccessExpr fa
+                    && fa.object() instanceof IdentExpr obj
+                    && obj.name().equals("Secret")
+                    && (fa.fieldName().equals("of") || fa.fieldName().equals("map"))) {
+                    yield true;
+                }
+                if (c.callee() instanceof IdentExpr id) {
+                    FnDecl fn = fnDecls.get(id.name());
+                    if (fn != null && isSecretType(fn.returnType())) {
+                        yield true;
+                    }
+                }
+                yield false;
+            }
             case ParenExpr p -> isSecretExpr(p.inner(), env);
             case PropagateExpr p -> isSecretExpr(p.inner(), env);
             case IfExpr i -> isSecretExpr(i.thenBranch(), env) || isSecretExpr(i.elseBranch(), env);
@@ -942,6 +967,49 @@ public final class CapabilityChecker {
             case MatchExpr m -> m.arms().stream().anyMatch(a -> isSecretExpr(a.body(), env));
             default -> false;
         };
+    }
+
+    private TypeExpr inferExprType(Expr expr, CapEnv env) {
+        if (expr == null) return null;
+        return switch (expr) {
+            case IdentExpr id -> resolveTypeAlias(env.types.get(id.name()));
+            case ParenExpr p -> inferExprType(p.inner(), env);
+            case FieldAccessExpr fa -> resolveFieldType(inferExprType(fa.object(), env), fa.fieldName());
+            case CallExpr c -> {
+                if (c.callee() instanceof IdentExpr id) {
+                    FnDecl fn = fnDecls.get(id.name());
+                    if (fn != null) yield resolveTypeAlias(fn.returnType());
+                    if (typeDecls.containsKey(id.name())) yield new SimpleTypeExpr(id.name(), c.span());
+                }
+                yield null;
+            }
+            case ConstructorExpr c -> {
+                String shortName = c.typePath().contains(".")
+                    ? c.typePath().substring(c.typePath().lastIndexOf('.') + 1)
+                    : c.typePath();
+                yield new SimpleTypeExpr(shortName, c.span());
+            }
+            default -> null;
+        };
+    }
+
+    private TypeExpr resolveFieldType(TypeExpr ownerType, String fieldName) {
+        TypeExpr resolved = resolveTypeAlias(ownerType);
+        if (resolved == null || fieldName == null) return null;
+        if (resolved instanceof CapabilityTypeExpr c) return resolveFieldType(c.inner(), fieldName);
+        if (resolved instanceof RefinedTypeExpr r) return resolveFieldType(r.baseType(), fieldName);
+        String ownerName = typeName(resolved);
+        TopLevelDecl decl = typeDecls.get(ownerName);
+        if (decl instanceof RecordDecl r) {
+            for (var p : r.params()) {
+                if (p.name().equals(fieldName)) return resolveTypeAlias(p.type());
+            }
+        } else if (decl instanceof DataDecl d) {
+            for (var f : d.fields()) {
+                if (f.name().equals(fieldName)) return resolveTypeAlias(f.type());
+            }
+        }
+        return null;
     }
 
     private boolean isLinearType(TypeExpr t) {

@@ -186,101 +186,167 @@ public final class IfcPcChecker {
 
     private void checkFn(FnDecl fn) {
         Set<String> untrustedVars = new LinkedHashSet<>();
+        Map<String, TypeExpr> varTypes = new LinkedHashMap<>();
         for (var p : fn.params()) {
-            if (isUntrustedType(p.type())) {
+            TypeExpr resolved = resolveAlias(p.type());
+            if (resolved != null) {
+                varTypes.put(p.name(), resolved);
+            }
+            if (isUntrustedType(resolved)) {
                 untrustedVars.add(p.name());
             }
         }
         if (fn.body() != null) {
-            checkBlock(fn.body(), untrustedVars, false, new LinkedHashSet<>());
+            checkBlock(fn.body(), untrustedVars, varTypes, false, new LinkedHashSet<>());
         }
     }
 
-    private void checkBlock(BlockExpr block, Set<String> untrustedVars, boolean inUntrustedPc, Set<String> localDeclared) {
+    private void checkBlock(
+        BlockExpr block,
+        Set<String> untrustedVars,
+        Map<String, TypeExpr> varTypes,
+        boolean inUntrustedPc,
+        Set<String> localDeclared
+    ) {
         if (block == null) return;
         for (var stmt : block.statements()) {
-            checkStmt(stmt, untrustedVars, inUntrustedPc, localDeclared);
+            checkStmt(stmt, untrustedVars, varTypes, inUntrustedPc, localDeclared);
         }
         if (block.tailExpr() != null) {
-            checkExpr(block.tailExpr(), untrustedVars, inUntrustedPc);
+            checkExpr(block.tailExpr(), untrustedVars, varTypes, inUntrustedPc);
         }
     }
 
-    private void checkStmt(Statement stmt, Set<String> untrustedVars, boolean inUntrustedPc, Set<String> localDeclared) {
+    private void checkStmt(
+        Statement stmt,
+        Set<String> untrustedVars,
+        Map<String, TypeExpr> varTypes,
+        boolean inUntrustedPc,
+        Set<String> localDeclared
+    ) {
         switch (stmt) {
             case ValStmt val -> {
                 localDeclared.add(val.name());
-                checkExpr(val.initializer(), untrustedVars, inUntrustedPc);
+                checkExpr(val.initializer(), untrustedVars, varTypes, inUntrustedPc);
+                TypeExpr effectiveType = val.explicitType() != null
+                    ? resolveAlias(val.explicitType())
+                    : inferExprType(val.initializer(), varTypes);
+                if (effectiveType != null) {
+                    varTypes.put(val.name(), effectiveType);
+                } else {
+                    varTypes.remove(val.name());
+                }
                 if (isValidatedType(val.explicitType()) || isValidatedExpr(val.initializer())) {
                     untrustedVars.remove(val.name());
-                } else if (isUntrustedType(val.explicitType()) || isExprUntrusted(val.initializer(), untrustedVars)) {
+                } else if (isUntrustedType(effectiveType) || isExprUntrusted(val.initializer(), untrustedVars, varTypes)) {
                     untrustedVars.add(val.name());
+                } else {
+                    untrustedVars.remove(val.name());
                 }
             }
             case LetStmt let -> {
                 localDeclared.add(let.name());
-                checkExpr(let.initializer(), untrustedVars, inUntrustedPc);
+                checkExpr(let.initializer(), untrustedVars, varTypes, inUntrustedPc);
+                TypeExpr effectiveType = let.explicitType() != null
+                    ? resolveAlias(let.explicitType())
+                    : inferExprType(let.initializer(), varTypes);
+                if (effectiveType != null) {
+                    varTypes.put(let.name(), effectiveType);
+                } else {
+                    varTypes.remove(let.name());
+                }
                 if (isValidatedType(let.explicitType()) || isValidatedExpr(let.initializer())) {
                     untrustedVars.remove(let.name());
-                } else if (isUntrustedType(let.explicitType()) || isExprUntrusted(let.initializer(), untrustedVars)) {
+                } else if (isUntrustedType(effectiveType) || isExprUntrusted(let.initializer(), untrustedVars, varTypes)) {
                     untrustedVars.add(let.name());
+                } else {
+                    untrustedVars.remove(let.name());
                 }
             }
             case VarStmt varStmt -> {
                 localDeclared.add(varStmt.name());
-                checkExpr(varStmt.initializer(), untrustedVars, inUntrustedPc);
-                if (isUntrustedType(varStmt.explicitType()) || isExprUntrusted(varStmt.initializer(), untrustedVars)) {
+                checkExpr(varStmt.initializer(), untrustedVars, varTypes, inUntrustedPc);
+                TypeExpr effectiveType = varStmt.explicitType() != null
+                    ? resolveAlias(varStmt.explicitType())
+                    : inferExprType(varStmt.initializer(), varTypes);
+                if (effectiveType != null) {
+                    varTypes.put(varStmt.name(), effectiveType);
+                } else {
+                    varTypes.remove(varStmt.name());
+                }
+                if (isUntrustedType(effectiveType) || isExprUntrusted(varStmt.initializer(), untrustedVars, varTypes)) {
                     untrustedVars.add(varStmt.name());
+                } else {
+                    untrustedVars.remove(varStmt.name());
                 }
             }
             case AssignStmt assign -> {
-                checkExpr(assign.value(), untrustedVars, inUntrustedPc);
-                if (inUntrustedPc || isExprUntrusted(assign.value(), untrustedVars)) {
+                checkExpr(assign.value(), untrustedVars, varTypes, inUntrustedPc);
+                if (inUntrustedPc || isExprUntrusted(assign.value(), untrustedVars, varTypes)) {
                     untrustedVars.add(assign.name());
                 }
             }
             case TupleDestructureStmt td -> {
-                checkExpr(td.initializer(), untrustedVars, inUntrustedPc);
-                if (td.initializer() instanceof TupleExpr te) {
-                    for (int i = 0; i < td.names().size(); i++) {
-                        boolean compUntrusted = inUntrustedPc
-                            || (i < te.elements().size() && isExprUntrusted(te.elements().get(i), untrustedVars));
-                        if (compUntrusted) {
-                            untrustedVars.add(td.names().get(i));
-                        }
+                checkExpr(td.initializer(), untrustedVars, varTypes, inUntrustedPc);
+                TypeExpr initType = resolveAlias(inferExprType(td.initializer(), varTypes));
+                TupleTypeExpr tupleType = initType instanceof TupleTypeExpr tt ? tt : null;
+                TupleExpr te = td.initializer() instanceof TupleExpr t ? t : null;
+                for (int i = 0; i < td.names().size(); i++) {
+                    String name = td.names().get(i);
+                    localDeclared.add(name);
+                    TypeExpr explicitType = i < td.explicitTypes().size() ? resolveAlias(td.explicitTypes().get(i)) : null;
+                    TypeExpr inferredElem = explicitType != null
+                        ? explicitType
+                        : (te != null && i < te.elements().size()
+                            ? inferExprType(te.elements().get(i), varTypes)
+                            : (tupleType != null && i < tupleType.elements().size()
+                                ? resolveAlias(tupleType.elements().get(i))
+                                : null));
+                    if (inferredElem != null) {
+                        varTypes.put(name, inferredElem);
+                    } else {
+                        varTypes.remove(name);
                     }
-                } else if (inUntrustedPc || isExprUntrusted(td.initializer(), untrustedVars)) {
-                    untrustedVars.addAll(td.names());
+                    boolean compUntrusted = inUntrustedPc
+                        || isUntrustedType(inferredElem)
+                        || (te != null && i < te.elements().size() && isExprUntrusted(te.elements().get(i), untrustedVars, varTypes))
+                        || (te == null && isExprUntrusted(td.initializer(), untrustedVars, varTypes));
+                    if (compUntrusted) {
+                        untrustedVars.add(name);
+                    } else {
+                        untrustedVars.remove(name);
+                    }
                 }
             }
             case ReturnStmt ret -> {
-                if (ret.value() != null) checkExpr(ret.value(), untrustedVars, inUntrustedPc);
+                if (ret.value() != null) checkExpr(ret.value(), untrustedVars, varTypes, inUntrustedPc);
             }
-            case ExprStmt es -> checkExpr(es.expr(), untrustedVars, inUntrustedPc);
+            case ExprStmt es -> checkExpr(es.expr(), untrustedVars, varTypes, inUntrustedPc);
             default -> {}
         }
     }
 
-    private void checkExpr(Expr expr, Set<String> untrustedVars, boolean inUntrustedPc) {
+    private void checkExpr(Expr expr, Set<String> untrustedVars, Map<String, TypeExpr> varTypes, boolean inUntrustedPc) {
         if (expr == null) return;
         switch (expr) {
             case IfExpr ifExpr -> {
-                checkExpr(ifExpr.condition(), untrustedVars, inUntrustedPc);
-                boolean pc = inUntrustedPc || isExprUntrusted(ifExpr.condition(), untrustedVars);
+                checkExpr(ifExpr.condition(), untrustedVars, varTypes, inUntrustedPc);
+                boolean pc = inUntrustedPc || isExprUntrusted(ifExpr.condition(), untrustedVars, varTypes);
                 Set<String> thenUntrusted = new LinkedHashSet<>(untrustedVars);
                 Set<String> thenDeclared = new LinkedHashSet<>();
-                checkBlock(ifExpr.thenBranch(), thenUntrusted, pc, thenDeclared);
+                checkBlock(ifExpr.thenBranch(), thenUntrusted, new LinkedHashMap<>(varTypes), pc, thenDeclared);
                 thenUntrusted.removeAll(thenDeclared);
 
                 Set<String> elseUntrusted = new LinkedHashSet<>();
                 if (ifExpr.elseBranch() != null) {
                     Set<String> elseBranchUntrusted = new LinkedHashSet<>(untrustedVars);
+                    Map<String, TypeExpr> elseVarTypes = new LinkedHashMap<>(varTypes);
                     if (ifExpr.elseBranch() instanceof BlockExpr eb) {
                         Set<String> elseDeclared = new LinkedHashSet<>();
-                        checkBlock(eb, elseBranchUntrusted, pc, elseDeclared);
+                        checkBlock(eb, elseBranchUntrusted, elseVarTypes, pc, elseDeclared);
                         elseBranchUntrusted.removeAll(elseDeclared);
                     } else {
-                        checkExpr(ifExpr.elseBranch(), elseBranchUntrusted, pc);
+                        checkExpr(ifExpr.elseBranch(), elseBranchUntrusted, elseVarTypes, pc);
                     }
                     elseUntrusted.addAll(elseBranchUntrusted);
                 }
@@ -289,24 +355,23 @@ public final class IfcPcChecker {
                 untrustedVars.addAll(elseUntrusted);
             }
             case MatchExpr matchExpr -> {
-                checkExpr(matchExpr.scrutinee(), untrustedVars, inUntrustedPc);
+                checkExpr(matchExpr.scrutinee(), untrustedVars, varTypes, inUntrustedPc);
                 boolean validatedScrutinee = isValidatedExpr(matchExpr.scrutinee());
-                boolean pc = inUntrustedPc || (!validatedScrutinee && isExprUntrusted(matchExpr.scrutinee(), untrustedVars));
+                boolean scrutineeUntrusted = !validatedScrutinee && isExprUntrusted(matchExpr.scrutinee(), untrustedVars, varTypes);
+                TypeExpr scrutineeType = resolveAlias(inferExprType(matchExpr.scrutinee(), varTypes));
+                boolean pc = inUntrustedPc || scrutineeUntrusted;
                 Set<String> mergedArms = new LinkedHashSet<>();
                 for (var arm : matchExpr.arms()) {
                     Set<String> armUntrusted = new LinkedHashSet<>(untrustedVars);
+                    Map<String, TypeExpr> armVarTypes = new LinkedHashMap<>(varTypes);
                     Set<String> armDeclared = new LinkedHashSet<>();
-                    if (validatedScrutinee && arm.pattern() instanceof ConstructorPattern cp
-                        && (cp.typePath().equals("Ok") || cp.typePath().endsWith(".Ok"))) {
-                        for (var f : cp.fields()) {
-                            armUntrusted.remove(f.name());
-                            armDeclared.add(f.name());
-                        }
-                    }
+                    boolean validatedOk = validatedScrutinee && arm.pattern() instanceof ConstructorPattern cp
+                        && (cp.typePath().equals("Ok") || cp.typePath().endsWith(".Ok"));
+                    bindPatternTypes(arm.pattern(), scrutineeType, scrutineeUntrusted, validatedOk, armUntrusted, armVarTypes, armDeclared);
                     if (arm.body() instanceof BlockExpr eb) {
-                        checkBlock(eb, armUntrusted, pc, armDeclared);
+                        checkBlock(eb, armUntrusted, armVarTypes, pc, armDeclared);
                     } else {
-                        checkExpr(arm.body(), armUntrusted, pc);
+                        checkExpr(arm.body(), armUntrusted, armVarTypes, pc);
                     }
                     armUntrusted.removeAll(armDeclared);
                     mergedArms.addAll(armUntrusted);
@@ -321,11 +386,11 @@ public final class IfcPcChecker {
                         diagnostics.remove(diagnostics.size() - 1);
                     }
                     Set<String> prev = new LinkedHashSet<>(loopUntrusted);
-                    checkExpr(whileExpr.condition(), loopUntrusted, inUntrustedPc);
-                    boolean pc = inUntrustedPc || isExprUntrusted(whileExpr.condition(), loopUntrusted);
+                    checkExpr(whileExpr.condition(), loopUntrusted, varTypes, inUntrustedPc);
+                    boolean pc = inUntrustedPc || isExprUntrusted(whileExpr.condition(), loopUntrusted, varTypes);
                     Set<String> bodyUntrusted = new LinkedHashSet<>(loopUntrusted);
                     Set<String> bodyDeclared = new LinkedHashSet<>();
-                    checkBlock(whileExpr.body(), bodyUntrusted, pc, bodyDeclared);
+                    checkBlock(whileExpr.body(), bodyUntrusted, new LinkedHashMap<>(varTypes), pc, bodyDeclared);
                     bodyUntrusted.removeAll(bodyDeclared);
                     loopUntrusted.addAll(bodyUntrusted);
                     if (loopUntrusted.equals(prev)) {
@@ -338,39 +403,50 @@ public final class IfcPcChecker {
                 if (inUntrustedPc) {
                     checkPrivilegedCall(call);
                 }
-                checkExpr(call.callee(), untrustedVars, inUntrustedPc);
+                checkExpr(call.callee(), untrustedVars, varTypes, inUntrustedPc);
                 for (var arg : call.args()) {
-                    checkExpr(arg, untrustedVars, inUntrustedPc);
+                    checkExpr(arg, untrustedVars, varTypes, inUntrustedPc);
                 }
             }
             case BlockExpr b -> {
                 Set<String> blockUntrusted = new LinkedHashSet<>(untrustedVars);
                 Set<String> blockDeclared = new LinkedHashSet<>();
-                checkBlock(b, blockUntrusted, inUntrustedPc, blockDeclared);
+                checkBlock(b, blockUntrusted, new LinkedHashMap<>(varTypes), inUntrustedPc, blockDeclared);
                 blockUntrusted.removeAll(blockDeclared);
                 untrustedVars.addAll(blockUntrusted);
             }
             case ScopeExpr s -> {
                 Set<String> scopeUntrusted = new LinkedHashSet<>(untrustedVars);
                 Set<String> scopeDeclared = new LinkedHashSet<>();
-                checkBlock(s.body(), scopeUntrusted, inUntrustedPc, scopeDeclared);
+                checkBlock(s.body(), scopeUntrusted, new LinkedHashMap<>(varTypes), inUntrustedPc, scopeDeclared);
                 scopeUntrusted.removeAll(scopeDeclared);
                 untrustedVars.addAll(scopeUntrusted);
             }
             case ForkExpr f -> {
                 Set<String> forkUntrusted = new LinkedHashSet<>(untrustedVars);
                 Set<String> forkDeclared = new LinkedHashSet<>();
-                checkBlock(f.body(), forkUntrusted, inUntrustedPc, forkDeclared);
+                checkBlock(f.body(), forkUntrusted, new LinkedHashMap<>(varTypes), inUntrustedPc, forkDeclared);
                 forkUntrusted.removeAll(forkDeclared);
                 untrustedVars.addAll(forkUntrusted);
             }
             case ForExpr f -> {
-                checkExpr(f.iterable(), untrustedVars, inUntrustedPc);
-                boolean iterUntrusted = isExprUntrusted(f.iterable(), untrustedVars);
+                checkExpr(f.iterable(), untrustedVars, varTypes, inUntrustedPc);
+                boolean iterUntrusted = isExprUntrusted(f.iterable(), untrustedVars, varTypes);
+                TypeExpr iterType = resolveAlias(inferExprType(f.iterable(), varTypes));
+                TypeExpr elemType = extractCollectionElementType(iterType);
+                boolean elemUntrusted = iterUntrusted || isUntrustedType(elemType);
                 boolean pc = inUntrustedPc || iterUntrusted;
                 Set<String> loopUntrusted = new LinkedHashSet<>(untrustedVars);
-                if (iterUntrusted) {
+                if (elemUntrusted) {
                     loopUntrusted.add(f.varName());
+                } else {
+                    loopUntrusted.remove(f.varName());
+                }
+                Map<String, TypeExpr> loopVarTypes = new LinkedHashMap<>(varTypes);
+                if (elemType != null) {
+                    loopVarTypes.put(f.varName(), elemType);
+                } else {
+                    loopVarTypes.remove(f.varName());
                 }
                 int diagBaseline = diagnostics.size();
                 while (true) {
@@ -381,7 +457,7 @@ public final class IfcPcChecker {
                     Set<String> bodyUntrusted = new LinkedHashSet<>(loopUntrusted);
                     Set<String> bodyDeclared = new LinkedHashSet<>();
                     bodyDeclared.add(f.varName());
-                    checkBlock(f.body(), bodyUntrusted, pc, bodyDeclared);
+                    checkBlock(f.body(), bodyUntrusted, new LinkedHashMap<>(loopVarTypes), pc, bodyDeclared);
                     bodyUntrusted.removeAll(bodyDeclared);
                     loopUntrusted.addAll(bodyUntrusted);
                     if (loopUntrusted.equals(prev)) {
@@ -392,43 +468,330 @@ public final class IfcPcChecker {
                 untrustedVars.addAll(loopUntrusted);
             }
             case BinaryExpr b -> {
-                checkExpr(b.left(), untrustedVars, inUntrustedPc);
+                checkExpr(b.left(), untrustedVars, varTypes, inUntrustedPc);
                 boolean rightPc = inUntrustedPc;
                 if (b.op() == BinaryExpr.BinaryOp.AND || b.op() == BinaryExpr.BinaryOp.OR) {
-                    rightPc = inUntrustedPc || isExprUntrusted(b.left(), untrustedVars);
+                    rightPc = inUntrustedPc || isExprUntrusted(b.left(), untrustedVars, varTypes);
                 }
-                checkExpr(b.right(), untrustedVars, rightPc);
+                checkExpr(b.right(), untrustedVars, varTypes, rightPc);
             }
-            case UnaryExpr u -> checkExpr(u.operand(), untrustedVars, inUntrustedPc);
-            case ParenExpr p -> checkExpr(p.inner(), untrustedVars, inUntrustedPc);
-            case PropagateExpr p -> checkExpr(p.inner(), untrustedVars, inUntrustedPc);
-            case FieldAccessExpr fa -> checkExpr(fa.object(), untrustedVars, inUntrustedPc);
-            case ConsumeExpr c -> checkExpr(c.target(), untrustedVars, inUntrustedPc);
+            case UnaryExpr u -> checkExpr(u.operand(), untrustedVars, varTypes, inUntrustedPc);
+            case ParenExpr p -> checkExpr(p.inner(), untrustedVars, varTypes, inUntrustedPc);
+            case PropagateExpr p -> checkExpr(p.inner(), untrustedVars, varTypes, inUntrustedPc);
+            case FieldAccessExpr fa -> checkExpr(fa.object(), untrustedVars, varTypes, inUntrustedPc);
+            case ConsumeExpr c -> checkExpr(c.target(), untrustedVars, varTypes, inUntrustedPc);
             case TupleExpr t -> {
                 for (var elem : t.elements()) {
-                    checkExpr(elem, untrustedVars, inUntrustedPc);
+                    checkExpr(elem, untrustedVars, varTypes, inUntrustedPc);
                 }
             }
             case ConstructorExpr c -> {
                 for (var field : c.fields()) {
-                    checkExpr(field.value(), untrustedVars, inUntrustedPc);
+                    checkExpr(field.value(), untrustedVars, varTypes, inUntrustedPc);
                 }
             }
             case LambdaExpr l -> {
                 Set<String> lambdaUntrusted = new LinkedHashSet<>(untrustedVars);
+                Map<String, TypeExpr> lambdaVarTypes = new LinkedHashMap<>(varTypes);
                 Set<String> lambdaDeclared = new LinkedHashSet<>();
                 for (var p : l.params()) {
                     lambdaDeclared.add(p.name());
-                    if (isUntrustedType(p.type())) {
+                    TypeExpr resolved = resolveAlias(p.type());
+                    if (resolved != null) {
+                        lambdaVarTypes.put(p.name(), resolved);
+                    } else {
+                        lambdaVarTypes.remove(p.name());
+                    }
+                    if (isUntrustedType(resolved)) {
                         lambdaUntrusted.add(p.name());
                     } else {
                         lambdaUntrusted.remove(p.name());
                     }
                 }
-                checkBlock(l.body(), lambdaUntrusted, inUntrustedPc, lambdaDeclared);
+                checkBlock(l.body(), lambdaUntrusted, lambdaVarTypes, inUntrustedPc, lambdaDeclared);
             }
             default -> {}
         }
+    }
+
+    private void bindPatternTypes(
+        Pattern pattern,
+        TypeExpr expectedType,
+        boolean parentUntrusted,
+        boolean validatedOk,
+        Set<String> armUntrusted,
+        Map<String, TypeExpr> armVarTypes,
+        Set<String> armDeclared
+    ) {
+        if (pattern == null) return;
+        TypeExpr resolvedExpected = resolveAlias(expectedType);
+        switch (pattern) {
+            case BindingPattern bp -> {
+                armDeclared.add(bp.name());
+                if (resolvedExpected != null) {
+                    armVarTypes.put(bp.name(), resolvedExpected);
+                } else {
+                    armVarTypes.remove(bp.name());
+                }
+                if (validatedOk) {
+                    armUntrusted.remove(bp.name());
+                } else if (parentUntrusted || isUntrustedType(resolvedExpected)) {
+                    armUntrusted.add(bp.name());
+                } else {
+                    armUntrusted.remove(bp.name());
+                }
+            }
+            case ConstructorPattern cp -> {
+                String shortCtor = cp.typePath().contains(".")
+                    ? cp.typePath().substring(cp.typePath().lastIndexOf('.') + 1)
+                    : cp.typePath();
+                List<TypeExpr> fieldTypes = resolveConstructorPatternFieldTypes(shortCtor, resolvedExpected);
+                for (int i = 0; i < cp.fields().size(); i++) {
+                    var f = cp.fields().get(i);
+                    TypeExpr fieldType = resolveConstructorPatternFieldType(shortCtor, resolvedExpected, f.name(), i, fieldTypes);
+                    if (f.pattern() != null) {
+                        bindPatternTypes(f.pattern(), fieldType, parentUntrusted, validatedOk, armUntrusted, armVarTypes, armDeclared);
+                    } else if (f.name() != null) {
+                        armDeclared.add(f.name());
+                        if (fieldType != null) {
+                            armVarTypes.put(f.name(), fieldType);
+                        } else {
+                            armVarTypes.remove(f.name());
+                        }
+                        if (validatedOk) {
+                            armUntrusted.remove(f.name());
+                        } else if (parentUntrusted || isUntrustedType(fieldType)) {
+                            armUntrusted.add(f.name());
+                        } else {
+                            armUntrusted.remove(f.name());
+                        }
+                    }
+                }
+            }
+            default -> {}
+        }
+    }
+
+    private List<TypeExpr> resolveConstructorPatternFieldTypes(String ctorName, TypeExpr scrutineeType) {
+        TypeExpr unwrapped = unwrapTypeWrappers(scrutineeType);
+        if (ctorName.equals("Some") && unwrapped instanceof GenericTypeExpr g && g.name().equals("Option") && !g.typeArgs().isEmpty()) {
+            return List.of(resolveAlias(g.typeArgs().get(0)));
+        }
+        if (ctorName.equals("Ok") && unwrapped instanceof GenericTypeExpr g && g.name().equals("Result") && !g.typeArgs().isEmpty()) {
+            return List.of(resolveAlias(g.typeArgs().get(0)));
+        }
+        if (ctorName.equals("Err") && unwrapped instanceof GenericTypeExpr g && g.name().equals("Result") && g.typeArgs().size() >= 2) {
+            return List.of(resolveAlias(g.typeArgs().get(1)));
+        }
+        TopLevelDecl decl = typeDecls.get(ctorName);
+        if (decl instanceof RecordDecl r) {
+            return r.params().stream().map(p -> resolveAlias(p.type())).toList();
+        }
+        if (decl instanceof DataDecl d) {
+            return d.fields().stream().map(f -> resolveAlias(f.type())).toList();
+        }
+        // Look up enum variant
+        for (var td : typeDecls.values()) {
+            if (td instanceof EnumDecl e) {
+                Map<String, TypeExpr> subst = buildEnumSubst(e, unwrapped);
+                for (var v : e.variants()) {
+                    if (v.name().equals(ctorName)) {
+                        return v.fields().stream()
+                            .map(f -> resolveAlias(substituteTypeParams(f.type(), subst)))
+                            .toList();
+                    }
+                }
+            }
+        }
+        return List.of();
+    }
+
+    private TypeExpr resolveConstructorPatternFieldType(
+        String ctorName,
+        TypeExpr scrutineeType,
+        String fieldName,
+        int index,
+        List<TypeExpr> positionalTypes
+    ) {
+        if (fieldName != null) {
+            TopLevelDecl decl = typeDecls.get(ctorName);
+            if (decl instanceof RecordDecl r) {
+                for (var p : r.params()) {
+                    if (p.name().equals(fieldName)) return resolveAlias(p.type());
+                }
+            } else if (decl instanceof DataDecl d) {
+                for (var f : d.fields()) {
+                    if (f.name().equals(fieldName)) return resolveAlias(f.type());
+                }
+            }
+            TypeExpr unwrapped = unwrapTypeWrappers(scrutineeType);
+            for (var td : typeDecls.values()) {
+                if (td instanceof EnumDecl e) {
+                    Map<String, TypeExpr> subst = buildEnumSubst(e, unwrapped);
+                    for (var v : e.variants()) {
+                        if (v.name().equals(ctorName)) {
+                            for (var f : v.fields()) {
+                                if (f.name().equals(fieldName)) {
+                                    return resolveAlias(substituteTypeParams(f.type(), subst));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return index < positionalTypes.size() ? positionalTypes.get(index) : null;
+    }
+
+    private Map<String, TypeExpr> buildEnumSubst(EnumDecl e, TypeExpr scrutineeType) {
+        Map<String, TypeExpr> subst = new HashMap<>();
+        if (scrutineeType instanceof GenericTypeExpr g && g.name().equals(e.name())) {
+            for (int i = 0; i < Math.min(e.typeParams().size(), g.typeArgs().size()); i++) {
+                subst.put(e.typeParams().get(i), g.typeArgs().get(i));
+            }
+        }
+        return subst;
+    }
+
+    private TypeExpr unwrapTypeWrappers(TypeExpr type) {
+        TypeExpr cur = resolveAlias(type);
+        while (cur != null) {
+            if (cur instanceof CapabilityTypeExpr c) {
+                cur = resolveAlias(c.inner());
+            } else if (cur instanceof RefinedTypeExpr r) {
+                cur = resolveAlias(r.baseType());
+            } else if (cur instanceof RangeTypeExpr r) {
+                cur = resolveAlias(r.baseType());
+            } else {
+                break;
+            }
+        }
+        return cur;
+    }
+
+    private TypeExpr extractCollectionElementType(TypeExpr iterType) {
+        TypeExpr unwrapped = unwrapTypeWrappers(iterType);
+        if (unwrapped instanceof GenericTypeExpr g && !g.typeArgs().isEmpty()
+            && (g.name().equals("List") || g.name().equals("Seq") || g.name().equals("Array") || g.name().equals("MutableList") || g.name().equals("Set"))) {
+            return resolveAlias(g.typeArgs().get(0));
+        }
+        return null;
+    }
+
+    private TypeExpr inferExprType(Expr expr, Map<String, TypeExpr> varTypes) {
+        if (expr == null) return null;
+        return switch (expr) {
+            case IdentExpr id -> resolveAlias(varTypes.get(id.name()));
+            case ParenExpr p -> inferExprType(p.inner(), varTypes);
+            case ConsumeExpr c -> inferExprType(c.target(), varTypes);
+            case PropagateExpr p -> {
+                TypeExpr innerType = unwrapTypeWrappers(inferExprType(p.inner(), varTypes));
+                if (innerType instanceof GenericTypeExpr g
+                    && (g.name().equals("Result") || g.name().equals("Option"))
+                    && !g.typeArgs().isEmpty()) {
+                    yield resolveAlias(g.typeArgs().get(0));
+                }
+                yield innerType;
+            }
+            case FieldAccessExpr fa -> resolveFieldType(inferExprType(fa.object(), varTypes), fa.fieldName());
+            case CallExpr c -> {
+                if (c.callee() instanceof IdentExpr id) {
+                    FnDecl fn = fnDecls.get(id.name());
+                    if (fn != null) {
+                        yield resolveAlias(fn.returnType());
+                    }
+                    if (typeDecls.containsKey(id.name())) {
+                        yield c.typeArgs().isEmpty()
+                            ? new SimpleTypeExpr(id.name(), c.span())
+                            : new GenericTypeExpr(id.name(), c.typeArgs(), c.span());
+                    }
+                }
+                yield null;
+            }
+            case ConstructorExpr c -> {
+                String shortName = c.typePath().contains(".")
+                    ? c.typePath().substring(c.typePath().lastIndexOf('.') + 1)
+                    : c.typePath();
+                yield new SimpleTypeExpr(shortName, c.span());
+            }
+            case TupleExpr t -> new TupleTypeExpr(
+                t.elements().stream().map(e -> inferExprType(e, varTypes)).toList(),
+                t.span()
+            );
+            case IfExpr i -> {
+                TypeExpr thenT = inferExprType(i.thenBranch(), varTypes);
+                yield thenT != null ? thenT : inferExprType(i.elseBranch(), varTypes);
+            }
+            case BlockExpr b -> inferBlockType(b, varTypes);
+            default -> null;
+        };
+    }
+
+    private TypeExpr inferBlockType(BlockExpr block, Map<String, TypeExpr> varTypes) {
+        if (block == null) return null;
+        Map<String, TypeExpr> localTypes = new LinkedHashMap<>(varTypes);
+        for (var st : block.statements()) {
+            switch (st) {
+                case ValStmt v -> {
+                    TypeExpr t = v.explicitType() != null ? resolveAlias(v.explicitType()) : inferExprType(v.initializer(), localTypes);
+                    if (t != null) localTypes.put(v.name(), t);
+                }
+                case LetStmt l -> {
+                    TypeExpr t = l.explicitType() != null ? resolveAlias(l.explicitType()) : inferExprType(l.initializer(), localTypes);
+                    if (t != null) localTypes.put(l.name(), t);
+                }
+                case VarStmt v -> {
+                    TypeExpr t = v.explicitType() != null ? resolveAlias(v.explicitType()) : inferExprType(v.initializer(), localTypes);
+                    if (t != null) localTypes.put(v.name(), t);
+                }
+                default -> {}
+            }
+        }
+        return inferExprType(block.tailExpr(), localTypes);
+    }
+
+    private TypeExpr resolveFieldType(TypeExpr ownerType, String fieldName) {
+        TypeExpr unwrapped = unwrapTypeWrappers(ownerType);
+        if (unwrapped == null || fieldName == null) return null;
+        if (unwrapped instanceof TupleTypeExpr tup) {
+            try {
+                int idx = Integer.parseInt(fieldName);
+                if (idx >= 0 && idx < tup.elements().size()) {
+                    return resolveAlias(tup.elements().get(idx));
+                }
+            } catch (NumberFormatException ignored) {}
+            return null;
+        }
+        String ownerName = switch (unwrapped) {
+            case SimpleTypeExpr s -> s.name();
+            case GenericTypeExpr g -> g.name();
+            default -> null;
+        };
+        if (ownerName == null) return null;
+        TopLevelDecl decl = typeDecls.get(ownerName);
+        if (decl instanceof RecordDecl r) {
+            for (var p : r.params()) {
+                if (p.name().equals(fieldName)) {
+                    return resolveAlias(p.type());
+                }
+            }
+        } else if (decl instanceof DataDecl d) {
+            for (var f : d.fields()) {
+                if (f.name().equals(fieldName)) {
+                    return resolveAlias(f.type());
+                }
+            }
+        } else if (decl instanceof EnumDecl e) {
+            Map<String, TypeExpr> subst = buildEnumSubst(e, unwrapped);
+            for (var v : e.variants()) {
+                for (var f : v.fields()) {
+                    if (f.name().equals(fieldName)) {
+                        return resolveAlias(substituteTypeParams(f.type(), subst));
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     private void checkPrivilegedCall(CallExpr call) {
@@ -569,99 +932,117 @@ public final class IfcPcChecker {
         };
     }
 
-    private boolean isExprUntrusted(Expr expr, Set<String> untrustedVars) {
+    private boolean isExprUntrusted(Expr expr, Set<String> untrustedVars, Map<String, TypeExpr> varTypes) {
         if (expr == null || isValidatedExpr(expr)) return false;
+        if (isUntrustedType(inferExprType(expr, varTypes))) return true;
         return switch (expr) {
             case IdentExpr id -> untrustedVars.contains(id.name());
-            case FieldAccessExpr fa -> isExprUntrusted(fa.object(), untrustedVars);
+            case FieldAccessExpr fa -> isExprUntrusted(fa.object(), untrustedVars, varTypes);
             case CallExpr c -> {
-                if (c.callee() instanceof FieldAccessExpr fa && isExprUntrusted(fa.object(), untrustedVars)) {
+                if (c.callee() instanceof FieldAccessExpr fa && isExprUntrusted(fa.object(), untrustedVars, varTypes)) {
                     yield true;
                 }
                 for (var arg : c.args()) {
-                    if (isExprUntrusted(arg, untrustedVars)) yield true;
+                    if (isExprUntrusted(arg, untrustedVars, varTypes)) yield true;
                 }
                 yield false;
             }
-            case BinaryExpr b -> isExprUntrusted(b.left(), untrustedVars) || isExprUntrusted(b.right(), untrustedVars);
-            case UnaryExpr u -> isExprUntrusted(u.operand(), untrustedVars);
-            case ParenExpr p -> isExprUntrusted(p.inner(), untrustedVars);
-            case PropagateExpr p -> isExprUntrusted(p.inner(), untrustedVars);
-            case IfExpr i -> isExprUntrusted(i.condition(), untrustedVars)
-                || isBlockUntrusted(i.thenBranch(), untrustedVars)
-                || (i.elseBranch() != null && isExprUntrusted(i.elseBranch(), untrustedVars));
+            case BinaryExpr b -> isExprUntrusted(b.left(), untrustedVars, varTypes) || isExprUntrusted(b.right(), untrustedVars, varTypes);
+            case UnaryExpr u -> isExprUntrusted(u.operand(), untrustedVars, varTypes);
+            case ParenExpr p -> isExprUntrusted(p.inner(), untrustedVars, varTypes);
+            case PropagateExpr p -> isExprUntrusted(p.inner(), untrustedVars, varTypes);
+            case IfExpr i -> isExprUntrusted(i.condition(), untrustedVars, varTypes)
+                || isBlockUntrusted(i.thenBranch(), untrustedVars, varTypes)
+                || (i.elseBranch() != null && isExprUntrusted(i.elseBranch(), untrustedVars, varTypes));
             case MatchExpr m -> {
-                if (!isValidatedExpr(m.scrutinee()) && isExprUntrusted(m.scrutinee(), untrustedVars)) {
+                if (!isValidatedExpr(m.scrutinee()) && isExprUntrusted(m.scrutinee(), untrustedVars, varTypes)) {
                     yield true;
                 }
+                TypeExpr scrutType = resolveAlias(inferExprType(m.scrutinee(), varTypes));
                 for (var arm : m.arms()) {
-                    if (isExprUntrusted(arm.body(), untrustedVars)) {
+                    Set<String> armUntrusted = new LinkedHashSet<>(untrustedVars);
+                    Map<String, TypeExpr> armVarTypes = new LinkedHashMap<>(varTypes);
+                    bindPatternTypes(arm.pattern(), scrutType, false, false, armUntrusted, armVarTypes, new LinkedHashSet<>());
+                    if (isExprUntrusted(arm.body(), armUntrusted, armVarTypes)) {
                         yield true;
                     }
                 }
                 yield false;
             }
-            case BlockExpr b -> isBlockUntrusted(b, untrustedVars);
-            case ScopeExpr s -> isBlockUntrusted(s.body(), untrustedVars);
-            case ForkExpr f -> isBlockUntrusted(f.body(), untrustedVars);
+            case BlockExpr b -> isBlockUntrusted(b, untrustedVars, varTypes);
+            case ScopeExpr s -> isBlockUntrusted(s.body(), untrustedVars, varTypes);
+            case ForkExpr f -> isBlockUntrusted(f.body(), untrustedVars, varTypes);
             case TupleExpr t -> {
                 for (var elem : t.elements()) {
-                    if (isExprUntrusted(elem, untrustedVars)) yield true;
+                    if (isExprUntrusted(elem, untrustedVars, varTypes)) yield true;
                 }
                 yield false;
             }
             case ConstructorExpr c -> {
                 for (var field : c.fields()) {
-                    if (isExprUntrusted(field.value(), untrustedVars)) yield true;
+                    if (isExprUntrusted(field.value(), untrustedVars, varTypes)) yield true;
                 }
                 yield false;
             }
             case ForExpr f -> {
-                if (isExprUntrusted(f.iterable(), untrustedVars)) yield true;
-                yield isBlockUntrusted(f.body(), untrustedVars);
+                if (isExprUntrusted(f.iterable(), untrustedVars, varTypes)) yield true;
+                yield isBlockUntrusted(f.body(), untrustedVars, varTypes);
             }
-            case ConsumeExpr c -> isExprUntrusted(c.target(), untrustedVars);
+            case ConsumeExpr c -> isExprUntrusted(c.target(), untrustedVars, varTypes);
             default -> false;
         };
     }
 
-    private boolean isBlockUntrusted(BlockExpr block, Set<String> untrustedVars) {
+    private boolean isBlockUntrusted(BlockExpr block, Set<String> untrustedVars, Map<String, TypeExpr> varTypes) {
         if (block == null) return false;
         Set<String> localUntrusted = new LinkedHashSet<>(untrustedVars);
+        Map<String, TypeExpr> localTypes = new LinkedHashMap<>(varTypes);
         for (var stmt : block.statements()) {
             switch (stmt) {
                 case ValStmt val -> {
+                    TypeExpr t = val.explicitType() != null ? resolveAlias(val.explicitType()) : inferExprType(val.initializer(), localTypes);
+                    if (t != null) localTypes.put(val.name(), t);
                     if (isValidatedType(val.explicitType()) || isValidatedExpr(val.initializer())) {
                         localUntrusted.remove(val.name());
-                    } else if (isUntrustedType(val.explicitType()) || isExprUntrusted(val.initializer(), localUntrusted)) {
+                    } else if (isUntrustedType(t) || isExprUntrusted(val.initializer(), localUntrusted, localTypes)) {
                         localUntrusted.add(val.name());
+                    } else {
+                        localUntrusted.remove(val.name());
                     }
                 }
                 case LetStmt let -> {
+                    TypeExpr t = let.explicitType() != null ? resolveAlias(let.explicitType()) : inferExprType(let.initializer(), localTypes);
+                    if (t != null) localTypes.put(let.name(), t);
                     if (isValidatedType(let.explicitType()) || isValidatedExpr(let.initializer())) {
                         localUntrusted.remove(let.name());
-                    } else if (isUntrustedType(let.explicitType()) || isExprUntrusted(let.initializer(), localUntrusted)) {
+                    } else if (isUntrustedType(t) || isExprUntrusted(let.initializer(), localUntrusted, localTypes)) {
                         localUntrusted.add(let.name());
+                    } else {
+                        localUntrusted.remove(let.name());
                     }
                 }
                 case VarStmt varStmt -> {
-                    if (isUntrustedType(varStmt.explicitType()) || isExprUntrusted(varStmt.initializer(), localUntrusted)) {
+                    TypeExpr t = varStmt.explicitType() != null ? resolveAlias(varStmt.explicitType()) : inferExprType(varStmt.initializer(), localTypes);
+                    if (t != null) localTypes.put(varStmt.name(), t);
+                    if (isUntrustedType(t) || isExprUntrusted(varStmt.initializer(), localUntrusted, localTypes)) {
                         localUntrusted.add(varStmt.name());
+                    } else {
+                        localUntrusted.remove(varStmt.name());
                     }
                 }
                 case AssignStmt assign -> {
-                    if (isExprUntrusted(assign.value(), localUntrusted)) {
+                    if (isExprUntrusted(assign.value(), localUntrusted, localTypes)) {
                         localUntrusted.add(assign.name());
                     }
                 }
                 case ReturnStmt ret -> {
-                    if (ret.value() != null && isExprUntrusted(ret.value(), localUntrusted)) {
+                    if (ret.value() != null && isExprUntrusted(ret.value(), localUntrusted, localTypes)) {
                         return true;
                     }
                 }
                 case ExprStmt es -> {
                     if (es.expr() instanceof IfExpr || es.expr() instanceof MatchExpr || es.expr() instanceof BlockExpr) {
-                        if (isExprUntrusted(es.expr(), localUntrusted)) {
+                        if (isExprUntrusted(es.expr(), localUntrusted, localTypes)) {
                             return true;
                         }
                     }
@@ -669,6 +1050,6 @@ public final class IfcPcChecker {
                 default -> {}
             }
         }
-        return block.tailExpr() != null && isExprUntrusted(block.tailExpr(), localUntrusted);
+        return block.tailExpr() != null && isExprUntrusted(block.tailExpr(), localUntrusted, localTypes);
     }
 }

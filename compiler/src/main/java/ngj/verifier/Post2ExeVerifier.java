@@ -61,14 +61,24 @@ public final class Post2ExeVerifier {
 
     private final Map<String, SpecFnDecl> specFns;
     private final PureJvmSmtSolver smtSolver;
+    private final Map<String, TypeAliasDecl> typeAliases;
 
     public Post2ExeVerifier(Map<String, SpecFnDecl> specFns) {
-        this(specFns, new PureJvmSmtSolver());
+        this(specFns, new PureJvmSmtSolver(), Map.of());
     }
 
     public Post2ExeVerifier(Map<String, SpecFnDecl> specFns, PureJvmSmtSolver smtSolver) {
+        this(specFns, smtSolver, Map.of());
+    }
+
+    public Post2ExeVerifier(
+        Map<String, SpecFnDecl> specFns,
+        PureJvmSmtSolver smtSolver,
+        Map<String, TypeAliasDecl> typeAliases
+    ) {
         this.specFns = specFns != null ? specFns : Map.of();
         this.smtSolver = smtSolver != null ? smtSolver : new PureJvmSmtSolver();
+        this.typeAliases = typeAliases != null ? typeAliases : Map.of();
     }
 
     public Post2ExeReport verify(FnDecl fn) {
@@ -312,11 +322,39 @@ public final class Post2ExeVerifier {
     private Set<String> collectSecretParamNames(FnDecl fn) {
         Set<String> secrets = new HashSet<>();
         for (Param p : fn.params()) {
-            if (p.type().toString().contains("Secret") || SecretRedactor.isSecretVariableName(p.name())) {
+            if (isSecretType(p.type(), new LinkedHashSet<>()) || SecretRedactor.isSecretVariableName(p.name())) {
                 secrets.add(p.name());
             }
         }
         return secrets;
+    }
+
+    private boolean isSecretType(TypeExpr type, Set<String> seen) {
+        if (type == null) return false;
+        if (type instanceof SimpleTypeExpr s) {
+            if (s.name().equals("Secret")) return true;
+            if (typeAliases.containsKey(s.name()) && seen.add(s.name())) {
+                boolean res = isSecretType(typeAliases.get(s.name()).targetType(), seen);
+                seen.remove(s.name());
+                return res;
+            }
+            return false;
+        }
+        if (type instanceof GenericTypeExpr g) {
+            if (g.name().equals("Secret")) return true;
+            if (typeAliases.containsKey(g.name()) && seen.add(g.name())) {
+                boolean res = isSecretType(typeAliases.get(g.name()).targetType(), seen);
+                seen.remove(g.name());
+                return res;
+            }
+            for (var arg : g.typeArgs()) {
+                if (isSecretType(arg, seen)) return true;
+            }
+            return false;
+        }
+        if (type instanceof CapabilityTypeExpr c) return isSecretType(c.inner(), seen);
+        if (type instanceof RefinedTypeExpr r) return isSecretType(r.baseType(), seen);
+        return type.toString().contains("Secret");
     }
 
     private String formatRedactedWitness(FnDecl fn, long[] args, long mutantResult, Set<String> secretKeys) {

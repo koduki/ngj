@@ -1342,4 +1342,184 @@ class CodexRegressionTest {
         assertEquals(1, code, "Type alias for MathInt in executable code must fail with NGJ-PROOF-002: " + stdout);
         assertTrue(stdout.contains("NGJ-PROOF-002"), "Expected NGJ-PROOF-002: " + stdout);
     }
+
+    @Test
+    void recordWithUntrustedFieldEnforcesSelectivePcGuard() throws Exception {
+        Path file = tempDir.resolve("record_untrusted_field_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record Input(flag: Untrusted<Option<Int>>);
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(input: Input) -> Unit effects(PaymentWrite) {
+                if (isSome(input.flag)) {
+                    pay();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Record field of Untrusted type must trigger NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void nestedRecordAndAliasWithUntrustedFieldEnforcesSelectivePcGuard() throws Exception {
+        Path file = tempDir.resolve("nested_record_alias_untrusted_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public type FlagAlias = Untrusted<Option<Int>>;
+            public record Inner(flag: FlagAlias);
+            public record Outer(inner: Inner);
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(outer: Outer) -> Unit effects(PaymentWrite) {
+                if (isSome(outer.inner.flag)) {
+                    pay();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Nested record field of aliased Untrusted type must trigger NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void recordWithSafeFieldAllowsPrivilegedCall() throws Exception {
+        Path file = tempDir.resolve("record_safe_sibling_field.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record MixedInput(flag: Untrusted<Option<Int>>, safe: Bool);
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn ok(input: MixedInput) -> Unit effects(PaymentWrite) {
+                if (input.safe) {
+                    pay();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(0, code, "Safe sibling field on record with an Untrusted field must still pass: " + stdout);
+    }
+
+    @Test
+    void secretInitializerThroughTypeAliasIsRedactedInDiagnostics() throws Exception {
+        Path file = tempDir.resolve("secret_alias_redaction.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public type Hidden = Secret<String>;
+
+            public fn bad() -> Unit effects() {
+                val value: Hidden = "confidential-value-98765";
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Type mismatch on Hidden = String must fail: " + stdout);
+        assertFalse(stdout.contains("confidential-value-98765"),
+            "Diagnostic must not leak confidential literal declared through Secret alias: " + stdout);
+        assertTrue(stdout.contains("Secret(****)"),
+            "Diagnostic must mask aliased Secret literal with Secret(****): " + stdout);
+    }
+
+    @Test
+    void secretIntInitializerThroughGenericTypeAliasIsRedactedInDiagnostics() throws Exception {
+        Path file = tempDir.resolve("secret_generic_alias_int_redaction.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public type BoxedSecret<T> = Secret<T>;
+
+            public fn bad() -> Unit effects() {
+                val pin: BoxedSecret<Int> = 9876543;
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Type mismatch on BoxedSecret<Int> = Int must fail: " + stdout);
+        assertFalse(stdout.contains("9876543"),
+            "Diagnostic must not leak secret integer literal declared through generic Secret alias: " + stdout);
+        assertTrue(stdout.contains("Secret(****)"),
+            "Diagnostic must mask aliased Secret int literal with Secret(****): " + stdout);
+    }
+
+    @Test
+    void recordWithSecretFieldRejectedInDirectBinaryOp() throws Exception {
+        Path file = tempDir.resolve("record_secret_field_op.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public record Holder(tok: Secret<Int>);
+
+            public fn bad(h: Holder) -> Int effects() {
+                return h.tok + 1;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Direct binary op on record Secret field must fail with NGJ-CAP-003: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-003"), "Expected NGJ-CAP-003: " + stdout);
+    }
 }

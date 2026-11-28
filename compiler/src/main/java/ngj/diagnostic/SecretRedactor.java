@@ -19,10 +19,16 @@ public final class SecretRedactor {
     private static final Pattern STACK_TRACE_MORE_PATTERN = Pattern.compile("(?m)^\\s*\\.\\.\\.\\s+\\d+\\s+more\\r?\\n?");
     private static final Pattern CAUSED_BY_PATTERN = Pattern.compile("(?m)^Caused by:\\s+.*\\r?\\n?");
     private static final Pattern SECRET_TYPED_INIT_PATTERN = Pattern.compile(
-        "(Secret\\s*<[^>]+>\\s*=\\s*)\"[^\"]*\""
+        "(Secret\\s*(?:<[^>]+>)?\\s*=\\s*)\"[^\"]*\""
+    );
+    private static final Pattern SECRET_TYPED_NONSTR_INIT_PATTERN = Pattern.compile(
+        "(Secret\\s*(?:<[^>]+>)?\\s*=\\s*)(-?\\d+L?|'[^']*'|true|false)\\b"
     );
     private static final Pattern SECRET_OF_LITERAL_PATTERN = Pattern.compile(
         "(Secret\\.of\\s*\\(\\s*)\"[^\"]*\"(\\s*\\))"
+    );
+    private static final Pattern SECRET_OF_NONSTR_LITERAL_PATTERN = Pattern.compile(
+        "(Secret\\.of\\s*\\(\\s*)(-?\\d+L?|'[^']*'|true|false)(\\s*\\))"
     );
     private static final Pattern ENV_SECRET_QUOTED_ASSIGN_PATTERN = Pattern.compile(
         "(?i)(\\b[a-z_][a-z0-9_]*(?:secret|token|password|passwd|api_key|apikey|private_key|credential|auth)[a-z0-9_]*(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)\"[^\"]*\""
@@ -53,12 +59,56 @@ public final class SecretRedactor {
     }
 
     public static String redactText(String input) {
+        return redactText(input, Set.of(), Set.of(), Set.of());
+    }
+
+    public static String redactText(
+        String input,
+        Set<String> secretKeys,
+        Set<String> secretTypeNames,
+        Set<String> secretLiterals
+    ) {
         if (input == null) {
             return null;
         }
         String result = SECRET_WRAPPER_PATTERN.matcher(input).replaceAll(MASK);
         result = SECRET_TYPED_INIT_PATTERN.matcher(result).replaceAll("$1\"" + MASK + "\"");
+        result = SECRET_TYPED_NONSTR_INIT_PATTERN.matcher(result).replaceAll("$1" + MASK);
         result = SECRET_OF_LITERAL_PATTERN.matcher(result).replaceAll("$1\"" + MASK + "\"$2");
+        result = SECRET_OF_NONSTR_LITERAL_PATTERN.matcher(result).replaceAll("$1" + MASK + "$2");
+        if (secretTypeNames != null && !secretTypeNames.isEmpty()) {
+            for (String typeName : secretTypeNames) {
+                if (typeName == null || typeName.isBlank()) continue;
+                String quoted = Pattern.quote(typeName);
+                result = Pattern.compile("(\\b" + quoted + "(?:\\s*<[^>]*>)?\\s*=\\s*)\"[^\"]*\"")
+                    .matcher(result)
+                    .replaceAll("$1\"" + MASK + "\"");
+                result = Pattern.compile("(\\b" + quoted + "(?:\\s*<[^>]*>)?\\s*=\\s*)(-?\\d+L?|'[^']*'|true|false)\\b")
+                    .matcher(result)
+                    .replaceAll("$1" + MASK);
+            }
+        }
+        if (secretKeys != null && !secretKeys.isEmpty()) {
+            for (String key : secretKeys) {
+                if (key == null || key.isBlank()) continue;
+                String quoted = Pattern.quote(key);
+                result = Pattern.compile("(\\b" + quoted + "(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)\"[^\"]*\"")
+                    .matcher(result)
+                    .replaceAll("$1\"" + MASK + "\"");
+                result = Pattern.compile("(\\b" + quoted + "(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)(-?\\d+L?|'[^']*'|true|false)\\b")
+                    .matcher(result)
+                    .replaceAll("$1" + MASK);
+            }
+        }
+        if (secretLiterals != null && !secretLiterals.isEmpty()) {
+            for (String lit : secretLiterals) {
+                if (lit == null || lit.isEmpty()) continue;
+                result = result.replace("\"" + lit + "\"", "\"" + MASK + "\"");
+                if (lit.length() >= 6) {
+                    result = result.replace(lit, MASK);
+                }
+            }
+        }
         result = ENV_SECRET_QUOTED_ASSIGN_PATTERN.matcher(result).replaceAll("$1\"" + MASK + "\"");
         result = ENV_SECRET_ASSIGN_PATTERN.matcher(result).replaceAll("$1$2" + MASK);
         result = STACK_TRACE_AT_PATTERN.matcher(result).replaceAll("");
@@ -97,10 +147,19 @@ public final class SecretRedactor {
     }
 
     public static Diagnostic redactDiagnostic(Diagnostic diagnostic) {
-        return redactDiagnostic(diagnostic, Set.of());
+        return redactDiagnostic(diagnostic, Set.of(), Set.of(), Set.of());
     }
 
     public static Diagnostic redactDiagnostic(Diagnostic diagnostic, Set<String> secretKeys) {
+        return redactDiagnostic(diagnostic, secretKeys, Set.of(), Set.of());
+    }
+
+    public static Diagnostic redactDiagnostic(
+        Diagnostic diagnostic,
+        Set<String> secretKeys,
+        Set<String> secretTypeNames,
+        Set<String> secretLiterals
+    ) {
         if (diagnostic == null) {
             return null;
         }
@@ -108,30 +167,30 @@ public final class SecretRedactor {
             .map(step -> new DerivationStep(
                 step.step(),
                 step.span(),
-                redactText(step.exprSnippet()),
-                redactText(step.reason())
+                redactText(step.exprSnippet(), secretKeys, secretTypeNames, secretLiterals),
+                redactText(step.reason(), secretKeys, secretTypeNames, secretLiterals)
             ))
             .toList();
         List<Suggestion> redactedSuggestions = diagnostic.suggestions().stream()
             .map(s -> new Suggestion(
                 s.kind(),
-                redactText(s.message()),
+                redactText(s.message(), secretKeys, secretTypeNames, secretLiterals),
                 s.applicability(),
-                redactText(s.replacement())
+                redactText(s.replacement(), secretKeys, secretTypeNames, secretLiterals)
             ))
             .toList();
         return new Diagnostic(
             diagnostic.id(),
             diagnostic.severity(),
             diagnostic.certainty(),
-            redactText(diagnostic.message()),
+            redactText(diagnostic.message(), secretKeys, secretTypeNames, secretLiterals),
             diagnostic.primarySpan(),
             diagnostic.symbolId(),
             diagnostic.expected(),
             diagnostic.actual(),
             diagnostic.related(),
             redactedSuggestions,
-            redactText(diagnostic.exprSnippet()),
+            redactText(diagnostic.exprSnippet(), secretKeys, secretTypeNames, secretLiterals),
             redactedTrace,
             diagnostic.obligationId(),
             redactSolverDiagnosis(diagnostic.solverDiagnosis(), secretKeys)
