@@ -19,6 +19,7 @@ public final class CapabilityChecker {
     private final List<Diagnostic> diagnostics = new ArrayList<>();
     private final Map<String, FnDecl> fnDecls = new HashMap<>();
     private final Map<String, ProtocolDecl> protocols = new HashMap<>();
+    private final Map<String, TypeAliasDecl> typeAliases = new HashMap<>();
     private final String profile;
     private final Set<String> trustedAllowlist;
 
@@ -38,6 +39,7 @@ public final class CapabilityChecker {
     public void checkAll(List<CompilationUnit> units) {
         fnDecls.clear();
         protocols.clear();
+        typeAliases.clear();
 
         for (var unit : units) {
             for (var decl : unit.declarations()) {
@@ -45,6 +47,8 @@ public final class CapabilityChecker {
                     fnDecls.put(fn.name(), fn);
                 } else if (decl instanceof ProtocolDecl proto) {
                     protocols.put(proto.name(), proto);
+                } else if (decl instanceof TypeAliasDecl ta) {
+                    typeAliases.put(ta.name(), ta);
                 }
             }
         }
@@ -91,14 +95,15 @@ public final class CapabilityChecker {
 
         CapEnv env = new CapEnv(fn.effects(), fn.captureBounds());
         for (var param : fn.params()) {
-            VarMode mode = modeFromType(param.type(), param.isConsume());
-            boolean isSecret = isSecretType(param.type());
-            boolean isLinear = isLinearType(param.type()) || param.isConsume();
-            env.declare(param.name(), param.type(), mode, isLinear, isSecret, 0);
+            TypeExpr resolvedParamType = resolveTypeAlias(param.type());
+            VarMode mode = modeFromType(resolvedParamType, param.isConsume());
+            boolean isSecret = isSecretType(resolvedParamType);
+            boolean isLinear = isLinearType(resolvedParamType) || param.isConsume();
+            env.declare(param.name(), resolvedParamType, mode, isLinear, isSecret, 0);
             if (param.isConsume()) {
                 env.consumeParams.add(param.name());
             }
-            linkCaptureTargets(param.name(), param.type(), env);
+            linkCaptureTargets(param.name(), resolvedParamType, env);
         }
 
         if (fn.body() != null) {
@@ -125,7 +130,9 @@ public final class CapabilityChecker {
         switch (stmt) {
             case ValStmt val -> {
                 checkExpr(val.initializer(), env);
-                TypeExpr effectiveType = val.explicitType() != null ? val.explicitType() : inferResourceType(val.initializer(), env);
+                TypeExpr effectiveType = val.explicitType() != null
+                    ? resolveTypeAlias(val.explicitType())
+                    : inferResourceType(val.initializer(), env);
                 VarMode mode = modeFromType(effectiveType, false);
                 boolean isSecret = isSecretType(effectiveType) || isSecretExpr(val.initializer(), env);
                 boolean isLinear = isLinearType(effectiveType) || isLinearExpr(val.initializer(), env);
@@ -135,7 +142,9 @@ public final class CapabilityChecker {
             }
             case LetStmt let -> {
                 checkExpr(let.initializer(), env);
-                TypeExpr effectiveType = let.explicitType() != null ? let.explicitType() : inferResourceType(let.initializer(), env);
+                TypeExpr effectiveType = let.explicitType() != null
+                    ? resolveTypeAlias(let.explicitType())
+                    : inferResourceType(let.initializer(), env);
                 VarMode mode = modeFromType(effectiveType, false);
                 boolean isSecret = isSecretType(effectiveType) || isSecretExpr(let.initializer(), env);
                 boolean isLinear = isLinearType(effectiveType) || isLinearExpr(let.initializer(), env);
@@ -144,7 +153,9 @@ public final class CapabilityChecker {
             }
             case VarStmt varStmt -> {
                 checkExpr(varStmt.initializer(), env);
-                TypeExpr effectiveType = varStmt.explicitType() != null ? varStmt.explicitType() : inferResourceType(varStmt.initializer(), env);
+                TypeExpr effectiveType = varStmt.explicitType() != null
+                    ? resolveTypeAlias(varStmt.explicitType())
+                    : inferResourceType(varStmt.initializer(), env);
                 VarMode mode = VarMode.UPDATE;
                 boolean isSecret = isSecretType(effectiveType) || isSecretExpr(varStmt.initializer(), env);
                 boolean isLinear = isLinearType(effectiveType);
@@ -169,7 +180,7 @@ public final class CapabilityChecker {
                 TupleExpr tupleInit = td.initializer() instanceof TupleExpr te ? te : null;
                 for (int i = 0; i < td.names().size(); i++) {
                     Expr compInit = (tupleInit != null && i < tupleInit.elements().size()) ? tupleInit.elements().get(i) : null;
-                    TypeExpr t = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
+                    TypeExpr t = i < td.explicitTypes().size() ? resolveTypeAlias(td.explicitTypes().get(i)) : null;
                     if (t == null && isBudgetSplit) {
                         t = new SimpleTypeExpr("Budget", td.span());
                     } else if (t == null && compInit != null) {
@@ -449,7 +460,7 @@ public final class CapabilityChecker {
                         }
                     } else {
                         checkExpr(arg, env);
-                        if (p.type() instanceof CapabilityTypeExpr cap
+                        if (resolveTypeAlias(p.type()) instanceof CapabilityTypeExpr cap
                             && cap.mode() == CapabilityTypeExpr.CapabilityMode.UPDATE) {
                             Expr unwrapped = arg instanceof ParenExpr pe ? pe.inner() : arg;
                             if (unwrapped instanceof IdentExpr argId) {
@@ -909,7 +920,8 @@ public final class CapabilityChecker {
 
     private VarMode modeFromType(TypeExpr t, boolean isConsume) {
         if (isConsume) return VarMode.OWNED;
-        if (t instanceof CapabilityTypeExpr cap) {
+        TypeExpr resolved = resolveTypeAlias(t);
+        if (resolved instanceof CapabilityTypeExpr cap) {
             return cap.mode() == CapabilityTypeExpr.CapabilityMode.READ ? VarMode.READ : VarMode.UPDATE;
         }
         return VarMode.OWNED;
@@ -1062,8 +1074,52 @@ public final class CapabilityChecker {
         return t != null && typeName(t).equals("Budget");
     }
 
+    private TypeExpr resolveTypeAlias(TypeExpr type) {
+        return resolveTypeAlias(type, new LinkedHashSet<>());
+    }
+
+    private TypeExpr resolveTypeAlias(TypeExpr type, Set<String> seen) {
+        if (type == null) return null;
+        if (type instanceof SimpleTypeExpr s && typeAliases.containsKey(s.name()) && seen.add(s.name())) {
+            TypeExpr resolved = resolveTypeAlias(typeAliases.get(s.name()).targetType(), seen);
+            seen.remove(s.name());
+            return resolved;
+        }
+        if (type instanceof GenericTypeExpr g && typeAliases.containsKey(g.name()) && seen.add(g.name())) {
+            TypeAliasDecl alias = typeAliases.get(g.name());
+            Map<String, TypeExpr> subst = new HashMap<>();
+            for (int i = 0; i < Math.min(alias.typeParams().size(), g.typeArgs().size()); i++) {
+                subst.put(alias.typeParams().get(i), g.typeArgs().get(i));
+            }
+            TypeExpr substituted = substituteTypeParams(alias.targetType(), subst);
+            TypeExpr resolved = resolveTypeAlias(substituted, seen);
+            seen.remove(g.name());
+            return resolved;
+        }
+        return type;
+    }
+
+    private TypeExpr substituteTypeParams(TypeExpr type, Map<String, TypeExpr> subst) {
+        if (type == null || subst.isEmpty()) return type;
+        return switch (type) {
+            case SimpleTypeExpr s -> subst.getOrDefault(s.name(), s);
+            case GenericTypeExpr g -> new GenericTypeExpr(
+                g.name(),
+                g.typeArgs().stream().map(a -> substituteTypeParams(a, subst)).toList(),
+                g.span()
+            );
+            case CapabilityTypeExpr c -> new CapabilityTypeExpr(c.mode(), substituteTypeParams(c.inner(), subst), c.span());
+            case RefinedTypeExpr r -> new RefinedTypeExpr(r.binderName(), substituteTypeParams(r.baseType(), subst), r.predicate(), r.span());
+            case RangeTypeExpr r -> new RangeTypeExpr(substituteTypeParams(r.baseType(), subst), r.lowerBound(), r.upperBound(), r.upperInclusive(), r.span());
+            case TupleTypeExpr t -> new TupleTypeExpr(t.elements().stream().map(e -> substituteTypeParams(e, subst)).toList(), t.span());
+            default -> type;
+        };
+    }
+
     private String typeName(TypeExpr t) {
-        return switch (t) {
+        TypeExpr resolved = resolveTypeAlias(t);
+        if (resolved == null) return "";
+        return switch (resolved) {
             case SimpleTypeExpr s -> s.name();
             case GenericTypeExpr g -> g.name();
             case CapabilityTypeExpr c -> typeName(c.inner());

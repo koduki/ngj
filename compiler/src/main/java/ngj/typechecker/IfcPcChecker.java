@@ -27,6 +27,7 @@ public final class IfcPcChecker {
     private final Map<String, FnDecl> fnDecls = new HashMap<>();
     private final Map<String, TopLevelDecl> typeDecls = new HashMap<>();
     private final Map<String, ProtocolDecl> protocolDecls = new HashMap<>();
+    private final Map<String, TypeAliasDecl> typeAliases = new HashMap<>();
 
     public IfcPcChecker() {
         this(DEFAULT_PRIVILEGED_EFFECTS);
@@ -46,6 +47,7 @@ public final class IfcPcChecker {
         fnDecls.clear();
         typeDecls.clear();
         protocolDecls.clear();
+        typeAliases.clear();
 
         for (var unit : units) {
             for (var decl : unit.declarations()) {
@@ -55,6 +57,7 @@ public final class IfcPcChecker {
                     case RecordDecl r -> typeDecls.put(r.name(), r);
                     case EnumDecl e -> typeDecls.put(e.name(), e);
                     case ProtocolDecl p -> protocolDecls.put(p.name(), p);
+                    case TypeAliasDecl ta -> typeAliases.put(ta.name(), ta);
                     default -> {}
                 }
             }
@@ -103,12 +106,13 @@ public final class IfcPcChecker {
     }
 
     private void checkSerializableType(TypeExpr type, SourceSpan span) {
-        if (type == null) return;
-        switch (type) {
+        TypeExpr resolved = resolveAlias(type);
+        if (resolved == null) return;
+        switch (resolved) {
             case CapabilityTypeExpr _, CaptureSetTypeExpr _, FunctionTypeExpr _ -> diagnostics.add(Diagnostic.error(
                 "NGJ-SCHEMA-001",
-                "@boundary_schema cannot contain capability or function field type: " + type,
-                type.span() != null ? type.span() : span
+                "@boundary_schema cannot contain capability or function field type: " + resolved,
+                resolved.span() != null ? resolved.span() : span
             ));
             case SimpleTypeExpr s -> {
                 if (NON_SERIALIZABLE_TYPES.contains(s.name())) {
@@ -163,8 +167,9 @@ public final class IfcPcChecker {
     }
 
     private List<String> referencedTypes(TypeExpr t) {
-        if (t == null) return List.of();
-        return switch (t) {
+        TypeExpr resolved = resolveAlias(t);
+        if (resolved == null) return List.of();
+        return switch (resolved) {
             case SimpleTypeExpr s -> List.of(s.name());
             case GenericTypeExpr g -> {
                 List<String> out = new ArrayList<>();
@@ -478,23 +483,69 @@ public final class IfcPcChecker {
         }
     }
 
-    private boolean isUntrustedType(TypeExpr type) {
-        if (type == null) return false;
+    private TypeExpr resolveAlias(TypeExpr type) {
+        return resolveAlias(type, new LinkedHashSet<>());
+    }
+
+    private TypeExpr resolveAlias(TypeExpr type, Set<String> seen) {
+        if (type == null) return null;
+        if (type instanceof SimpleTypeExpr s && typeAliases.containsKey(s.name()) && seen.add(s.name())) {
+            TypeExpr resolved = resolveAlias(typeAliases.get(s.name()).targetType(), seen);
+            seen.remove(s.name());
+            return resolved;
+        }
+        if (type instanceof GenericTypeExpr g && typeAliases.containsKey(g.name()) && seen.add(g.name())) {
+            TypeAliasDecl alias = typeAliases.get(g.name());
+            Map<String, TypeExpr> subst = new HashMap<>();
+            for (int i = 0; i < Math.min(alias.typeParams().size(), g.typeArgs().size()); i++) {
+                subst.put(alias.typeParams().get(i), g.typeArgs().get(i));
+            }
+            TypeExpr substituted = substituteTypeParams(alias.targetType(), subst);
+            TypeExpr resolved = resolveAlias(substituted, seen);
+            seen.remove(g.name());
+            return resolved;
+        }
+        return type;
+    }
+
+    private TypeExpr substituteTypeParams(TypeExpr type, Map<String, TypeExpr> subst) {
+        if (type == null || subst.isEmpty()) return type;
         return switch (type) {
+            case SimpleTypeExpr s -> subst.getOrDefault(s.name(), s);
+            case GenericTypeExpr g -> new GenericTypeExpr(
+                g.name(),
+                g.typeArgs().stream().map(a -> substituteTypeParams(a, subst)).toList(),
+                g.span()
+            );
+            case CapabilityTypeExpr c -> new CapabilityTypeExpr(c.mode(), substituteTypeParams(c.inner(), subst), c.span());
+            case RefinedTypeExpr r -> new RefinedTypeExpr(r.binderName(), substituteTypeParams(r.baseType(), subst), r.predicate(), r.span());
+            case RangeTypeExpr r -> new RangeTypeExpr(substituteTypeParams(r.baseType(), subst), r.lowerBound(), r.upperBound(), r.upperInclusive(), r.span());
+            case TupleTypeExpr t -> new TupleTypeExpr(t.elements().stream().map(e -> substituteTypeParams(e, subst)).toList(), t.span());
+            default -> type;
+        };
+    }
+
+    private boolean isUntrustedType(TypeExpr type) {
+        TypeExpr resolved = resolveAlias(type);
+        if (resolved == null) return false;
+        return switch (resolved) {
             case GenericTypeExpr g -> g.name().equals("Untrusted");
             case SimpleTypeExpr s -> s.name().equals("Untrusted");
             case CapabilityTypeExpr c -> isUntrustedType(c.inner());
+            case RefinedTypeExpr r -> isUntrustedType(r.baseType());
             default -> false;
         };
     }
 
     private boolean isValidatedType(TypeExpr type) {
-        if (type == null) return false;
-        return switch (type) {
+        TypeExpr resolved = resolveAlias(type);
+        if (resolved == null) return false;
+        return switch (resolved) {
             case GenericTypeExpr g -> g.name().equals("Validated")
                 || (g.name().equals("Result") && !g.typeArgs().isEmpty() && isValidatedType(g.typeArgs().get(0)));
             case SimpleTypeExpr s -> s.name().equals("Validated");
             case CapabilityTypeExpr c -> isValidatedType(c.inner());
+            case RefinedTypeExpr r -> isValidatedType(r.baseType());
             default -> false;
         };
     }

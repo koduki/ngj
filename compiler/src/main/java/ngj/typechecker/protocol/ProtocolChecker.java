@@ -17,6 +17,7 @@ public final class ProtocolChecker {
     private final Map<String, ProtocolDecl> protocolDecls = new LinkedHashMap<>();
     private final Map<String, ProtocolAutomaton> automata = new LinkedHashMap<>();
     private final Set<String> mustResolveProtocols = new LinkedHashSet<>();
+    private final Map<String, TypeAliasDecl> typeAliases = new HashMap<>();
 
     public List<Diagnostic> getDiagnostics() {
         return diagnostics;
@@ -43,6 +44,7 @@ public final class ProtocolChecker {
         protocolDecls.clear();
         automata.clear();
         mustResolveProtocols.clear();
+        typeAliases.clear();
 
         for (var unit : units) {
             for (var decl : unit.declarations()) {
@@ -62,6 +64,8 @@ public final class ProtocolChecker {
                             proto.span()
                         ));
                     }
+                } else if (decl instanceof TypeAliasDecl ta) {
+                    typeAliases.put(ta.name(), ta);
                 }
             }
         }
@@ -430,9 +434,49 @@ public final class ProtocolChecker {
         }
     }
 
-    private String protocolNameOf(TypeExpr type) {
+    private TypeExpr resolveTypeAlias(TypeExpr type) {
+        return resolveTypeAlias(type, new LinkedHashSet<>());
+    }
+
+    private TypeExpr resolveTypeAlias(TypeExpr type, Set<String> seen) {
         if (type == null) return null;
+        if (type instanceof SimpleTypeExpr s && typeAliases.containsKey(s.name()) && seen.add(s.name())) {
+            TypeExpr resolved = resolveTypeAlias(typeAliases.get(s.name()).targetType(), seen);
+            seen.remove(s.name());
+            return resolved;
+        }
+        if (type instanceof GenericTypeExpr g && typeAliases.containsKey(g.name()) && seen.add(g.name())) {
+            TypeAliasDecl alias = typeAliases.get(g.name());
+            Map<String, TypeExpr> subst = new HashMap<>();
+            for (int i = 0; i < Math.min(alias.typeParams().size(), g.typeArgs().size()); i++) {
+                subst.put(alias.typeParams().get(i), g.typeArgs().get(i));
+            }
+            TypeExpr substituted = substituteTypeParams(alias.targetType(), subst);
+            TypeExpr resolved = resolveTypeAlias(substituted, seen);
+            seen.remove(g.name());
+            return resolved;
+        }
+        return type;
+    }
+
+    private TypeExpr substituteTypeParams(TypeExpr type, Map<String, TypeExpr> subst) {
+        if (type == null || subst.isEmpty()) return type;
         return switch (type) {
+            case SimpleTypeExpr s -> subst.getOrDefault(s.name(), s);
+            case GenericTypeExpr g -> new GenericTypeExpr(
+                g.name(),
+                g.typeArgs().stream().map(a -> substituteTypeParams(a, subst)).toList(),
+                g.span()
+            );
+            case CapabilityTypeExpr c -> new CapabilityTypeExpr(c.mode(), substituteTypeParams(c.inner(), subst), c.span());
+            default -> type;
+        };
+    }
+
+    private String protocolNameOf(TypeExpr type) {
+        TypeExpr resolved = resolveTypeAlias(type);
+        if (resolved == null) return null;
+        return switch (resolved) {
             case SimpleTypeExpr s -> automata.containsKey(s.name()) ? s.name() : null;
             case GenericTypeExpr g -> automata.containsKey(g.name()) ? g.name() : null;
             case CapabilityTypeExpr c -> protocolNameOf(c.inner());
@@ -441,7 +485,11 @@ public final class ProtocolChecker {
     }
 
     private String initialStateOf(TypeExpr type, ProtocolAutomaton aut) {
-        if (type instanceof GenericTypeExpr g && !g.typeArgs().isEmpty()
+        TypeExpr resolved = resolveTypeAlias(type);
+        if (resolved instanceof CapabilityTypeExpr c) {
+            resolved = resolveTypeAlias(c.inner());
+        }
+        if (resolved instanceof GenericTypeExpr g && !g.typeArgs().isEmpty()
             && g.typeArgs().get(0) instanceof SimpleTypeExpr st && aut.states().contains(st.name())) {
             return st.name();
         }

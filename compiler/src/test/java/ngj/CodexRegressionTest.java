@@ -1163,4 +1163,183 @@ class CodexRegressionTest {
         Object badRes = outerClass.getMethod("decodeJson", String.class).invoke(null, "{\"inner\":{\"value\":0}}");
         assertTrue(badRes.getClass().getSimpleName().endsWith("$Err"), "Out-of-range nested Inner value=0 must return Err");
     }
+
+    @Test
+    void nonlocalReturnInsideValInitializerFailsPostconditionVc() throws Exception {
+        Path file = tempDir.resolve("nonlocal_return_val_init.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(x: Int) -> Int effects()
+                ensures (result == 0)
+            {
+                val ignored: Int = if (x > 0) {
+                    return 1;
+                } else {
+                    0
+                };
+                return 0;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Nonlocal return inside val initializer must not satisfy ensures(result == 0): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void assumeAfterEarlyReturnIfDoesNotLeakIntoThenBranch() throws Exception {
+        Path file = tempDir.resolve("assume_after_early_return.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(x: Int) -> Int effects()
+                ensures (result == 0)
+            {
+                if (x > 0) {
+                    return 1;
+                }
+                assume (x == 0);
+                return 0;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "assume(x == 0) after early return must not leak into x > 0 branch: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void typeAliasForUntrustedEnforcesSelectivePcGuard() throws Exception {
+        Path file = tempDir.resolve("alias_untrusted_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public type Input = Untrusted<Option<Int>>;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Input) -> Unit effects(PaymentWrite) {
+                if (isSome(flag)) {
+                    pay();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Type alias for Untrusted must trigger NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void genericTypeAliasForUntrustedEnforcesSelectivePcGuard() throws Exception {
+        Path file = tempDir.resolve("generic_alias_untrusted_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public type Id<T> = T;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Id<Untrusted<Option<Int>>>) -> Unit effects(PaymentWrite) {
+                if (isSome(flag)) {
+                    pay();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Generic type alias for Untrusted must trigger NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void typeAliasForReadArenaRejectedAsUpdate() throws Exception {
+        Path file = tempDir.resolve("alias_read_to_update.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public type ReadArena = read Arena;
+            public type MutArena = update Arena;
+
+            public fn mutate(a: MutArena) -> Unit effects() {
+                return ();
+            }
+
+            public fn bad(a: ReadArena) -> Unit effects() {
+                mutate(a);
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Passing ReadArena alias to MutArena alias must fail with NGJ-SEP-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-SEP-001"), "Expected NGJ-SEP-001: " + stdout);
+    }
+
+    @Test
+    void typeAliasForMathIntRejectedInExecutableCode() throws Exception {
+        Path file = tempDir.resolve("alias_math_int.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public type GhostInt = MathInt;
+
+            public fn bad(x: GhostInt) -> Int effects() {
+                return 0;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Type alias for MathInt in executable code must fail with NGJ-PROOF-002: " + stdout);
+        assertTrue(stdout.contains("NGJ-PROOF-002"), "Expected NGJ-PROOF-002: " + stdout);
+    }
 }

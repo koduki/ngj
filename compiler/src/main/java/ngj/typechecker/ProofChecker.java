@@ -18,6 +18,7 @@ public final class ProofChecker {
     private final Map<String, SpecFnDecl> specFns = new LinkedHashMap<>();
     private final Map<String, LemmaDecl> lemmas = new LinkedHashMap<>();
     private final Map<String, FnDecl> fnDecls = new LinkedHashMap<>();
+    private final Map<String, TypeAliasDecl> typeAliases = new HashMap<>();
     private final Set<String> secretVars = new LinkedHashSet<>();
 
     private final String profile;
@@ -42,6 +43,7 @@ public final class ProofChecker {
         specFns.clear();
         lemmas.clear();
         fnDecls.clear();
+        typeAliases.clear();
         secretVars.clear();
 
         for (var unit : units) {
@@ -50,12 +52,13 @@ public final class ProofChecker {
                     case SpecFnDecl sf -> specFns.put(sf.name(), sf);
                     case LemmaDecl lm -> lemmas.put(lm.name(), lm);
                     case FnDecl fn -> fnDecls.put(fn.name(), fn);
+                    case TypeAliasDecl ta -> typeAliases.put(ta.name(), ta);
                     default -> {}
                 }
             }
         }
 
-        VcGenerator vcGen = new VcGenerator(specFns);
+        VcGenerator vcGen = new VcGenerator(specFns, typeAliases);
 
         for (var unit : units) {
             for (var decl : unit.declarations()) {
@@ -67,6 +70,48 @@ public final class ProofChecker {
                 }
             }
         }
+    }
+
+    private TypeExpr resolveTypeAlias(TypeExpr type) {
+        return resolveTypeAlias(type, new LinkedHashSet<>());
+    }
+
+    private TypeExpr resolveTypeAlias(TypeExpr type, Set<String> seen) {
+        if (type == null) return null;
+        if (type instanceof SimpleTypeExpr s && typeAliases.containsKey(s.name()) && seen.add(s.name())) {
+            TypeExpr resolved = resolveTypeAlias(typeAliases.get(s.name()).targetType(), seen);
+            seen.remove(s.name());
+            return resolved;
+        }
+        if (type instanceof GenericTypeExpr g && typeAliases.containsKey(g.name()) && seen.add(g.name())) {
+            TypeAliasDecl alias = typeAliases.get(g.name());
+            Map<String, TypeExpr> subst = new HashMap<>();
+            for (int i = 0; i < Math.min(alias.typeParams().size(), g.typeArgs().size()); i++) {
+                subst.put(alias.typeParams().get(i), g.typeArgs().get(i));
+            }
+            TypeExpr substituted = substituteTypeParams(alias.targetType(), subst);
+            TypeExpr resolved = resolveTypeAlias(substituted, seen);
+            seen.remove(g.name());
+            return resolved;
+        }
+        return type;
+    }
+
+    private TypeExpr substituteTypeParams(TypeExpr type, Map<String, TypeExpr> subst) {
+        if (type == null || subst.isEmpty()) return type;
+        return switch (type) {
+            case SimpleTypeExpr s -> subst.getOrDefault(s.name(), s);
+            case GenericTypeExpr g -> new GenericTypeExpr(
+                g.name(),
+                g.typeArgs().stream().map(a -> substituteTypeParams(a, subst)).toList(),
+                g.span()
+            );
+            case CapabilityTypeExpr c -> new CapabilityTypeExpr(c.mode(), substituteTypeParams(c.inner(), subst), c.span());
+            case RefinedTypeExpr r -> new RefinedTypeExpr(r.binderName(), substituteTypeParams(r.baseType(), subst), r.predicate(), r.span());
+            case RangeTypeExpr r -> new RangeTypeExpr(substituteTypeParams(r.baseType(), subst), r.lowerBound(), r.upperBound(), r.upperInclusive(), r.span());
+            case TupleTypeExpr t -> new TupleTypeExpr(t.elements().stream().map(e -> substituteTypeParams(e, subst)).toList(), t.span());
+            default -> type;
+        };
     }
 
     private void checkSpecFn(SpecFnDecl sf) {
@@ -89,7 +134,7 @@ public final class ProofChecker {
 
     private void checkFn(FnDecl fn, VcGenerator vcGen) {
         for (var p : fn.params()) {
-            if (SecretRedactor.isSecretVariableName(p.name()) || isSecretType(p.type())) {
+            if (SecretRedactor.isSecretVariableName(p.name()) || isSecretType(resolveTypeAlias(p.type()))) {
                 secretVars.add(p.name());
             }
             checkNoMathIntInType(p.type(), p.span() != null ? p.span() : fn.span());
@@ -108,8 +153,9 @@ public final class ProofChecker {
     }
 
     private void checkNoMathIntInType(TypeExpr type, SourceSpan span) {
-        if (type == null) return;
-        switch (type) {
+        TypeExpr resolved = resolveTypeAlias(type);
+        if (resolved == null) return;
+        switch (resolved) {
             case SimpleTypeExpr s -> {
                 if (s.name().equals("MathInt")) {
                     diagnostics.add(Diagnostic.error(
@@ -567,7 +613,7 @@ public final class ProofChecker {
 
         static CallSiteCtx forFn(FnDecl fn, VcGenerator vcGen) {
             Map<String, SmtExpr.Sort> sorts = vcGen.collectSorts(fn.params(), fn.returnType());
-            Set<String> longVars = VcGenerator.collectLongVars(fn.params());
+            Set<String> longVars = vcGen.collectLongVarsFor(fn.params());
             List<SmtExpr> premises = new ArrayList<>();
             for (var c : fn.contracts()) {
                 if (c.kind() == ContractClause.Kind.REQUIRES) {
@@ -618,13 +664,13 @@ public final class ProofChecker {
 
         void bindLocal(String name, TypeExpr explicitType, Expr initializer) {
             SmtExpr init = vcGen.translateExecutableExpr(initializer, sorts, ssaEnv, longVars);
-            SmtExpr.Sort sort = VcGenerator.sortOfType(explicitType);
+            SmtExpr.Sort sort = vcGen.sortOf(explicitType);
             String lhs = (ssaEnv.containsKey(name) || sorts.containsKey(name))
                 ? freshSsa(name, sort)
                 : name;
             sorts.put(lhs, sort);
             ssaEnv.put(name, lhs);
-            if (VcGenerator.isLongType(explicitType)) {
+            if (vcGen.isLong(explicitType)) {
                 longVars.add(lhs);
                 longVars.add(name);
             }
@@ -635,9 +681,9 @@ public final class ProofChecker {
 
         void bindVar(String name, TypeExpr explicitType, Expr initializer) {
             SmtExpr init = vcGen.translateExecutableExpr(initializer, sorts, ssaEnv, longVars);
-            SmtExpr.Sort sort = VcGenerator.sortOfType(explicitType);
+            SmtExpr.Sort sort = vcGen.sortOf(explicitType);
             String lhs = freshSsa(name, sort);
-            if (VcGenerator.isLongType(explicitType)) {
+            if (vcGen.isLong(explicitType)) {
                 longVars.add(lhs);
                 longVars.add(name);
             }
@@ -661,9 +707,9 @@ public final class ProofChecker {
             for (int i = 0; i < td.names().size(); i++) {
                 String name = td.names().get(i);
                 TypeExpr explicitType = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
-                SmtExpr.Sort sort = VcGenerator.sortOfType(explicitType);
+                SmtExpr.Sort sort = vcGen.sortOf(explicitType);
                 String lhs = freshSsa(name, sort);
-                if (VcGenerator.isLongType(explicitType)) {
+                if (vcGen.isLong(explicitType)) {
                     longVars.add(lhs);
                     longVars.add(name);
                 }
@@ -896,8 +942,11 @@ public final class ProofChecker {
     }
 
     private boolean isSecretType(TypeExpr t) {
-        if (t instanceof GenericTypeExpr g) return g.name().equals("Secret");
-        if (t instanceof SimpleTypeExpr s) return s.name().equals("Secret");
+        TypeExpr resolved = resolveTypeAlias(t);
+        if (resolved instanceof GenericTypeExpr g) return g.name().equals("Secret");
+        if (resolved instanceof SimpleTypeExpr s) return s.name().equals("Secret");
+        if (resolved instanceof CapabilityTypeExpr c) return isSecretType(c.inner());
+        if (resolved instanceof RefinedTypeExpr r) return isSecretType(r.baseType());
         return false;
     }
 }
