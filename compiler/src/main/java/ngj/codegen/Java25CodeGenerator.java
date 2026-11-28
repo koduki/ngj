@@ -2523,8 +2523,8 @@ public final class Java25CodeGenerator {
                     switch (tName) {
                         case "Int" -> {
                             code.aload(tempSlot);
-                            code.checkcast(ClassDesc.of("java.lang.Number"));
-                            code.invokevirtual(ClassDesc.of("java.lang.Number"), "intValue", MethodTypeDesc.of(ConstantDescs.CD_int));
+                            code.invokestatic(ClassDesc.of("ngj.runtime.BoundaryCodec"), "requireInt",
+                                MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_Object));
                         }
                         case "Long" -> {
                             code.aload(tempSlot);

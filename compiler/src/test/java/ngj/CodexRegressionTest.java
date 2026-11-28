@@ -548,4 +548,75 @@ class CodexRegressionTest {
         assertEquals(1, code, "False invariant must fail verification: " + stdout);
         assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
     }
+
+    @Test
+    void conditionalExpressionWithLocalBindingIsModeledInVc() throws Exception {
+        Path file = tempDir.resolve("cond_local_vc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(x: Int) -> Int effects()
+                requires (true)
+                ensures (result == 0)
+            {
+                val y: Int = 0;
+                return if (x > 0) {
+                    val y: Int = 1;
+                    y
+                } else {
+                    0
+                };
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "If-expr with local val y = 1 must fail ensures(result == 0): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void protocolTransitionWithPrivilegedEffectUnderUntrustedPcIsRejected() throws Exception {
+        Path file = tempDir.resolve("proto_untrusted_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            protocol PaymentFlow {
+                initial Start;
+                states Start, Done;
+                final Done;
+                transition charge(Start) -> Done effects(PaymentWrite);
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>, consume a: PaymentFlow<Start>) -> PaymentFlow<Done> effects(PaymentWrite) {
+                if (isSome(flag)) {
+                    return PaymentFlow.charge(consume a);
+                }
+                return PaymentFlow.charge(consume a);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Protocol transition with PaymentWrite under Untrusted PC must fail with NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void boundaryCodecRejectsOverflowingIntBeforeNarrowing() {
+        assertThrows(IllegalArgumentException.class, () -> ngj.runtime.BoundaryCodec.requireInt(4294967297L));
+        assertEquals(8443, ngj.runtime.BoundaryCodec.requireInt(8443L));
+    }
 }

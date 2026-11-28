@@ -26,6 +26,7 @@ public final class IfcPcChecker {
     private final Set<String> privilegedEffects;
     private final Map<String, FnDecl> fnDecls = new HashMap<>();
     private final Map<String, TopLevelDecl> typeDecls = new HashMap<>();
+    private final Map<String, ProtocolDecl> protocolDecls = new HashMap<>();
 
     public IfcPcChecker() {
         this(DEFAULT_PRIVILEGED_EFFECTS);
@@ -44,6 +45,7 @@ public final class IfcPcChecker {
     public void checkAll(List<CompilationUnit> units) {
         fnDecls.clear();
         typeDecls.clear();
+        protocolDecls.clear();
 
         for (var unit : units) {
             for (var decl : unit.declarations()) {
@@ -52,6 +54,7 @@ public final class IfcPcChecker {
                     case DataDecl d -> typeDecls.put(d.name(), d);
                     case RecordDecl r -> typeDecls.put(r.name(), r);
                     case EnumDecl e -> typeDecls.put(e.name(), e);
+                    case ProtocolDecl p -> protocolDecls.put(p.name(), p);
                     default -> {}
                 }
             }
@@ -398,6 +401,24 @@ public final class IfcPcChecker {
                     "Privileged effect '" + objId.name() + "' cannot be executed under an Untrusted control-flow guard",
                     call.span()
                 ));
+            }
+            ProtocolDecl proto = protocolDecls.get(objId.name());
+            if (proto != null) {
+                for (var tr : proto.transitions()) {
+                    if (tr.name().equals(fa.fieldName())) {
+                        for (var eff : tr.effects()) {
+                            if (privilegedEffects.contains(eff)) {
+                                diagnostics.add(Diagnostic.error(
+                                    "NGJ-IFC-PC-001",
+                                    "Privileged effect '" + eff + "' in protocol transition '"
+                                        + proto.name() + "." + tr.name()
+                                        + "' cannot be executed under an Untrusted control-flow guard",
+                                    call.span()
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         }
     }

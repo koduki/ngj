@@ -102,18 +102,12 @@ public final class VcGenerator {
                     yield new SmtExpr.UnsupportedExpr("if without else in VC");
                 }
                 SmtExpr cond = translateExpr(ifExpr.condition(), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
-                Expr thenTail = extractBranchReturnOrTail(ifExpr.thenBranch());
-                Expr elseTail = ifExpr.elseBranch() instanceof BlockExpr eb
-                    ? extractBranchReturnOrTail(eb)
-                    : ifExpr.elseBranch();
-                if (thenTail == null || elseTail == null) {
+                SmtExpr thenSmt = translateBranchExpr(ifExpr.thenBranch(), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
+                SmtExpr elseSmt = translateBranchExpr(ifExpr.elseBranch(), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
+                if (thenSmt instanceof SmtExpr.UnsupportedExpr || elseSmt instanceof SmtExpr.UnsupportedExpr) {
                     yield new SmtExpr.UnsupportedExpr("Non-expression if branch in VC");
                 }
-                yield new SmtExpr.Ite(
-                    cond,
-                    translateExpr(thenTail, varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars),
-                    translateExpr(elseTail, varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars)
-                );
+                yield new SmtExpr.Ite(cond, thenSmt, elseSmt);
             }
             case CallExpr call -> {
                 if (call.callee() instanceof IdentExpr id && specFns.containsKey(id.name())) {
@@ -474,5 +468,38 @@ public final class VcGenerator {
             case ParenExpr p -> new ParenExpr(substituteExpr(p.inner(), subst), p.span());
             default -> expr;
         };
+    }
+
+    private SmtExpr translateBranchExpr(
+        Expr branch,
+        Map<String, Sort> varSorts,
+        Map<String, String> ssaEnv,
+        Set<String> inliningSpecFns,
+        boolean executableIntOverflow,
+        Set<String> longVars
+    ) {
+        if (!(branch instanceof BlockExpr block)) {
+            return translateExpr(branch, varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
+        }
+        Map<String, Expr> localSubst = new LinkedHashMap<>();
+        for (var stmt : block.statements()) {
+            switch (stmt) {
+                case ValStmt v -> localSubst.put(v.name(), substituteExpr(v.initializer(), localSubst));
+                case LetStmt l -> localSubst.put(l.name(), substituteExpr(l.initializer(), localSubst));
+                case ReturnStmt r -> {
+                    if (r.value() == null) {
+                        return new SmtExpr.UnsupportedExpr("void return in if branch");
+                    }
+                    return translateExpr(substituteExpr(r.value(), localSubst), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
+                }
+                default -> {
+                    return new SmtExpr.UnsupportedExpr("Non-expression statement in if branch");
+                }
+            }
+        }
+        if (block.tailExpr() == null) {
+            return new SmtExpr.UnsupportedExpr("Missing tail expression in if branch");
+        }
+        return translateExpr(substituteExpr(block.tailExpr(), localSubst), varSorts, ssaEnv, inliningSpecFns, executableIntOverflow, longVars);
     }
 }

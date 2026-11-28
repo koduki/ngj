@@ -27,6 +27,17 @@ public final class BoundaryCodec {
 
     private BoundaryCodec() {}
 
+    public static int requireInt(Object value) {
+        if (!(value instanceof Number n)) {
+            throw new IllegalArgumentException("Expected numeric Int value, got: " + value);
+        }
+        long lv = n.longValue();
+        if (lv < Integer.MIN_VALUE || lv > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Int overflow: " + lv);
+        }
+        return (int) lv;
+    }
+
     // -------------------------------------------------------------------------
     // JSON Encode Helpers (deterministic, zero reflection)
     // -------------------------------------------------------------------------
