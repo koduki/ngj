@@ -401,7 +401,7 @@ public final class IfcPcChecker {
             }
             case CallExpr call -> {
                 if (inUntrustedPc) {
-                    checkPrivilegedCall(call);
+                    checkPrivilegedCall(call, varTypes);
                 }
                 checkExpr(call.callee(), untrustedVars, varTypes, inUntrustedPc);
                 for (var arg : call.args()) {
@@ -681,7 +681,39 @@ public final class IfcPcChecker {
     private TypeExpr inferExprType(Expr expr, Map<String, TypeExpr> varTypes) {
         if (expr == null) return null;
         return switch (expr) {
-            case IdentExpr id -> resolveAlias(varTypes.get(id.name()));
+            case IdentExpr id -> {
+                if (varTypes.containsKey(id.name())) {
+                    yield resolveAlias(varTypes.get(id.name()));
+                }
+                FnDecl fn = fnDecls.get(id.name());
+                if (fn != null) {
+                    yield new FunctionTypeExpr(
+                        fn.params().stream().map(Param::type).toList(),
+                        fn.returnType(),
+                        fn.effects(),
+                        fn.captureBounds(),
+                        fn.span()
+                    );
+                }
+                yield null;
+            }
+            case LambdaExpr l -> {
+                Set<String> effs = new LinkedHashSet<>();
+                Map<String, TypeExpr> lambdaTypes = new LinkedHashMap<>(varTypes);
+                for (var p : l.params()) {
+                    TypeExpr pt = resolveAlias(p.type());
+                    if (pt != null) lambdaTypes.put(p.name(), pt);
+                    else lambdaTypes.remove(p.name());
+                }
+                collectBlockEffects(l.body(), lambdaTypes, effs);
+                yield new FunctionTypeExpr(
+                    l.params().stream().map(Param::type).toList(),
+                    inferBlockType(l.body(), lambdaTypes),
+                    List.copyOf(effs),
+                    List.of(),
+                    l.span()
+                );
+            }
             case ParenExpr p -> inferExprType(p.inner(), varTypes);
             case ConsumeExpr c -> inferExprType(c.target(), varTypes);
             case PropagateExpr p -> {
@@ -706,6 +738,10 @@ public final class IfcPcChecker {
                             : new GenericTypeExpr(id.name(), c.typeArgs(), c.span());
                     }
                 }
+                TypeExpr calleeType = unwrapTypeWrappers(inferExprType(c.callee(), varTypes));
+                if (calleeType instanceof FunctionTypeExpr fnType) {
+                    yield resolveAlias(fnType.returnType());
+                }
                 yield null;
             }
             case ConstructorExpr c -> {
@@ -720,11 +756,138 @@ public final class IfcPcChecker {
             );
             case IfExpr i -> {
                 TypeExpr thenT = inferExprType(i.thenBranch(), varTypes);
-                yield thenT != null ? thenT : inferExprType(i.elseBranch(), varTypes);
+                TypeExpr elseT = inferExprType(i.elseBranch(), varTypes);
+                if (thenT instanceof FunctionTypeExpr tf && elseT instanceof FunctionTypeExpr ef) {
+                    Set<String> mergedEffs = new LinkedHashSet<>(tf.effects());
+                    mergedEffs.addAll(ef.effects());
+                    yield new FunctionTypeExpr(tf.paramTypes(), tf.returnType(), List.copyOf(mergedEffs), tf.captureBounds(), i.span());
+                }
+                yield thenT != null ? thenT : elseT;
+            }
+            case MatchExpr m -> {
+                TypeExpr acc = null;
+                for (var arm : m.arms()) {
+                    TypeExpr at = inferExprType(arm.body(), varTypes);
+                    if (acc instanceof FunctionTypeExpr af && at instanceof FunctionTypeExpr bf) {
+                        Set<String> mergedEffs = new LinkedHashSet<>(af.effects());
+                        mergedEffs.addAll(bf.effects());
+                        acc = new FunctionTypeExpr(af.paramTypes(), af.returnType(), List.copyOf(mergedEffs), af.captureBounds(), m.span());
+                    } else if (acc == null) {
+                        acc = at;
+                    }
+                }
+                yield acc;
             }
             case BlockExpr b -> inferBlockType(b, varTypes);
             default -> null;
         };
+    }
+
+    private void collectBlockEffects(BlockExpr block, Map<String, TypeExpr> varTypes, Set<String> out) {
+        if (block == null) return;
+        Map<String, TypeExpr> localTypes = new LinkedHashMap<>(varTypes);
+        for (var st : block.statements()) {
+            switch (st) {
+                case ValStmt v -> {
+                    collectExprEffects(v.initializer(), localTypes, out);
+                    TypeExpr t = v.explicitType() != null ? resolveAlias(v.explicitType()) : inferExprType(v.initializer(), localTypes);
+                    if (t != null) localTypes.put(v.name(), t);
+                }
+                case LetStmt l -> {
+                    collectExprEffects(l.initializer(), localTypes, out);
+                    TypeExpr t = l.explicitType() != null ? resolveAlias(l.explicitType()) : inferExprType(l.initializer(), localTypes);
+                    if (t != null) localTypes.put(l.name(), t);
+                }
+                case VarStmt v -> {
+                    collectExprEffects(v.initializer(), localTypes, out);
+                    TypeExpr t = v.explicitType() != null ? resolveAlias(v.explicitType()) : inferExprType(v.initializer(), localTypes);
+                    if (t != null) localTypes.put(v.name(), t);
+                }
+                case AssignStmt a -> collectExprEffects(a.value(), localTypes, out);
+                case TupleDestructureStmt td -> collectExprEffects(td.initializer(), localTypes, out);
+                case ReturnStmt r -> collectExprEffects(r.value(), localTypes, out);
+                case ExprStmt es -> collectExprEffects(es.expr(), localTypes, out);
+                default -> {}
+            }
+        }
+        collectExprEffects(block.tailExpr(), localTypes, out);
+    }
+
+    private void collectExprEffects(Expr expr, Map<String, TypeExpr> varTypes, Set<String> out) {
+        if (expr == null) return;
+        switch (expr) {
+            case CallExpr call -> {
+                if (call.callee() instanceof IdentExpr id) {
+                    if (id.name().equals("declassify")) out.add("Declassify");
+                    FnDecl fn = fnDecls.get(id.name());
+                    if (fn != null) out.addAll(fn.effects());
+                } else if (call.callee() instanceof FieldAccessExpr fa) {
+                    if (fa.object() instanceof IdentExpr objId) {
+                        if (privilegedEffects.contains(objId.name())) out.add(objId.name());
+                        collectProtocolTransitionEffects(protocolDecls.get(objId.name()), fa.fieldName(), out);
+                    }
+                    ProtocolDecl instProto = protocolForExpr(fa.object(), varTypes);
+                    collectProtocolTransitionEffects(instProto, fa.fieldName(), out);
+                }
+                TypeExpr calleeType = unwrapTypeWrappers(inferExprType(call.callee(), varTypes));
+                if (calleeType instanceof FunctionTypeExpr fnType) {
+                    out.addAll(fnType.effects());
+                }
+                collectExprEffects(call.callee(), varTypes, out);
+                for (var a : call.args()) collectExprEffects(a, varTypes, out);
+            }
+            case BlockExpr b -> collectBlockEffects(b, varTypes, out);
+            case ScopeExpr s -> collectBlockEffects(s.body(), varTypes, out);
+            case ForkExpr f -> collectBlockEffects(f.body(), varTypes, out);
+            case IfExpr i -> {
+                collectExprEffects(i.condition(), varTypes, out);
+                collectBlockEffects(i.thenBranch(), varTypes, out);
+                collectExprEffects(i.elseBranch(), varTypes, out);
+            }
+            case MatchExpr m -> {
+                collectExprEffects(m.scrutinee(), varTypes, out);
+                for (var arm : m.arms()) collectExprEffects(arm.body(), varTypes, out);
+            }
+            case WhileExpr w -> {
+                collectExprEffects(w.condition(), varTypes, out);
+                collectBlockEffects(w.body(), varTypes, out);
+            }
+            case ForExpr f -> {
+                collectExprEffects(f.iterable(), varTypes, out);
+                collectBlockEffects(f.body(), varTypes, out);
+            }
+            case BinaryExpr b -> {
+                collectExprEffects(b.left(), varTypes, out);
+                collectExprEffects(b.right(), varTypes, out);
+            }
+            case UnaryExpr u -> collectExprEffects(u.operand(), varTypes, out);
+            case ParenExpr p -> collectExprEffects(p.inner(), varTypes, out);
+            case PropagateExpr p -> collectExprEffects(p.inner(), varTypes, out);
+            case ConsumeExpr c -> collectExprEffects(c.target(), varTypes, out);
+            case FieldAccessExpr fa -> collectExprEffects(fa.object(), varTypes, out);
+            case TupleExpr t -> { for (var e : t.elements()) collectExprEffects(e, varTypes, out); }
+            case ConstructorExpr c -> { for (var f : c.fields()) collectExprEffects(f.value(), varTypes, out); }
+            default -> {}
+        }
+    }
+
+    private void collectProtocolTransitionEffects(ProtocolDecl proto, String action, Set<String> out) {
+        if (proto == null || action == null) return;
+        for (var tr : proto.transitions()) {
+            if (tr.name().equals(action)) {
+                out.addAll(tr.effects());
+            }
+        }
+    }
+
+    private ProtocolDecl protocolForExpr(Expr expr, Map<String, TypeExpr> varTypes) {
+        TypeExpr t = unwrapTypeWrappers(inferExprType(expr, varTypes));
+        String name = switch (t) {
+            case SimpleTypeExpr s -> s.name();
+            case GenericTypeExpr g -> g.name();
+            case null, default -> null;
+        };
+        return name != null ? protocolDecls.get(name) : null;
     }
 
     private TypeExpr inferBlockType(BlockExpr block, Map<String, TypeExpr> varTypes) {
@@ -794,7 +957,8 @@ public final class IfcPcChecker {
         return null;
     }
 
-    private void checkPrivilegedCall(CallExpr call) {
+    private void checkPrivilegedCall(CallExpr call, Map<String, TypeExpr> varTypes) {
+        boolean reportedDirectFn = false;
         if (call.callee() instanceof IdentExpr id) {
             if (id.name().equals("declassify") && privilegedEffects.contains("Declassify")) {
                 diagnostics.add(Diagnostic.error(
@@ -806,6 +970,7 @@ public final class IfcPcChecker {
             }
             var fn = fnDecls.get(id.name());
             if (fn != null) {
+                reportedDirectFn = true;
                 for (var eff : fn.effects()) {
                     if (privilegedEffects.contains(eff)) {
                         diagnostics.add(Diagnostic.error(
@@ -817,29 +982,53 @@ public final class IfcPcChecker {
                     }
                 }
             }
-        } else if (call.callee() instanceof FieldAccessExpr fa && fa.object() instanceof IdentExpr objId) {
-            if (privilegedEffects.contains(objId.name())) {
-                diagnostics.add(Diagnostic.error(
-                    "NGJ-IFC-PC-001",
-                    "Privileged effect '" + objId.name() + "' cannot be executed under an Untrusted control-flow guard",
-                    call.span()
-                ));
+        } else if (call.callee() instanceof FieldAccessExpr fa) {
+            if (fa.object() instanceof IdentExpr objId) {
+                if (privilegedEffects.contains(objId.name())) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-IFC-PC-001",
+                        "Privileged effect '" + objId.name() + "' cannot be executed under an Untrusted control-flow guard",
+                        call.span()
+                    ));
+                }
+                ProtocolDecl proto = protocolDecls.get(objId.name());
+                if (proto != null) {
+                    reportProtocolTransitionIfPrivileged(proto, fa.fieldName(), call.span());
+                }
             }
-            ProtocolDecl proto = protocolDecls.get(objId.name());
-            if (proto != null) {
-                for (var tr : proto.transitions()) {
-                    if (tr.name().equals(fa.fieldName())) {
-                        for (var eff : tr.effects()) {
-                            if (privilegedEffects.contains(eff)) {
-                                diagnostics.add(Diagnostic.error(
-                                    "NGJ-IFC-PC-001",
-                                    "Privileged effect '" + eff + "' in protocol transition '"
-                                        + proto.name() + "." + tr.name()
-                                        + "' cannot be executed under an Untrusted control-flow guard",
-                                    call.span()
-                                ));
-                            }
-                        }
+            ProtocolDecl instProto = protocolForExpr(fa.object(), varTypes);
+            if (instProto != null) {
+                reportProtocolTransitionIfPrivileged(instProto, fa.fieldName(), call.span());
+            }
+        }
+        if (!reportedDirectFn) {
+            TypeExpr calleeType = unwrapTypeWrappers(inferExprType(call.callee(), varTypes));
+            if (calleeType instanceof FunctionTypeExpr fnType) {
+                for (var eff : fnType.effects()) {
+                    if (privilegedEffects.contains(eff)) {
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-IFC-PC-001",
+                            "Privileged effect '" + eff + "' in callback invocation cannot be executed under an Untrusted control-flow guard",
+                            call.span()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    private void reportProtocolTransitionIfPrivileged(ProtocolDecl proto, String action, SourceSpan span) {
+        for (var tr : proto.transitions()) {
+            if (tr.name().equals(action)) {
+                for (var eff : tr.effects()) {
+                    if (privilegedEffects.contains(eff)) {
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-IFC-PC-001",
+                            "Privileged effect '" + eff + "' in protocol transition '"
+                                + proto.name() + "." + tr.name()
+                                + "' cannot be executed under an Untrusted control-flow guard",
+                            span
+                        ));
                     }
                 }
             }

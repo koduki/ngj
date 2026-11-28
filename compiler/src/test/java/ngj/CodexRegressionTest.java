@@ -2030,4 +2030,141 @@ class CodexRegressionTest {
         ngj.runtime.SecretValue sec = (ngj.runtime.SecretValue) fn.getMethod("invoke").invoke(null);
         assertEquals("Secret(****)", sec.toString());
     }
+
+    @Test
+    void loopLocalAliasCannotConsumeOuterBudget() throws Exception {
+        Path file = tempDir.resolve("loop_alias_outer_budget.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(b: Budget<Fuel>, xs: List<Int>) -> Unit effects() {
+                for (x <- xs) {
+                    val c: Budget<Fuel> = b;
+                    val next: Budget<Fuel> = c.spend(1L);
+                };
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Loop-local alias c = b must not bypass outer-loop consume check: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void loopLocalNestedIfAliasCannotConsumeOuterBudget() throws Exception {
+        Path file = tempDir.resolve("while_if_alias_outer_budget.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(flag: Bool, inner: Bool, b: Budget<Fuel>) -> Unit effects() {
+                while (flag) {
+                    if (inner) {
+                        val c: Budget<Fuel> = b;
+                        val next: Budget<Fuel> = c.spend(1L);
+                    }
+                };
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Nested if alias inside while loop must not consume outer budget: " + stdout);
+        assertTrue(stdout.contains("NGJ-CAP-002"), "Expected NGJ-CAP-002: " + stdout);
+    }
+
+    @Test
+    void callbackWithPrivilegedEffectRejectedUnderUntrustedPc() throws Exception {
+        Path file = tempDir.resolve("callback_untrusted_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(flag: Untrusted<Option<Int>>, action: () -> Unit effects(PaymentWrite)) -> Unit effects(PaymentWrite) {
+                if (isSome(flag)) {
+                    action();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Callback with PaymentWrite under Untrusted PC must fail with NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void lambdaVariableWithPrivilegedEffectRejectedUnderUntrustedPc() throws Exception {
+        Path file = tempDir.resolve("lambda_var_untrusted_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>) -> Unit effects(PaymentWrite) {
+                val action = (n: Int) => { pay(); };
+                if (isSome(flag)) {
+                    action(1);
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Lambda variable invoking pay() under Untrusted PC must fail with NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void callbackWithUndeclaredEffectRejectedByCapabilityChecker() throws Exception {
+        Path file = tempDir.resolve("callback_undeclared_effect.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(action: () -> Unit effects(PaymentWrite)) -> Unit effects() {
+                action();
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Invoking callback with PaymentWrite inside effects() must fail with NGJ-EFFECT-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-EFFECT-001"), "Expected NGJ-EFFECT-001: " + stdout);
+    }
 }

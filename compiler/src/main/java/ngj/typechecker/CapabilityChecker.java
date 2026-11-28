@@ -327,13 +327,17 @@ public final class CapabilityChecker {
             case WhileExpr whileExpr -> {
                 checkExpr(whileExpr.condition(), env);
                 env.loopDepth++;
+                env.loopEntryDepths.addLast(env.depth);
                 checkBlock(whileExpr.body(), env, false);
+                env.loopEntryDepths.removeLast();
                 env.loopDepth--;
             }
             case ForExpr forExpr -> {
                 checkExpr(forExpr.iterable(), env);
                 env.loopDepth++;
+                env.loopEntryDepths.addLast(env.depth);
                 checkBlock(forExpr.body(), env, false);
+                env.loopEntryDepths.removeLast();
                 env.loopDepth--;
             }
             case LambdaExpr lambda -> checkLambda(lambda, env, false);
@@ -488,9 +492,14 @@ public final class CapabilityChecker {
                             && cap.mode() == CapabilityTypeExpr.CapabilityMode.UPDATE) {
                             Expr unwrapped = arg instanceof ParenExpr pe ? pe.inner() : arg;
                             if (unwrapped instanceof IdentExpr argId) {
-                                String root = env.resolveAlias(argId.name());
-                                if (env.modes.get(argId.name()) == VarMode.READ
-                                    || env.modes.get(root) == VarMode.READ) {
+                                boolean hasReadRoot = env.modes.get(argId.name()) == VarMode.READ;
+                                for (String root : env.resolveAllRoots(argId.name())) {
+                                    if (env.modes.get(root) == VarMode.READ) {
+                                        hasReadRoot = true;
+                                        break;
+                                    }
+                                }
+                                if (hasReadRoot) {
                                     diagnostics.add(Diagnostic.error(
                                         "NGJ-SEP-001",
                                         "Cannot pass 'read' capability '" + argId.name() + "' to 'update' parameter '" + p.name() + "'",
@@ -506,6 +515,12 @@ public final class CapabilityChecker {
             }
         }
 
+        TypeExpr calleeType = resolveTypeAlias(inferExprType(call.callee(), env));
+        if (calleeType instanceof FunctionTypeExpr fnType) {
+            for (var eff : fnType.effects()) {
+                requireEffect(eff, env, call.span());
+            }
+        }
         checkExpr(call.callee(), env);
         for (var arg : call.args()) checkExpr(arg, env);
     }
@@ -757,56 +772,77 @@ public final class CapabilityChecker {
     private void consumeVariable(String name, CapEnv env, SourceSpan span) {
         CapState state = env.states.get(name);
         if (state == null) return;
-        if (env.modes.get(name) == VarMode.READ) {
-            diagnostics.add(Diagnostic.error(
-                "NGJ-CAP-002",
-                "Cannot consume 'read'-borrowed binding '" + name + "'",
-                span
-            ));
-            return;
+        Set<String> targets = new LinkedHashSet<>();
+        targets.add(name);
+        targets.addAll(env.resolveAllRoots(name));
+
+        for (String target : targets) {
+            if (env.modes.get(target) == VarMode.READ) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-CAP-002",
+                    "Cannot consume 'read'-borrowed binding '" + name + "'",
+                    span
+                ));
+                return;
+            }
         }
-        if (state == CapState.CONSUMED || state == CapState.MAYBE_CONSUMED) {
-            diagnostics.add(Diagnostic.error(
-                "NGJ-CAP-002",
-                "Double or conditional consume of '" + name + "'",
-                span
-            ));
-            return;
+        for (String target : targets) {
+            CapState tState = env.states.get(target);
+            if (tState == CapState.CONSUMED || tState == CapState.MAYBE_CONSUMED) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-CAP-002",
+                    "Double or conditional consume of '" + name + "'",
+                    span
+                ));
+                return;
+            }
         }
-        Integer declDepth = env.declDepths.get(name);
-        if (env.loopDepth > 0 && declDepth != null && declDepth <= env.depth - env.loopDepth) {
-            diagnostics.add(Diagnostic.error(
-                "NGJ-CAP-002",
-                "Cannot consume outer binding '" + name + "' inside a loop",
-                span
-            ));
-            return;
+        if (env.loopDepth > 0 && !env.loopEntryDepths.isEmpty()) {
+            int loopEntryDepth = env.loopEntryDepths.peekLast();
+            for (String target : targets) {
+                Integer declDepth = env.declDepths.get(target);
+                if (declDepth != null && declDepth <= loopEntryDepth) {
+                    diagnostics.add(Diagnostic.error(
+                        "NGJ-CAP-002",
+                        "Cannot consume outer binding '" + name + "' inside a loop",
+                        span
+                    ));
+                    return;
+                }
+            }
         }
-        if (env.hasLiveViews(name)) {
-            diagnostics.add(Diagnostic.error(
-                "NGJ-CAP-002",
-                "Cannot consume '" + name + "' while live borrowed views exist",
-                span
-            ));
+        for (String target : targets) {
+            if (env.hasLiveViews(target)) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-CAP-002",
+                    "Cannot consume '" + name + "' while live borrowed views exist",
+                    span
+                ));
+                break;
+            }
         }
         env.markConsumed(name);
         recordAccess(name, VarMode.UPDATE, env, span);
     }
 
     private void recordAccess(String name, VarMode mode, CapEnv env, SourceSpan span) {
-        String root = env.resolveAlias(name);
+        Set<String> roots = env.resolveAllRoots(name);
         if (env.currentFork != null) {
-            env.currentFork.accesses.merge(root, mode, (a, b) -> a == VarMode.UPDATE || b == VarMode.UPDATE ? VarMode.UPDATE : VarMode.READ);
+            for (String root : roots) {
+                env.currentFork.accesses.merge(root, mode, (a, b) -> a == VarMode.UPDATE || b == VarMode.UPDATE ? VarMode.UPDATE : VarMode.READ);
+            }
         } else if (env.activeScope != null) {
             // Parent access while forks exist in current scope
-            for (var f : env.activeScope.forks) {
-                VarMode forkMode = f.accesses.get(root);
-                if (forkMode == VarMode.UPDATE || (forkMode != null && mode == VarMode.UPDATE)) {
-                    diagnostics.add(Diagnostic.error(
-                        "NGJ-SEP-001",
-                        "Parent cannot access '" + name + "' before scope join while forked task updates it",
-                        span
-                    ));
+            for (String root : roots) {
+                for (var f : env.activeScope.forks) {
+                    VarMode forkMode = f.accesses.get(root);
+                    if (forkMode == VarMode.UPDATE || (forkMode != null && mode == VarMode.UPDATE)) {
+                        diagnostics.add(Diagnostic.error(
+                            "NGJ-SEP-001",
+                            "Parent cannot access '" + name + "' before scope join while forked task updates it",
+                            span
+                        ));
+                    }
                 }
             }
         }
@@ -1445,6 +1481,7 @@ public final class CapabilityChecker {
         final Map<String, Long> budgetLimits = new LinkedHashMap<>();
         int depth = 0;
         int loopDepth = 0;
+        final Deque<Integer> loopEntryDepths = new ArrayDeque<>();
         boolean inSecretMap = false;
         ScopeContext activeScope = null;
         ForkRecord currentFork = null;
@@ -1556,6 +1593,7 @@ public final class CapabilityChecker {
             c.budgetLimits.putAll(budgetLimits);
             c.depth = depth;
             c.loopDepth = loopDepth;
+            c.loopEntryDepths.addAll(loopEntryDepths);
             c.inSecretMap = inSecretMap;
             c.activeScope = activeScope;
             c.currentFork = currentFork;
