@@ -18,6 +18,15 @@ public final class SecretRedactor {
     private static final Pattern STACK_TRACE_AT_PATTERN = Pattern.compile("(?m)^\\s*at\\s+[\\w.$<>]+\\([^)]*\\)\\r?\\n?");
     private static final Pattern STACK_TRACE_MORE_PATTERN = Pattern.compile("(?m)^\\s*\\.\\.\\.\\s+\\d+\\s+more\\r?\\n?");
     private static final Pattern CAUSED_BY_PATTERN = Pattern.compile("(?m)^Caused by:\\s+.*\\r?\\n?");
+    private static final Pattern SECRET_TYPED_INIT_PATTERN = Pattern.compile(
+        "(Secret\\s*<[^>]+>\\s*=\\s*)\"[^\"]*\""
+    );
+    private static final Pattern SECRET_OF_LITERAL_PATTERN = Pattern.compile(
+        "(Secret\\.of\\s*\\(\\s*)\"[^\"]*\"(\\s*\\))"
+    );
+    private static final Pattern ENV_SECRET_QUOTED_ASSIGN_PATTERN = Pattern.compile(
+        "(?i)(\\b[a-z_][a-z0-9_]*(?:secret|token|password|passwd|api_key|apikey|private_key|credential|auth)[a-z0-9_]*(?:\\s*:\\s*[^=;\\n]+)?\\s*(?:=|:)\\s*)\"[^\"]*\""
+    );
     private static final Pattern ENV_SECRET_ASSIGN_PATTERN = Pattern.compile(
         "(?i)\\b([a-z_][a-z0-9_]*(?:secret|token|password|passwd|api_key|apikey|private_key|credential|auth)[a-z0-9_]*)\\s*(=|:)\\s*([^\\s,;\"'}]+)"
     );
@@ -48,6 +57,9 @@ public final class SecretRedactor {
             return null;
         }
         String result = SECRET_WRAPPER_PATTERN.matcher(input).replaceAll(MASK);
+        result = SECRET_TYPED_INIT_PATTERN.matcher(result).replaceAll("$1\"" + MASK + "\"");
+        result = SECRET_OF_LITERAL_PATTERN.matcher(result).replaceAll("$1\"" + MASK + "\"$2");
+        result = ENV_SECRET_QUOTED_ASSIGN_PATTERN.matcher(result).replaceAll("$1\"" + MASK + "\"");
         result = ENV_SECRET_ASSIGN_PATTERN.matcher(result).replaceAll("$1$2" + MASK);
         result = STACK_TRACE_AT_PATTERN.matcher(result).replaceAll("");
         result = STACK_TRACE_MORE_PATTERN.matcher(result).replaceAll("");

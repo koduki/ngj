@@ -150,50 +150,71 @@ public final class VcGenerator {
     }
 
     private void extractBodyFacts(BlockExpr body, Map<String, Sort> sorts, List<SmtExpr> premises) {
-        for (var stmt : body.statements()) {
-            switch (stmt) {
-                case ValStmt v -> {
-                    sorts.put(v.name(), sortOfType(v.explicitType()));
-                    premises.add(new SmtExpr.Eq(
-                        new SmtExpr.Var(v.name(), sorts.get(v.name())),
-                        translateExpr(v.initializer(), sorts)
-                    ));
-                }
-                case LetStmt l -> {
-                    sorts.put(l.name(), sortOfType(l.explicitType()));
-                    premises.add(new SmtExpr.Eq(
-                        new SmtExpr.Var(l.name(), sorts.get(l.name())),
-                        translateExpr(l.initializer(), sorts)
-                    ));
-                }
-                case AssumeStmt a -> premises.add(translateExpr(a.condition(), sorts));
-                case ExprStmt es -> {
-                    if (es.expr() instanceof IfExpr ifExpr && ifExpr.elseBranch() != null) {
-                        SmtExpr ite = translateExpr(ifExpr, sorts);
-                        if (!(ite instanceof SmtExpr.UnsupportedExpr)) {
-                            Sort resSort = sorts.getOrDefault("result", Sort.INT);
-                            premises.add(new SmtExpr.Eq(new SmtExpr.Var("result", resSort), ite));
-                        }
-                    }
-                }
-                case ReturnStmt r -> {
-                    if (r.value() != null) {
-                        Sort resSort = sorts.getOrDefault("result", Sort.INT);
-                        premises.add(new SmtExpr.Eq(
-                            new SmtExpr.Var("result", resSort),
-                            translateExpr(r.value(), sorts)
-                        ));
-                    }
-                }
-                default -> {}
-            }
+        Sort resSort = sorts.getOrDefault("result", Sort.INT);
+        SmtExpr bodyResult = translateBlockResult(body.statements(), 0, body.tailExpr(), sorts, premises);
+        if (bodyResult != null && !(bodyResult instanceof SmtExpr.UnsupportedExpr)) {
+            premises.add(new SmtExpr.Eq(new SmtExpr.Var("result", resSort), bodyResult));
         }
-        if (body.tailExpr() != null) {
-            Sort resSort = sorts.getOrDefault("result", Sort.INT);
-            premises.add(new SmtExpr.Eq(
-                new SmtExpr.Var("result", resSort),
-                translateExpr(body.tailExpr(), sorts)
-            ));
+    }
+
+    private SmtExpr translateBlockResult(
+        List<Statement> stmts,
+        int idx,
+        Expr tailExpr,
+        Map<String, Sort> sorts,
+        List<SmtExpr> premises
+    ) {
+        if (idx >= stmts.size()) {
+            return tailExpr != null ? translateExpr(tailExpr, sorts) : null;
+        }
+        Statement stmt = stmts.get(idx);
+        switch (stmt) {
+            case ValStmt v -> {
+                sorts.put(v.name(), sortOfType(v.explicitType()));
+                premises.add(new SmtExpr.Eq(
+                    new SmtExpr.Var(v.name(), sorts.get(v.name())),
+                    translateExpr(v.initializer(), sorts)
+                ));
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises);
+            }
+            case LetStmt l -> {
+                sorts.put(l.name(), sortOfType(l.explicitType()));
+                premises.add(new SmtExpr.Eq(
+                    new SmtExpr.Var(l.name(), sorts.get(l.name())),
+                    translateExpr(l.initializer(), sorts)
+                ));
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises);
+            }
+            case AssumeStmt a -> {
+                premises.add(translateExpr(a.condition(), sorts));
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises);
+            }
+            case ReturnStmt r -> {
+                return r.value() != null ? translateExpr(r.value(), sorts) : null;
+            }
+            case ExprStmt es -> {
+                if (es.expr() instanceof IfExpr ifExpr) {
+                    SmtExpr cond = translateExpr(ifExpr.condition(), sorts);
+                    List<SmtExpr> thenPremises = new ArrayList<>();
+                    SmtExpr thenRes = translateBlockResult(
+                        ifExpr.thenBranch().statements(), 0, ifExpr.thenBranch().tailExpr(), sorts, thenPremises);
+                    SmtExpr elseRes = ifExpr.elseBranch() != null
+                        ? (ifExpr.elseBranch() instanceof BlockExpr eb
+                            ? translateBlockResult(eb.statements(), 0, eb.tailExpr(), sorts, new ArrayList<>())
+                            : translateExpr(ifExpr.elseBranch(), sorts))
+                        : translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises);
+                    if (thenRes != null && elseRes != null && !(cond instanceof SmtExpr.UnsupportedExpr)) {
+                        return new SmtExpr.Ite(cond, thenRes, elseRes);
+                    }
+                    if (thenRes != null && ifExpr.elseBranch() == null) {
+                        return new SmtExpr.UnsupportedExpr("partial_return_if");
+                    }
+                }
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises);
+            }
+            default -> {
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises);
+            }
         }
     }
 
