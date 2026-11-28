@@ -253,7 +253,15 @@ public final class Compiler {
 
         PureJvmSmtSolver jvmSolver = new PureJvmSmtSolver();
         Map<String, TypeAliasDecl> typeAliases = collectTypeAliases();
-        VcGenerator vcGen = new VcGenerator(specFns, typeAliases);
+        Map<String, FnDecl> fnDecls = new LinkedHashMap<>();
+        for (var unit : parsedUnits.values()) {
+            for (var decl : unit.declarations()) {
+                if (decl instanceof FnDecl fn) {
+                    fnDecls.put(fn.name(), fn);
+                }
+            }
+        }
+        VcGenerator vcGen = new VcGenerator(specFns, typeAliases, fnDecls);
 
         // Surface A: SMT verification of requires => ensures
         List<Expr> reqExprs = targetFn.contracts().stream()

@@ -1639,4 +1639,198 @@ class CodexRegressionTest {
         assertTrue(stdout.contains("\"certified\": false"), "Expected certified=false: " + stdout);
         assertTrue(stdout.contains("NGJ-TYPE-"), "Expected NGJ-TYPE-* diagnostic in certify-spec output: " + stdout);
     }
+
+    @Test
+    void inferredLongLocalPreservesLongMinValueNegationOverflow() throws Exception {
+        Path file = tempDir.resolve("inferred_long_neg.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(x: Long) -> Long effects()
+                requires (x == -9223372036854775807L - 1L)
+                ensures (result > 0L)
+            {
+                val y = x;
+                return -y;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Inferred Long val y = x; return -y; must model Long.MIN_VALUE overflow: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void inferredLongLocalInCallSitePreconditionPreservesLongOverflow() throws Exception {
+        Path file = tempDir.resolve("inferred_long_callsite_neg.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positiveLong(n: Long) -> Long effects()
+                requires (n > 0L)
+                ensures (result > 0L)
+            {
+                return n;
+            }
+
+            public fn bad(x: Long) -> Long effects()
+                requires (x == -9223372036854775807L - 1L)
+            {
+                val y = x;
+                return positiveLong(-y);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Inferred Long val y = x; positiveLong(-y) must fail precondition: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void forLoopMustResolveProtocolAbandonRejected() throws Exception {
+        Path file = tempDir.resolve("for_proto_abandon.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            @must_resolve
+            protocol A {
+                initial Start;
+                states Start, Done;
+                final Done;
+                transition finish(Start) -> Done effects();
+            }
+
+            public fn bad(xs: List<Int>) -> Unit effects() {
+                for (x <- xs) {
+                    val a = A.start();
+                };
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Unresolved @must_resolve token inside for loop must fail with NGJ-PROTO-002: " + stdout);
+        assertTrue(stdout.contains("NGJ-PROTO-002"), "Expected NGJ-PROTO-002: " + stdout);
+    }
+
+    @Test
+    void whileLoopMustResolveProtocolAbandonRejected() throws Exception {
+        Path file = tempDir.resolve("while_proto_abandon.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            @must_resolve
+            protocol A {
+                initial Start;
+                states Start, Done;
+                final Done;
+                transition finish(Start) -> Done effects();
+            }
+
+            public fn bad(flag: Bool) -> Unit effects() {
+                while (flag) {
+                    val a = A.start();
+                };
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Unresolved @must_resolve token inside while loop must fail with NGJ-PROTO-002: " + stdout);
+        assertTrue(stdout.contains("NGJ-PROTO-002"), "Expected NGJ-PROTO-002: " + stdout);
+    }
+
+    @Test
+    void ifBranchMustResolveProtocolAbandonRejected() throws Exception {
+        Path file = tempDir.resolve("if_branch_proto_abandon.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            @must_resolve
+            protocol A {
+                initial Start;
+                states Start, Done;
+                final Done;
+                transition finish(Start) -> Done effects();
+            }
+
+            public fn bad(flag: Bool) -> Unit effects() {
+                if (flag) {
+                    val a = A.start();
+                }
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Unresolved @must_resolve token inside if branch must fail with NGJ-PROTO-002: " + stdout);
+        assertTrue(stdout.contains("NGJ-PROTO-002"), "Expected NGJ-PROTO-002: " + stdout);
+    }
+
+    @Test
+    void discardedMustResolveProtocolExprStmtRejected() throws Exception {
+        Path file = tempDir.resolve("discarded_proto_exprstmt.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            @must_resolve
+            protocol A {
+                initial Start;
+                states Start, Done;
+                final Done;
+                transition finish(Start) -> Done effects();
+            }
+
+            public fn bad() -> Unit effects() {
+                A.start();
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Discarded @must_resolve token from A.start() must fail with NGJ-PROTO-002: " + stdout);
+        assertTrue(stdout.contains("NGJ-PROTO-002"), "Expected NGJ-PROTO-002: " + stdout);
+    }
 }

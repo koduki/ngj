@@ -58,7 +58,7 @@ public final class ProofChecker {
             }
         }
 
-        VcGenerator vcGen = new VcGenerator(specFns, typeAliases);
+        VcGenerator vcGen = new VcGenerator(specFns, typeAliases, fnDecls);
 
         for (var unit : units) {
             for (var decl : unit.declarations()) {
@@ -664,15 +664,15 @@ public final class ProofChecker {
 
         void bindLocal(String name, TypeExpr explicitType, Expr initializer) {
             SmtExpr init = vcGen.translateExecutableExpr(initializer, sorts, ssaEnv, longVars);
-            SmtExpr.Sort sort = vcGen.sortOf(explicitType);
+            boolean longInit = vcGen.isLong(explicitType) || vcGen.isLongExpr(initializer, longVars, ssaEnv);
+            SmtExpr.Sort sort = explicitType != null ? vcGen.sortOf(explicitType) : VcGenerator.inferSort(init);
             String lhs = (ssaEnv.containsKey(name) || sorts.containsKey(name))
                 ? freshSsa(name, sort)
                 : name;
             sorts.put(lhs, sort);
             ssaEnv.put(name, lhs);
-            if (vcGen.isLong(explicitType)) {
+            if (longInit) {
                 longVars.add(lhs);
-                longVars.add(name);
             }
             if (!VcGenerator.containsUnsupported(init)) {
                 premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), init));
@@ -681,11 +681,11 @@ public final class ProofChecker {
 
         void bindVar(String name, TypeExpr explicitType, Expr initializer) {
             SmtExpr init = vcGen.translateExecutableExpr(initializer, sorts, ssaEnv, longVars);
-            SmtExpr.Sort sort = vcGen.sortOf(explicitType);
+            boolean longInit = vcGen.isLong(explicitType) || vcGen.isLongExpr(initializer, longVars, ssaEnv);
+            SmtExpr.Sort sort = explicitType != null ? vcGen.sortOf(explicitType) : VcGenerator.inferSort(init);
             String lhs = freshSsa(name, sort);
-            if (vcGen.isLong(explicitType)) {
+            if (longInit) {
                 longVars.add(lhs);
-                longVars.add(name);
             }
             if (!VcGenerator.containsUnsupported(init)) {
                 premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), init));
@@ -697,23 +697,28 @@ public final class ProofChecker {
             while (init instanceof ParenExpr p) init = p.inner();
             TupleExpr te = init instanceof TupleExpr t ? t : null;
             List<SmtExpr> rhsList = new ArrayList<>(td.names().size());
+            List<Boolean> longFlags = new ArrayList<>(td.names().size());
             for (int i = 0; i < td.names().size(); i++) {
                 if (te != null && i < te.elements().size()) {
-                    rhsList.add(vcGen.translateExecutableExpr(te.elements().get(i), sorts, ssaEnv, longVars));
+                    Expr elem = te.elements().get(i);
+                    rhsList.add(vcGen.translateExecutableExpr(elem, sorts, ssaEnv, longVars));
+                    longFlags.add(vcGen.isLongExpr(elem, longVars, ssaEnv));
                 } else {
                     rhsList.add(null);
+                    longFlags.add(false);
                 }
             }
             for (int i = 0; i < td.names().size(); i++) {
                 String name = td.names().get(i);
                 TypeExpr explicitType = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
-                SmtExpr.Sort sort = vcGen.sortOf(explicitType);
-                String lhs = freshSsa(name, sort);
-                if (vcGen.isLong(explicitType)) {
-                    longVars.add(lhs);
-                    longVars.add(name);
-                }
                 SmtExpr rhs = rhsList.get(i);
+                SmtExpr.Sort sort = explicitType != null
+                    ? vcGen.sortOf(explicitType)
+                    : (rhs != null ? VcGenerator.inferSort(rhs) : SmtExpr.Sort.INT);
+                String lhs = freshSsa(name, sort);
+                if (vcGen.isLong(explicitType) || Boolean.TRUE.equals(longFlags.get(i))) {
+                    longVars.add(lhs);
+                }
                 if (rhs != null && !VcGenerator.containsUnsupported(rhs)) {
                     premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), rhs));
                 }
@@ -723,9 +728,10 @@ public final class ProofChecker {
         void assignVar(String name, Expr value) {
             SmtExpr rhs = vcGen.translateExecutableExpr(value, sorts, ssaEnv, longVars);
             String prevName = ssaEnv.getOrDefault(name, name);
-            SmtExpr.Sort sort = sorts.getOrDefault(prevName, SmtExpr.Sort.INT);
+            boolean longRhs = longVars.contains(prevName) || vcGen.isLongExpr(value, longVars, ssaEnv);
+            SmtExpr.Sort sort = sorts.getOrDefault(prevName, VcGenerator.inferSort(rhs));
             String lhs = freshSsa(name, sort);
-            if (longVars.contains(prevName) || longVars.contains(name)) {
+            if (longRhs) {
                 longVars.add(lhs);
             }
             if (!VcGenerator.containsUnsupported(rhs)) {

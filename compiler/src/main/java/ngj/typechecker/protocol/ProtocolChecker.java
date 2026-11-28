@@ -197,46 +197,179 @@ public final class ProtocolChecker {
             case ValStmt val -> {
                 TokenResult res = checkExpr(val.initializer(), env);
                 if (res != null) {
+                    checkOverwriteAbandon(env, val.name(), res.instanceId, val.span());
                     env.bind(val.name(), res.protoName, res.state, res.instanceId);
                 } else {
                     String protoName = protocolNameOf(val.explicitType());
                     if (protoName != null && automata.containsKey(protoName)) {
-                        env.bind(val.name(), protoName, initialStateOf(val.explicitType(), automata.get(protoName)),
-                            nextInstanceId(env));
+                        int id = nextInstanceId(env);
+                        checkOverwriteAbandon(env, val.name(), id, val.span());
+                        env.bind(val.name(), protoName, initialStateOf(val.explicitType(), automata.get(protoName)), id);
                     }
                 }
             }
             case LetStmt let -> {
                 TokenResult res = checkExpr(let.initializer(), env);
                 if (res != null) {
+                    checkOverwriteAbandon(env, let.name(), res.instanceId, let.span());
                     env.bind(let.name(), res.protoName, res.state, res.instanceId);
+                } else {
+                    String protoName = protocolNameOf(let.explicitType());
+                    if (protoName != null && automata.containsKey(protoName)) {
+                        int id = nextInstanceId(env);
+                        checkOverwriteAbandon(env, let.name(), id, let.span());
+                        env.bind(let.name(), protoName, initialStateOf(let.explicitType(), automata.get(protoName)), id);
+                    }
                 }
             }
             case VarStmt varStmt -> {
                 TokenResult res = checkExpr(varStmt.initializer(), env);
                 if (res != null) {
+                    checkOverwriteAbandon(env, varStmt.name(), res.instanceId, varStmt.span());
                     env.bind(varStmt.name(), res.protoName, res.state, res.instanceId);
+                } else {
+                    String protoName = protocolNameOf(varStmt.explicitType());
+                    if (protoName != null && automata.containsKey(protoName)) {
+                        int id = nextInstanceId(env);
+                        checkOverwriteAbandon(env, varStmt.name(), id, varStmt.span());
+                        env.bind(varStmt.name(), protoName, initialStateOf(varStmt.explicitType(), automata.get(protoName)), id);
+                    }
                 }
             }
             case AssignStmt assign -> {
                 TokenResult res = checkExpr(assign.value(), env);
                 if (res != null) {
+                    checkOverwriteAbandon(env, assign.name(), res.instanceId, assign.span());
                     env.bind(assign.name(), res.protoName, res.state, res.instanceId);
+                }
+            }
+            case TupleDestructureStmt td -> {
+                Expr init = td.initializer();
+                while (init instanceof ParenExpr p) init = p.inner();
+                if (init instanceof TupleExpr te) {
+                    for (int i = 0; i < te.elements().size(); i++) {
+                        TokenResult res = checkExpr(te.elements().get(i), env);
+                        if (i < td.names().size()) {
+                            String name = td.names().get(i);
+                            if (res != null) {
+                                checkOverwriteAbandon(env, name, res.instanceId, td.span());
+                                env.bind(name, res.protoName, res.state, res.instanceId);
+                            } else if (i < td.explicitTypes().size()) {
+                                String protoName = protocolNameOf(td.explicitTypes().get(i));
+                                if (protoName != null && automata.containsKey(protoName)) {
+                                    int id = nextInstanceId(env);
+                                    checkOverwriteAbandon(env, name, id, td.span());
+                                    env.bind(name, protoName, initialStateOf(td.explicitTypes().get(i), automata.get(protoName)), id);
+                                }
+                            }
+                        } else if (res != null) {
+                            checkDiscardedToken(res, env, td.span());
+                        }
+                    }
+                } else {
+                    checkExpr(td.initializer(), env);
+                    for (int i = 0; i < td.names().size(); i++) {
+                        if (i < td.explicitTypes().size()) {
+                            String protoName = protocolNameOf(td.explicitTypes().get(i));
+                            if (protoName != null && automata.containsKey(protoName)) {
+                                int id = nextInstanceId(env);
+                                checkOverwriteAbandon(env, td.names().get(i), id, td.span());
+                                env.bind(td.names().get(i), protoName, initialStateOf(td.explicitTypes().get(i), automata.get(protoName)), id);
+                            }
+                        }
+                    }
                 }
             }
             case ReturnStmt ret -> {
                 String returnedVar = null;
                 if (ret.value() != null) {
                     checkExpr(ret.value(), env);
-                    if (ret.value() instanceof IdentExpr id) {
-                        returnedVar = id.name();
-                    }
+                    returnedVar = unwrapIdentName(ret.value());
                 }
                 checkMustResolveOnExit(env, returnedVar, ret.span(), "return");
             }
-            case ExprStmt es -> checkExpr(es.expr(), env);
-            default -> {}
+            case ExprStmt es -> {
+                TokenResult discarded = checkExpr(es.expr(), env);
+                if (discarded != null) {
+                    checkDiscardedToken(discarded, env, es.span());
+                }
+            }
+            case InvariantStmt inv -> checkExpr(inv.condition(), env);
+            case ProofStmt _ -> {}
+            case AssumeStmt _ -> {}
         }
+    }
+
+    private void checkOverwriteAbandon(ProtoEnv env, String varName, int newInstanceId, SourceSpan span) {
+        TokenState old = env.tokens.get(varName);
+        if (old == null || old.consumed || old.instanceId == newInstanceId) return;
+        if (!mustResolveProtocols.contains(old.protoName)) return;
+        ProtocolAutomaton aut = automata.get(old.protoName);
+        if (aut != null && !aut.finalStates().contains(old.state)) {
+            diagnostics.add(Diagnostic.error(
+                "NGJ-PROTO-002",
+                "@must_resolve protocol '" + old.protoName + "' token '" + varName
+                    + "' in non-final state '" + old.state + "' abandoned by rebinding",
+                span
+            ));
+        }
+    }
+
+    private void checkDiscardedToken(TokenResult tok, ProtoEnv env, SourceSpan span) {
+        if (tok == null || !mustResolveProtocols.contains(tok.protoName)) return;
+        ProtocolAutomaton aut = automata.get(tok.protoName);
+        if (aut == null || aut.finalStates().contains(tok.state)) return;
+        for (TokenState st : env.tokens.values()) {
+            if (!st.consumed && st.instanceId == tok.instanceId) {
+                return;
+            }
+        }
+        diagnostics.add(Diagnostic.error(
+            "NGJ-PROTO-002",
+            "@must_resolve protocol '" + tok.protoName + "' token (instance #" + tok.instanceId
+                + ") in non-final state '" + tok.state + "' discarded without resolution",
+            span
+        ));
+    }
+
+    private String unwrapIdentName(Expr expr) {
+        Expr cur = expr;
+        while (cur instanceof ParenExpr p) cur = p.inner();
+        return cur instanceof IdentExpr id ? id.name() : null;
+    }
+
+    private void checkScopedLocalTokensOnExit(
+        ProtoEnv innerEnv,
+        Set<String> outerKeys,
+        String returnedVar,
+        SourceSpan span,
+        String exitKind
+    ) {
+        for (var entry : innerEnv.tokens.entrySet()) {
+            String varName = entry.getKey();
+            if (outerKeys.contains(varName) || varName.equals(returnedVar)) continue;
+            TokenState st = entry.getValue();
+            if (st.consumed) continue;
+            if (!mustResolveProtocols.contains(st.protoName)) continue;
+            ProtocolAutomaton aut = automata.get(st.protoName);
+            if (aut != null && !aut.finalStates().contains(st.state)) {
+                diagnostics.add(Diagnostic.error(
+                    "NGJ-PROTO-002",
+                    "@must_resolve protocol '" + st.protoName + "' token '" + varName
+                        + "' in non-final state '" + st.state + "' at " + exitKind,
+                    span
+                ));
+            }
+        }
+    }
+
+    private void copyOuterStatesFrom(ProtoEnv target, ProtoEnv inner, Set<String> outerKeys) {
+        for (String key : outerKeys) {
+            if (inner.tokens.containsKey(key)) {
+                target.tokens.put(key, inner.tokens.get(key).copy());
+            }
+        }
+        target.nextId = Math.max(target.nextId, inner.nextId);
     }
 
     private TokenResult checkExpr(Expr expr, ProtoEnv env) {
@@ -281,24 +414,37 @@ public final class ProtocolChecker {
             }
             case IfExpr ifExpr -> {
                 checkExpr(ifExpr.condition(), env);
+                Set<String> outerKeys = new LinkedHashSet<>(env.tokens.keySet());
                 ProtoEnv thenEnv = env.copy();
                 TokenResult thenTok = checkBlockWithResult(ifExpr.thenBranch(), thenEnv);
+                boolean thenRet = blockAlwaysReturns(ifExpr.thenBranch());
+                if (!thenRet) {
+                    checkScopedLocalTokensOnExit(
+                        thenEnv, outerKeys, unwrapIdentName(ifExpr.thenBranch().tailExpr()),
+                        ifExpr.thenBranch().span(), "branch exit");
+                }
                 ProtoEnv elseEnv = env.copy();
+                elseEnv.nextId = Math.max(elseEnv.nextId, thenEnv.nextId);
                 TokenResult elseTok = null;
+                boolean elseRet = ifExpr.elseBranch() != null && exprAlwaysReturns(ifExpr.elseBranch());
                 if (ifExpr.elseBranch() != null) {
                     if (ifExpr.elseBranch() instanceof BlockExpr eb) {
                         elseTok = checkBlockWithResult(eb, elseEnv);
+                        if (!elseRet) {
+                            checkScopedLocalTokensOnExit(
+                                elseEnv, outerKeys, unwrapIdentName(eb.tailExpr()),
+                                eb.span(), "branch exit");
+                        }
                     } else {
                         elseTok = checkExpr(ifExpr.elseBranch(), elseEnv);
                     }
                 }
-                boolean thenRet = blockAlwaysReturns(ifExpr.thenBranch());
-                boolean elseRet = ifExpr.elseBranch() != null && exprAlwaysReturns(ifExpr.elseBranch());
+                env.nextId = Math.max(env.nextId, elseEnv.nextId);
                 if (thenRet && !elseRet) {
-                    env.copyFrom(elseEnv);
+                    copyOuterStatesFrom(env, elseEnv, outerKeys);
                     yield elseTok;
                 } else if (!thenRet && elseRet) {
-                    env.copyFrom(thenEnv);
+                    copyOuterStatesFrom(env, thenEnv, outerKeys);
                     yield thenTok;
                 } else if (!thenRet && !elseRet) {
                     env.mergeFrom(thenEnv, elseEnv, diagnostics, ifExpr.span());
@@ -314,14 +460,159 @@ public final class ProtocolChecker {
                 }
                 yield null;
             }
-            case BlockExpr b -> checkBlockWithResult(b, env);
+            case MatchExpr matchExpr -> {
+                checkExpr(matchExpr.scrutinee(), env);
+                Set<String> outerKeys = new LinkedHashSet<>(env.tokens.keySet());
+                ProtoEnv merged = null;
+                TokenResult firstTok = null;
+                int nextId = env.nextId;
+                for (var arm : matchExpr.arms()) {
+                    ProtoEnv armEnv = env.copy();
+                    armEnv.nextId = nextId;
+                    TokenResult armTok;
+                    boolean armRet = exprAlwaysReturns(arm.body());
+                    if (arm.body() instanceof BlockExpr eb) {
+                        armTok = checkBlockWithResult(eb, armEnv);
+                        if (!armRet) {
+                            checkScopedLocalTokensOnExit(
+                                armEnv, outerKeys, unwrapIdentName(eb.tailExpr()),
+                                eb.span(), "match arm exit");
+                        }
+                    } else {
+                        armTok = checkExpr(arm.body(), armEnv);
+                    }
+                    nextId = Math.max(nextId, armEnv.nextId);
+                    if (!armRet) {
+                        if (merged == null) {
+                            merged = env.copy();
+                            copyOuterStatesFrom(merged, armEnv, outerKeys);
+                            firstTok = armTok;
+                        } else {
+                            merged.mergeFrom(merged.copy(), armEnv, diagnostics, arm.span());
+                            if (firstTok != null && armTok != null && firstTok.instanceId() != armTok.instanceId()) {
+                                diagnostics.add(Diagnostic.error(
+                                    "NGJ-PROTO-004",
+                                    "Cannot merge distinct protocol instances (#" + firstTok.instanceId()
+                                        + " vs #" + armTok.instanceId() + ") of '" + firstTok.protoName() + "'",
+                                    arm.span()
+                                ));
+                            } else if (firstTok == null) {
+                                firstTok = armTok;
+                            }
+                        }
+                    }
+                }
+                env.nextId = nextId;
+                if (merged != null) {
+                    copyOuterStatesFrom(env, merged, outerKeys);
+                }
+                yield firstTok;
+            }
+            case WhileExpr whileExpr -> {
+                checkExpr(whileExpr.condition(), env);
+                if (whileExpr.invariant() != null) {
+                    checkExpr(whileExpr.invariant(), env);
+                }
+                Set<String> outerKeys = new LinkedHashSet<>(env.tokens.keySet());
+                ProtoEnv bodyEnv = env.copy();
+                checkBlockWithResult(whileExpr.body(), bodyEnv);
+                env.nextId = Math.max(env.nextId, bodyEnv.nextId);
+                if (!blockAlwaysReturns(whileExpr.body())) {
+                    checkScopedLocalTokensOnExit(bodyEnv, outerKeys, null, whileExpr.body().span(), "loop iteration exit");
+                    env.mergeFrom(env.copy(), bodyEnv, diagnostics, whileExpr.span());
+                }
+                yield null;
+            }
+            case ForExpr forExpr -> {
+                checkExpr(forExpr.iterable(), env);
+                Set<String> outerKeys = new LinkedHashSet<>(env.tokens.keySet());
+                ProtoEnv bodyEnv = env.copy();
+                checkBlockWithResult(forExpr.body(), bodyEnv);
+                env.nextId = Math.max(env.nextId, bodyEnv.nextId);
+                if (!blockAlwaysReturns(forExpr.body())) {
+                    checkScopedLocalTokensOnExit(bodyEnv, outerKeys, null, forExpr.body().span(), "loop iteration exit");
+                    env.mergeFrom(env.copy(), bodyEnv, diagnostics, forExpr.span());
+                }
+                yield null;
+            }
+            case BlockExpr b -> {
+                Set<String> outerKeys = new LinkedHashSet<>(env.tokens.keySet());
+                ProtoEnv blockEnv = env.copy();
+                TokenResult tok = checkBlockWithResult(b, blockEnv);
+                if (!blockAlwaysReturns(b)) {
+                    checkScopedLocalTokensOnExit(blockEnv, outerKeys, unwrapIdentName(b.tailExpr()), b.span(), "block exit");
+                    copyOuterStatesFrom(env, blockEnv, outerKeys);
+                } else {
+                    env.nextId = Math.max(env.nextId, blockEnv.nextId);
+                }
+                yield tok;
+            }
+            case ScopeExpr s -> {
+                Set<String> outerKeys = new LinkedHashSet<>(env.tokens.keySet());
+                ProtoEnv scopeEnv = env.copy();
+                TokenResult tok = checkBlockWithResult(s.body(), scopeEnv);
+                if (!blockAlwaysReturns(s.body())) {
+                    checkScopedLocalTokensOnExit(scopeEnv, outerKeys, unwrapIdentName(s.body().tailExpr()), s.span(), "scope exit");
+                    copyOuterStatesFrom(env, scopeEnv, outerKeys);
+                } else {
+                    env.nextId = Math.max(env.nextId, scopeEnv.nextId);
+                }
+                yield tok;
+            }
+            case ForkExpr f -> {
+                Set<String> outerKeys = new LinkedHashSet<>(env.tokens.keySet());
+                ProtoEnv forkEnv = env.copy();
+                checkBlockWithResult(f.body(), forkEnv);
+                if (!blockAlwaysReturns(f.body())) {
+                    checkScopedLocalTokensOnExit(forkEnv, outerKeys, unwrapIdentName(f.body().tailExpr()), f.span(), "fork exit");
+                    copyOuterStatesFrom(env, forkEnv, outerKeys);
+                } else {
+                    env.nextId = Math.max(env.nextId, forkEnv.nextId);
+                }
+                yield null;
+            }
+            case LambdaExpr l -> {
+                ProtoEnv lambdaEnv = new ProtoEnv();
+                lambdaEnv.nextId = env.nextId;
+                for (var param : l.params()) {
+                    String protoName = protocolNameOf(param.type());
+                    if (protoName != null && automata.containsKey(protoName)) {
+                        String state = initialStateOf(param.type(), automata.get(protoName));
+                        lambdaEnv.bind(param.name(), protoName, state, nextInstanceId(lambdaEnv));
+                    }
+                }
+                if (l.body() != null) {
+                    checkBlockWithResult(l.body(), lambdaEnv);
+                    if (!blockAlwaysReturns(l.body())) {
+                        checkMustResolveOnExit(lambdaEnv, unwrapIdentName(l.body().tailExpr()), l.body().span(), "lambda exit");
+                    }
+                }
+                env.nextId = Math.max(env.nextId, lambdaEnv.nextId);
+                yield null;
+            }
             case ParenExpr p -> checkExpr(p.inner(), env);
             case BinaryExpr b -> {
                 checkExpr(b.left(), env);
                 checkExpr(b.right(), env);
                 yield null;
             }
-            default -> null;
+            case UnaryExpr u -> {
+                checkExpr(u.operand(), env);
+                yield null;
+            }
+            case FieldAccessExpr fa -> {
+                checkExpr(fa.object(), env);
+                yield null;
+            }
+            case TupleExpr t -> {
+                for (var e : t.elements()) checkExpr(e, env);
+                yield null;
+            }
+            case ConstructorExpr c -> {
+                for (var f : c.fields()) checkExpr(f.value(), env);
+                yield null;
+            }
+            case LiteralExpr _, HoleExpr _ -> null;
         };
     }
 
