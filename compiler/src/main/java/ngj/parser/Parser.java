@@ -1232,11 +1232,15 @@ public final class Parser {
         
         if (match(TokenType.LPAREN)) {
             if (match(TokenType.RPAREN)) {
+                if (match(TokenType.FAT_ARROW)) {
+                    var body = parseBlock();
+                    return new LambdaExpr(List.of(), body, span(start, previous.span().endByte()));
+                }
                 return new LiteralExpr(LiteralExpr.LiteralKind.UNIT, null,
                     span(start, previous.span().endByte()));
             }
             
-            if (check(TokenType.IDENT) && peekNextIsColonOrCommaOrRparen()) {
+            if (check(TokenType.IDENT) && peekNext().type() == TokenType.COLON) {
                 return parseLambdaExpr(start);
             }
             
@@ -1265,13 +1269,6 @@ public final class Parser {
         }
         
         throw error("NGJ-PARSE-005", "Unexpected token: " + current.type(), current.span());
-    }
-    
-    private boolean peekNextIsColonOrCommaOrRparen() {
-        Token next = peekNext();
-        return next.type() == TokenType.COLON || 
-               next.type() == TokenType.COMMA ||
-               next.type() == TokenType.RPAREN;
     }
     
     private Expr parseIfExpr(int start) throws ParseException {

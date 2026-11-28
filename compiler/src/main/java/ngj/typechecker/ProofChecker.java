@@ -191,90 +191,117 @@ public final class ProofChecker {
         }
     }
 
-    private void checkBlock(BlockExpr block, boolean inProofContext, CallSiteCtx ctx) {
-        if (block == null) return;
+    private record EvalResult(SmtExpr smt, boolean isLong, List<EvalResult> tupleElements) {
+        static EvalResult of(SmtExpr smt, boolean isLong) {
+            return new EvalResult(smt, isLong, null);
+        }
+
+        static EvalResult unsupported(String reason) {
+            return new EvalResult(new SmtExpr.UnsupportedExpr(reason), false, null);
+        }
+    }
+
+    private EvalResult checkBlock(BlockExpr block, boolean inProofContext, CallSiteCtx ctx) {
+        if (block == null) return EvalResult.unsupported("null_block");
+        boolean returned = false;
         for (var stmt : block.statements()) {
+            CallSiteCtx activeCtx = returned ? null : ctx;
             switch (stmt) {
                 case ValStmt v -> {
                     if (SecretRedactor.isSecretVariableName(v.name()) || isSecretType(v.explicitType())) {
                         secretVars.add(v.name());
                     }
                     if (!inProofContext) checkNoMathIntInType(v.explicitType(), v.span());
-                    checkRuntimeOrProofExpr(v.initializer(), inProofContext, ctx);
-                    if (!inProofContext && ctx != null) {
-                        ctx.bindLocal(v.name(), v.explicitType(), v.initializer());
+                    EvalResult init = checkAndEvalExpr(v.initializer(), inProofContext, activeCtx);
+                    if (!inProofContext && activeCtx != null) {
+                        activeCtx.bindLocal(v.name(), v.explicitType(), init);
                     }
                 }
                 case LetStmt l -> {
                     if (!inProofContext) checkNoMathIntInType(l.explicitType(), l.span());
-                    checkRuntimeOrProofExpr(l.initializer(), inProofContext, ctx);
-                    if (!inProofContext && ctx != null) {
-                        ctx.bindLocal(l.name(), l.explicitType(), l.initializer());
+                    EvalResult init = checkAndEvalExpr(l.initializer(), inProofContext, activeCtx);
+                    if (!inProofContext && activeCtx != null) {
+                        activeCtx.bindLocal(l.name(), l.explicitType(), init);
                     }
                 }
                 case VarStmt v -> {
                     if (!inProofContext) checkNoMathIntInType(v.explicitType(), v.span());
-                    checkRuntimeOrProofExpr(v.initializer(), inProofContext, ctx);
-                    if (!inProofContext && ctx != null) {
-                        ctx.bindVar(v.name(), v.explicitType(), v.initializer());
+                    EvalResult init = checkAndEvalExpr(v.initializer(), inProofContext, activeCtx);
+                    if (!inProofContext && activeCtx != null) {
+                        activeCtx.bindVar(v.name(), v.explicitType(), init);
                     }
                 }
                 case AssignStmt a -> {
-                    checkRuntimeOrProofExpr(a.value(), inProofContext, ctx);
-                    if (!inProofContext && ctx != null) {
-                        ctx.assignVar(a.name(), a.value());
+                    EvalResult rhs = checkAndEvalExpr(a.value(), inProofContext, activeCtx);
+                    if (!inProofContext && activeCtx != null) {
+                        activeCtx.assignVar(a.name(), rhs);
                     }
                 }
                 case ReturnStmt r -> {
-                    if (r.value() != null) checkRuntimeOrProofExpr(r.value(), inProofContext, ctx);
+                    if (r.value() != null) checkAndEvalExpr(r.value(), inProofContext, activeCtx);
+                    returned = true;
                 }
-                case ExprStmt es -> checkRuntimeOrProofExpr(es.expr(), inProofContext, ctx);
+                case ExprStmt es -> checkAndEvalExpr(es.expr(), inProofContext, activeCtx);
                 case TupleDestructureStmt td -> {
                     if (!inProofContext) {
                         for (var t : td.explicitTypes()) checkNoMathIntInType(t, td.span());
                     }
-                    checkRuntimeOrProofExpr(td.initializer(), inProofContext, ctx);
-                    if (!inProofContext && ctx != null) {
-                        ctx.bindTupleDestructure(td);
+                    EvalResult init = checkAndEvalExpr(td.initializer(), inProofContext, activeCtx);
+                    if (!inProofContext && activeCtx != null) {
+                        activeCtx.bindTupleDestructure(td, init);
                     }
                 }
                 case InvariantStmt inv -> {
                     checkExprPurityAndHoles(inv.condition(), true, Set.of());
-                    if (!inProofContext && ctx != null) {
-                        SmtExpr invExpr = ctx.vcGen.translateExpr(inv.condition(), ctx.sorts, ctx.ssaEnv);
+                    if (!inProofContext && activeCtx != null) {
+                        SmtExpr invExpr = activeCtx.vcGen.translateExpr(inv.condition(), activeCtx.sorts, activeCtx.ssaEnv);
                         SmtExpr vc;
-                        if (ctx.premises.isEmpty()) {
+                        if (activeCtx.premises.isEmpty()) {
                             vc = invExpr;
                         } else {
-                            SmtExpr conj = ctx.premises.size() == 1 ? ctx.premises.get(0) : new SmtExpr.And(ctx.premises);
+                            SmtExpr conj = activeCtx.premises.size() == 1 ? activeCtx.premises.get(0) : new SmtExpr.And(activeCtx.premises);
                             vc = new SmtExpr.Implies(conj, invExpr);
                         }
                         if (runSmtAndReport(vc, "<invariant>", inv.span())) {
-                            ctx.addAssumption(inv.condition());
+                            activeCtx.addAssumption(inv.condition());
                         }
                     }
                 }
                 case ProofStmt proof -> checkBlockPurityAndHoles(proof.body(), true, Set.of());
                 case AssumeStmt assume -> {
                     checkExprPurityAndHoles(assume.condition(), true, Set.of());
-                    if (!inProofContext && ctx != null) {
-                        ctx.addAssumption(assume.condition());
+                    if (!inProofContext && activeCtx != null) {
+                        activeCtx.addAssumption(assume.condition());
                     }
                 }
             }
         }
         if (block.tailExpr() != null) {
-            checkRuntimeOrProofExpr(block.tailExpr(), inProofContext, ctx);
+            EvalResult tail = checkAndEvalExpr(block.tailExpr(), inProofContext, returned ? null : ctx);
+            return returned ? EvalResult.unsupported("block_returned") : tail;
         }
+        return EvalResult.unsupported("unit_block");
     }
 
-    private void checkRuntimeOrProofExpr(Expr expr, boolean inProofContext, CallSiteCtx ctx) {
-        if (expr == null) return;
-        switch (expr) {
+    private EvalResult checkAndEvalExpr(Expr expr, boolean inProofContext, CallSiteCtx ctx) {
+        if (expr == null) return EvalResult.unsupported("null");
+        return switch (expr) {
             case HoleExpr hole -> {
                 if (hole.isProofHole()) {
                     emitProofHole(hole);
                 }
+                yield EvalResult.unsupported("Hole present: ?" + hole.name());
+            }
+            case LiteralExpr lit -> {
+                if (inProofContext || ctx == null) {
+                    yield EvalResult.unsupported("no_ctx");
+                }
+                yield switch (lit.kind()) {
+                    case INT -> EvalResult.of(SmtExpr.intConst(((Number) lit.value()).longValue()), false);
+                    case LONG -> EvalResult.of(SmtExpr.intConst(((Number) lit.value()).longValue()), true);
+                    case BOOL -> EvalResult.of(SmtExpr.boolConst((Boolean) lit.value()), false);
+                    default -> EvalResult.unsupported("Unsupported literal: " + lit.kind());
+                };
             }
             case IdentExpr id -> {
                 if (!inProofContext && id.name().equals("MathInt")) {
@@ -284,9 +311,18 @@ public final class ProofChecker {
                         id.span()
                     ));
                 }
+                if (inProofContext || ctx == null) {
+                    yield EvalResult.unsupported("no_ctx");
+                }
+                String ssaName = ctx.ssaEnv.getOrDefault(id.name(), id.name());
+                SmtExpr.Sort sort = ctx.sorts.getOrDefault(ssaName, ctx.sorts.getOrDefault(id.name(), SmtExpr.Sort.INT));
+                boolean isLong = ctx.longVars.contains(ssaName);
+                yield EvalResult.of(new SmtExpr.Var(ssaName, sort), isLong);
             }
             case CallExpr call -> {
-                if (!inProofContext && call.callee() instanceof IdentExpr id) {
+                Expr rawCallee = call.callee();
+                while (rawCallee instanceof ParenExpr p) rawCallee = p.inner();
+                if (!inProofContext && rawCallee instanceof IdentExpr id) {
                     if (specFns.containsKey(id.name()) || lemmas.containsKey(id.name())) {
                         diagnostics.add(Diagnostic.error(
                             "NGJ-PROOF-002",
@@ -295,55 +331,98 @@ public final class ProofChecker {
                         ));
                     }
                 }
-                checkRuntimeOrProofExpr(call.callee(), inProofContext, ctx);
-                for (var arg : call.args()) checkRuntimeOrProofExpr(arg, inProofContext, ctx);
-                if (!inProofContext && ctx != null && call.callee() instanceof IdentExpr id) {
-                    verifyCalleePreconditions(call, id.name(), ctx);
+                EvalResult calleeRes = checkAndEvalExpr(call.callee(), inProofContext, ctx);
+                List<SmtExpr> evaluatedArgs = new ArrayList<>(call.args().size());
+                for (var arg : call.args()) {
+                    evaluatedArgs.add(checkAndEvalExpr(arg, inProofContext, ctx).smt());
                 }
+                if (!inProofContext && ctx != null && rawCallee instanceof IdentExpr id) {
+                    verifyCalleePreconditions(call, id.name(), evaluatedArgs, ctx);
+                }
+                if (inProofContext || ctx == null) {
+                    yield EvalResult.unsupported("no_ctx");
+                }
+                if (rawCallee instanceof IdentExpr id) {
+                    FnDecl decl = fnDecls.get(id.name());
+                    boolean isLong = decl != null && ctx.vcGen.isLong(decl.returnType());
+                    SmtExpr.Sort retSort = decl != null ? ctx.vcGen.sortOf(decl.returnType()) : SmtExpr.Sort.INT;
+                    yield EvalResult.of(new SmtExpr.UfApp(id.name(), evaluatedArgs, retSort), isLong);
+                }
+                if (rawCallee instanceof FieldAccessExpr fa) {
+                    boolean isLong = fa.fieldName().equals("toLong");
+                    List<SmtExpr> methodArgs = new ArrayList<>(evaluatedArgs.size() + 1);
+                    methodArgs.add(calleeRes.smt());
+                    methodArgs.addAll(evaluatedArgs);
+                    yield EvalResult.of(new SmtExpr.UfApp("method_" + fa.fieldName(), methodArgs, SmtExpr.Sort.INT), isLong);
+                }
+                yield EvalResult.unsupported("call_expr");
             }
             case BlockExpr b -> {
                 if (!inProofContext && ctx != null) {
                     int origPremisesSize = ctx.premises.size();
                     CallSiteCtx inner = ctx.fork(null);
-                    checkBlock(b, false, inner);
+                    EvalResult blockRes = checkBlock(b, false, inner);
                     ctx.mergeBlockExit(inner, b, origPremisesSize);
+                    yield blockRes;
                 } else {
                     checkBlock(b, inProofContext, null);
+                    yield EvalResult.unsupported("no_ctx");
                 }
             }
             case IfExpr i -> {
-                checkRuntimeOrProofExpr(i.condition(), inProofContext, ctx);
+                EvalResult condRes = checkAndEvalExpr(i.condition(), inProofContext, ctx);
                 if (!inProofContext && ctx != null) {
-                    SmtExpr cond = ctx.vcGen.translateExecutableExpr(i.condition(), ctx.sorts, ctx.ssaEnv, ctx.longVars);
+                    SmtExpr cond = condRes.smt();
                     SmtExpr thenFact = !VcGenerator.containsUnsupported(cond) ? cond : null;
                     SmtExpr elseFact = thenFact != null ? new SmtExpr.Not(cond) : null;
-                    checkBlock(i.thenBranch(), false, ctx.fork(thenFact));
+                    CallSiteCtx thenCtx = ctx.fork(thenFact);
+                    int thenBasePremises = thenCtx.premises.size();
+                    EvalResult thenRes = checkBlock(i.thenBranch(), false, thenCtx);
+                    EvalResult elseRes = EvalResult.unsupported("if_without_else");
+                    CallSiteCtx elseCtx = null;
+                    int elseBasePremises = 0;
                     if (i.elseBranch() != null) {
-                        CallSiteCtx elseCtx = ctx.fork(elseFact);
+                        elseCtx = ctx.fork(elseFact);
+                        elseBasePremises = elseCtx.premises.size();
                         if (i.elseBranch() instanceof BlockExpr eb) {
-                            checkBlock(eb, false, elseCtx);
+                            elseRes = checkBlock(eb, false, elseCtx);
                         } else {
-                            checkRuntimeOrProofExpr(i.elseBranch(), false, elseCtx);
+                            elseRes = checkAndEvalExpr(i.elseBranch(), false, elseCtx);
                         }
                     }
                     Set<String> mutated = new LinkedHashSet<>();
                     collectAssignedVars(i.thenBranch(), mutated);
                     collectAssignedVars(i.elseBranch(), mutated);
                     ctx.havocVars(mutated);
+                    if (i.elseBranch() != null
+                        && thenFact != null
+                        && !VcGenerator.containsUnsupported(thenRes.smt())
+                        && !VcGenerator.containsUnsupported(elseRes.smt())) {
+                        addGuardedPremises(thenFact, thenCtx.premises, thenBasePremises, ctx.premises);
+                        if (elseCtx != null) {
+                            addGuardedPremises(elseFact, elseCtx.premises, elseBasePremises, ctx.premises);
+                        }
+                        yield EvalResult.of(
+                            new SmtExpr.Ite(cond, thenRes.smt(), elseRes.smt()),
+                            thenRes.isLong() || elseRes.isLong()
+                        );
+                    }
+                    yield EvalResult.unsupported("if_expr");
                 } else {
                     checkBlock(i.thenBranch(), inProofContext, null);
-                    if (i.elseBranch() != null) checkRuntimeOrProofExpr(i.elseBranch(), inProofContext, null);
+                    if (i.elseBranch() != null) checkAndEvalExpr(i.elseBranch(), inProofContext, null);
+                    yield EvalResult.unsupported("no_ctx");
                 }
             }
             case MatchExpr m -> {
-                checkRuntimeOrProofExpr(m.scrutinee(), inProofContext, ctx);
+                checkAndEvalExpr(m.scrutinee(), inProofContext, ctx);
                 Set<String> mutated = new LinkedHashSet<>();
                 for (var arm : m.arms()) {
                     CallSiteCtx armCtx = (!inProofContext && ctx != null) ? ctx.fork(null) : null;
                     if (armCtx != null) {
                         bindPatternVars(arm.pattern(), armCtx);
                     }
-                    checkRuntimeOrProofExpr(arm.body(), inProofContext, armCtx);
+                    checkAndEvalExpr(arm.body(), inProofContext, armCtx);
                     if (!inProofContext && ctx != null) {
                         collectAssignedVars(arm.body(), mutated);
                     }
@@ -351,6 +430,7 @@ public final class ProofChecker {
                 if (!inProofContext && ctx != null) {
                     ctx.havocVars(mutated);
                 }
+                yield EvalResult.unsupported("match_expr");
             }
             case WhileExpr w -> {
                 if (!inProofContext && ctx != null) {
@@ -359,20 +439,20 @@ public final class ProofChecker {
                     collectAssignedVars(w.body(), mutated);
                     CallSiteCtx headerCtx = ctx.fork(null);
                     headerCtx.havocVars(mutated);
-                    checkRuntimeOrProofExpr(w.condition(), false, headerCtx);
-                    SmtExpr cond = headerCtx.vcGen.translateExecutableExpr(w.condition(), headerCtx.sorts, headerCtx.ssaEnv, headerCtx.longVars);
+                    SmtExpr cond = checkAndEvalExpr(w.condition(), false, headerCtx).smt();
                     if (!VcGenerator.containsUnsupported(cond)) {
                         headerCtx.premises.add(cond);
                     }
                     checkBlock(w.body(), false, headerCtx);
                     ctx.havocVars(mutated);
                 } else {
-                    checkRuntimeOrProofExpr(w.condition(), inProofContext, null);
+                    checkAndEvalExpr(w.condition(), inProofContext, null);
                     checkBlock(w.body(), inProofContext, null);
                 }
+                yield EvalResult.unsupported("while_expr");
             }
             case ForExpr f -> {
-                checkRuntimeOrProofExpr(f.iterable(), inProofContext, ctx);
+                checkAndEvalExpr(f.iterable(), inProofContext, ctx);
                 if (!inProofContext && ctx != null) {
                     Set<String> mutated = new LinkedHashSet<>();
                     collectAssignedVars(f.body(), mutated);
@@ -384,15 +464,18 @@ public final class ProofChecker {
                 } else {
                     checkBlock(f.body(), inProofContext, null);
                 }
+                yield EvalResult.unsupported("for_expr");
             }
             case ScopeExpr s -> {
                 if (!inProofContext && ctx != null) {
                     int origPremisesSize = ctx.premises.size();
                     CallSiteCtx inner = ctx.fork(null);
-                    checkBlock(s.body(), false, inner);
+                    EvalResult scopeRes = checkBlock(s.body(), false, inner);
                     ctx.mergeBlockExit(inner, s.body(), origPremisesSize);
+                    yield scopeRes;
                 } else {
                     checkBlock(s.body(), inProofContext, null);
+                    yield EvalResult.unsupported("no_ctx");
                 }
             }
             case ForkExpr f -> {
@@ -406,38 +489,134 @@ public final class ProofChecker {
                 } else {
                     checkBlock(f.body(), inProofContext, null);
                 }
+                yield EvalResult.unsupported("fork_expr");
             }
             case BinaryExpr b -> {
-                checkRuntimeOrProofExpr(b.left(), inProofContext, ctx);
-                checkRuntimeOrProofExpr(b.right(), inProofContext, ctx);
+                EvalResult left = checkAndEvalExpr(b.left(), inProofContext, ctx);
+                if (!inProofContext && ctx != null
+                    && (b.op() == BinaryExpr.BinaryOp.AND || b.op() == BinaryExpr.BinaryOp.OR)) {
+                    SmtExpr guard = !VcGenerator.containsUnsupported(left.smt())
+                        ? (b.op() == BinaryExpr.BinaryOp.AND ? left.smt() : new SmtExpr.Not(left.smt()))
+                        : null;
+                    CallSiteCtx rightCtx = ctx.fork(guard);
+                    int rightBasePremises = rightCtx.premises.size();
+                    EvalResult right = checkAndEvalExpr(b.right(), false, rightCtx);
+                    Set<String> rightMutated = new LinkedHashSet<>();
+                    collectAssignedVars(b.right(), rightMutated);
+                    ctx.havocVars(rightMutated);
+                    addGuardedPremises(guard, rightCtx.premises, rightBasePremises, ctx.premises);
+                    SmtExpr combined = b.op() == BinaryExpr.BinaryOp.AND
+                        ? SmtExpr.and(left.smt(), right.smt())
+                        : SmtExpr.or(left.smt(), right.smt());
+                    yield EvalResult.of(combined, false);
+                }
+                EvalResult right = checkAndEvalExpr(b.right(), inProofContext, ctx);
+                if (inProofContext || ctx == null) {
+                    yield EvalResult.unsupported("no_ctx");
+                }
+                SmtExpr l = left.smt();
+                SmtExpr r = right.smt();
+                boolean arithLong = left.isLong() || right.isLong();
+                yield switch (b.op()) {
+                    case ADD -> EvalResult.of(new SmtExpr.Add(l, r), arithLong);
+                    case SUB -> EvalResult.of(new SmtExpr.Sub(l, r), arithLong);
+                    case MUL -> EvalResult.of(new SmtExpr.Mul(l, r), arithLong);
+                    case DIV, MOD -> EvalResult.of(new SmtExpr.UfApp("op_" + b.op().name(), List.of(l, r), SmtExpr.Sort.INT), arithLong);
+                    case EQ -> EvalResult.of(new SmtExpr.Eq(l, r), false);
+                    case NE -> EvalResult.of(new SmtExpr.Not(new SmtExpr.Eq(l, r)), false);
+                    case LT -> EvalResult.of(new SmtExpr.Lt(l, r), false);
+                    case LE -> EvalResult.of(new SmtExpr.Le(l, r), false);
+                    case GT -> EvalResult.of(new SmtExpr.Gt(l, r), false);
+                    case GE -> EvalResult.of(new SmtExpr.Ge(l, r), false);
+                    case AND -> EvalResult.of(SmtExpr.and(l, r), false);
+                    case OR -> EvalResult.of(SmtExpr.or(l, r), false);
+                };
             }
-            case UnaryExpr u -> checkRuntimeOrProofExpr(u.operand(), inProofContext, ctx);
-            case ParenExpr p -> checkRuntimeOrProofExpr(p.inner(), inProofContext, ctx);
-            case PropagateExpr p -> checkRuntimeOrProofExpr(p.inner(), inProofContext, ctx);
-            case ConsumeExpr c -> checkRuntimeOrProofExpr(c.target(), inProofContext, ctx);
-            case FieldAccessExpr fa -> checkRuntimeOrProofExpr(fa.object(), inProofContext, ctx);
+            case UnaryExpr u -> {
+                EvalResult op = checkAndEvalExpr(u.operand(), inProofContext, ctx);
+                if (inProofContext || ctx == null) {
+                    yield EvalResult.unsupported("no_ctx");
+                }
+                yield switch (u.op()) {
+                    case NEG -> {
+                        long minVal = op.isLong() ? Long.MIN_VALUE : Integer.MIN_VALUE;
+                        SmtExpr neg = new SmtExpr.Ite(
+                            new SmtExpr.Eq(op.smt(), SmtExpr.intConst(minVal)),
+                            SmtExpr.intConst(minVal),
+                            new SmtExpr.Sub(SmtExpr.intConst(0), op.smt())
+                        );
+                        yield EvalResult.of(neg, op.isLong());
+                    }
+                    case NOT -> EvalResult.of(new SmtExpr.Not(op.smt()), false);
+                };
+            }
+            case ParenExpr p -> checkAndEvalExpr(p.inner(), inProofContext, ctx);
+            case PropagateExpr p -> {
+                checkAndEvalExpr(p.inner(), inProofContext, ctx);
+                yield EvalResult.unsupported("propagate_expr");
+            }
+            case ConsumeExpr c -> checkAndEvalExpr(c.target(), inProofContext, ctx);
+            case FieldAccessExpr fa -> {
+                EvalResult obj = checkAndEvalExpr(fa.object(), inProofContext, ctx);
+                if (inProofContext || ctx == null) {
+                    yield EvalResult.unsupported("no_ctx");
+                }
+                yield EvalResult.of(
+                    new SmtExpr.UfApp("field_" + fa.fieldName(), List.of(obj.smt()), SmtExpr.Sort.INT),
+                    false
+                );
+            }
             case TupleExpr t -> {
-                for (var e : t.elements()) checkRuntimeOrProofExpr(e, inProofContext, ctx);
+                List<EvalResult> elems = new ArrayList<>(t.elements().size());
+                for (var e : t.elements()) {
+                    elems.add(checkAndEvalExpr(e, inProofContext, ctx));
+                }
+                yield new EvalResult(new SmtExpr.UnsupportedExpr("tuple_expr"), false, elems);
             }
             case ConstructorExpr c -> {
-                for (var field : c.fields()) checkRuntimeOrProofExpr(field.value(), inProofContext, ctx);
+                for (var field : c.fields()) checkAndEvalExpr(field.value(), inProofContext, ctx);
+                yield EvalResult.unsupported("constructor_expr");
             }
             case LambdaExpr l -> {
                 CallSiteCtx lambdaCtx = (!inProofContext && ctx != null) ? ctx.fork(null) : null;
                 if (lambdaCtx != null) {
                     for (var p : l.params()) {
-                        SmtExpr.Sort pSort = VcGenerator.sortOfType(p.type());
+                        SmtExpr.Sort pSort = lambdaCtx.vcGen.sortOf(p.type());
                         String lhs = lambdaCtx.freshSsa(p.name(), pSort);
-                        if (VcGenerator.isLongType(p.type())) {
+                        if (lambdaCtx.vcGen.isLong(p.type())) {
                             lambdaCtx.longVars.add(lhs);
                             lambdaCtx.longVars.add(p.name());
                         }
                     }
                 }
                 checkBlock(l.body(), inProofContext, lambdaCtx);
+                yield EvalResult.unsupported("lambda_expr");
             }
-            default -> {}
+            default -> EvalResult.unsupported("Unsupported AST node in VC: " + expr.getClass().getSimpleName());
+        };
+    }
+
+    private static void addGuardedPremises(
+        SmtExpr guard,
+        List<SmtExpr> branchPremises,
+        int baseSize,
+        List<SmtExpr> targetPremises
+    ) {
+        if (guard == null || VcGenerator.containsUnsupported(guard) || branchPremises.size() <= baseSize) {
+            return;
         }
+        List<SmtExpr> added = new ArrayList<>();
+        for (int i = baseSize; i < branchPremises.size(); i++) {
+            SmtExpr p = branchPremises.get(i);
+            if (!VcGenerator.containsUnsupported(p)) {
+                added.add(p);
+            }
+        }
+        if (added.isEmpty()) {
+            return;
+        }
+        SmtExpr conj = added.size() == 1 ? added.get(0) : new SmtExpr.And(added);
+        targetPremises.add(new SmtExpr.Implies(guard, conj));
     }
 
     private static void bindPatternVars(Pattern pattern, CallSiteCtx ctx) {
@@ -457,9 +636,9 @@ public final class ProofChecker {
         }
     }
 
-    private void verifyCalleePreconditions(CallExpr call, String calleeName, CallSiteCtx ctx) {
+    private void verifyCalleePreconditions(CallExpr call, String calleeName, List<SmtExpr> evaluatedArgs, CallSiteCtx ctx) {
         FnDecl callee = fnDecls.get(calleeName);
-        if (callee == null || callee.params().size() != call.args().size()) {
+        if (callee == null || callee.params().size() != evaluatedArgs.size()) {
             return;
         }
         List<ContractClause> calleeRequires = callee.contracts().stream()
@@ -481,8 +660,8 @@ public final class ProofChecker {
             callSorts.put(callParamName, pSort);
             calleeSsaEnv.put(p.name(), callParamName);
 
-            SmtExpr argExpr = ctx.vcGen.translateExecutableExpr(call.args().get(i), ctx.sorts, ctx.ssaEnv, ctx.longVars);
-            if (!VcGenerator.containsUnsupported(argExpr)) {
+            SmtExpr argExpr = evaluatedArgs.get(i);
+            if (argExpr != null && !VcGenerator.containsUnsupported(argExpr)) {
                 callPremises.add(new SmtExpr.Eq(new SmtExpr.Var(callParamName, pSort), argExpr));
             }
         }
@@ -662,10 +841,12 @@ public final class ProofChecker {
             return ssaName;
         }
 
-        void bindLocal(String name, TypeExpr explicitType, Expr initializer) {
-            SmtExpr init = vcGen.translateExecutableExpr(initializer, sorts, ssaEnv, longVars);
-            boolean longInit = vcGen.isLong(explicitType) || vcGen.isLongExpr(initializer, longVars, ssaEnv);
-            SmtExpr.Sort sort = explicitType != null ? vcGen.sortOf(explicitType) : VcGenerator.inferSort(init);
+        void bindLocal(String name, TypeExpr explicitType, EvalResult initializer) {
+            SmtExpr init = initializer != null ? initializer.smt() : new SmtExpr.UnsupportedExpr("null");
+            boolean longInit = vcGen.isLong(explicitType) || (initializer != null && initializer.isLong());
+            SmtExpr.Sort sort = explicitType != null
+                ? vcGen.sortOf(explicitType)
+                : (!VcGenerator.containsUnsupported(init) ? VcGenerator.inferSort(init) : SmtExpr.Sort.INT);
             String lhs = (ssaEnv.containsKey(name) || sorts.containsKey(name))
                 ? freshSsa(name, sort)
                 : name;
@@ -679,10 +860,12 @@ public final class ProofChecker {
             }
         }
 
-        void bindVar(String name, TypeExpr explicitType, Expr initializer) {
-            SmtExpr init = vcGen.translateExecutableExpr(initializer, sorts, ssaEnv, longVars);
-            boolean longInit = vcGen.isLong(explicitType) || vcGen.isLongExpr(initializer, longVars, ssaEnv);
-            SmtExpr.Sort sort = explicitType != null ? vcGen.sortOf(explicitType) : VcGenerator.inferSort(init);
+        void bindVar(String name, TypeExpr explicitType, EvalResult initializer) {
+            SmtExpr init = initializer != null ? initializer.smt() : new SmtExpr.UnsupportedExpr("null");
+            boolean longInit = vcGen.isLong(explicitType) || (initializer != null && initializer.isLong());
+            SmtExpr.Sort sort = explicitType != null
+                ? vcGen.sortOf(explicitType)
+                : (!VcGenerator.containsUnsupported(init) ? VcGenerator.inferSort(init) : SmtExpr.Sort.INT);
             String lhs = freshSsa(name, sort);
             if (longInit) {
                 longVars.add(lhs);
@@ -692,31 +875,18 @@ public final class ProofChecker {
             }
         }
 
-        void bindTupleDestructure(TupleDestructureStmt td) {
-            Expr init = td.initializer();
-            while (init instanceof ParenExpr p) init = p.inner();
-            TupleExpr te = init instanceof TupleExpr t ? t : null;
-            List<SmtExpr> rhsList = new ArrayList<>(td.names().size());
-            List<Boolean> longFlags = new ArrayList<>(td.names().size());
-            for (int i = 0; i < td.names().size(); i++) {
-                if (te != null && i < te.elements().size()) {
-                    Expr elem = te.elements().get(i);
-                    rhsList.add(vcGen.translateExecutableExpr(elem, sorts, ssaEnv, longVars));
-                    longFlags.add(vcGen.isLongExpr(elem, longVars, ssaEnv));
-                } else {
-                    rhsList.add(null);
-                    longFlags.add(false);
-                }
-            }
+        void bindTupleDestructure(TupleDestructureStmt td, EvalResult initializer) {
+            List<EvalResult> elems = initializer != null ? initializer.tupleElements() : null;
             for (int i = 0; i < td.names().size(); i++) {
                 String name = td.names().get(i);
                 TypeExpr explicitType = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
-                SmtExpr rhs = rhsList.get(i);
+                EvalResult elemRes = elems != null && i < elems.size() ? elems.get(i) : null;
+                SmtExpr rhs = elemRes != null ? elemRes.smt() : null;
                 SmtExpr.Sort sort = explicitType != null
                     ? vcGen.sortOf(explicitType)
-                    : (rhs != null ? VcGenerator.inferSort(rhs) : SmtExpr.Sort.INT);
+                    : (rhs != null && !VcGenerator.containsUnsupported(rhs) ? VcGenerator.inferSort(rhs) : SmtExpr.Sort.INT);
                 String lhs = freshSsa(name, sort);
-                if (vcGen.isLong(explicitType) || Boolean.TRUE.equals(longFlags.get(i))) {
+                if (vcGen.isLong(explicitType) || (elemRes != null && elemRes.isLong())) {
                     longVars.add(lhs);
                 }
                 if (rhs != null && !VcGenerator.containsUnsupported(rhs)) {
@@ -725,11 +895,14 @@ public final class ProofChecker {
             }
         }
 
-        void assignVar(String name, Expr value) {
-            SmtExpr rhs = vcGen.translateExecutableExpr(value, sorts, ssaEnv, longVars);
+        void assignVar(String name, EvalResult value) {
+            SmtExpr rhs = value != null ? value.smt() : new SmtExpr.UnsupportedExpr("null");
             String prevName = ssaEnv.getOrDefault(name, name);
-            boolean longRhs = longVars.contains(prevName) || vcGen.isLongExpr(value, longVars, ssaEnv);
-            SmtExpr.Sort sort = sorts.getOrDefault(prevName, VcGenerator.inferSort(rhs));
+            boolean longRhs = longVars.contains(prevName) || (value != null && value.isLong());
+            SmtExpr.Sort sort = sorts.getOrDefault(
+                prevName,
+                !VcGenerator.containsUnsupported(rhs) ? VcGenerator.inferSort(rhs) : SmtExpr.Sort.INT
+            );
             String lhs = freshSsa(name, sort);
             if (longRhs) {
                 longVars.add(lhs);

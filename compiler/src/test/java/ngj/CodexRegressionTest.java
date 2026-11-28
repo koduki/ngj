@@ -2167,4 +2167,215 @@ class CodexRegressionTest {
         assertEquals(1, code, "Invoking callback with PaymentWrite inside effects() must fail with NGJ-EFFECT-001: " + stdout);
         assertTrue(stdout.contains("NGJ-EFFECT-001"), "Expected NGJ-EFFECT-001: " + stdout);
     }
+
+    @Test
+    void untrustedEarlyReturnTaintsSubsequentPrivilegedCall() throws Exception {
+        Path file = tempDir.resolve("untrusted_early_return_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>) -> Unit effects(PaymentWrite) {
+                if (isSome(flag)) {
+                    return ();
+                }
+                pay();
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Early return under Untrusted guard must taint subsequent pay() with NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void untrustedPropagateTaintsSubsequentPrivilegedCall() throws Exception {
+        Path file = tempDir.resolve("untrusted_propagate_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>) -> Option<Int> effects(PaymentWrite) {
+                val x: Int = flag?;
+                pay();
+                return Some(x);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Unvalidated ? propagation on Untrusted value must taint subsequent pay() with NGJ-IFC-PC-001: " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void untrustedBranchWithoutReturnAllowsSubsequentPrivilegedCall() throws Exception {
+        Path file = tempDir.resolve("untrusted_branch_no_return_ok.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Unit effects(PaymentWrite) {
+                return ();
+            }
+
+            public fn ok(flag: Untrusted<Option<Int>>) -> Unit effects(PaymentWrite) {
+                if (isSome(flag)) {
+                    val x: Int = 1;
+                }
+                pay();
+                return ();
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(0, code, "Untrusted branch without early exit must still allow subsequent unconditional pay(): " + stdout);
+    }
+
+    @Test
+    void callArgSnapshotPreventsLaterArgMutationBypassingPrecondition() throws Exception {
+        Path file = tempDir.resolve("call_arg_mutation_order_bad.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int, ignored: Int) -> Int effects()
+                requires (x > 0)
+            {
+                return x;
+            }
+
+            public fn bad() -> Int effects() {
+                var y: Int = 0;
+                return positive(y, { y = 1; 0 });
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Later argument mutation { y = 1; 0 } must not satisfy earlier argument y == 0 precondition: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void callArgEarlierMutationFeedsSameArgPrecondition() throws Exception {
+        Path file = tempDir.resolve("call_arg_mutation_order_ok.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int, ignored: Int) -> Int effects()
+                requires (x > 0)
+            {
+                return x;
+            }
+
+            public fn ok() -> Int effects() {
+                var y: Int = 0;
+                return positive({ y = 1; y }, 0);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(0, code, "Block argument mutating y = 1 before yielding y should satisfy positive(x > 0): " + stdout);
+    }
+
+    @Test
+    void tupleDestructureSnapshotsEarlierElementBeforeLaterMutation() throws Exception {
+        Path file = tempDir.resolve("tuple_destructure_mutation_order_bad.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int, ignored: Int) -> Int effects()
+                requires (x > 0)
+            {
+                return x;
+            }
+
+            public fn bad() -> Int effects() {
+                var y: Int = 0;
+                val (a: Int, b: Int) = (y, { y = 1; 0 });
+                return positive(a, b);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Tuple destructure (y, { y = 1; 0 }) must snapshot a == 0 before mutating y: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void shortCircuitAndMutationDoesNotUnsoundlyHoldAfterExpression() throws Exception {
+        Path file = tempDir.resolve("short_circuit_and_mutation_bad.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int, ignored: Int) -> Int effects()
+                requires (x > 0)
+            {
+                return x;
+            }
+
+            public fn bad() -> Int effects() {
+                var y: Int = 0;
+                val skipped: Bool = false && { y = 1; true };
+                return positive(y, 0);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Short-circuited false && { y = 1; true } must not assume y == 1: " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
 }
