@@ -134,12 +134,38 @@ class TypeCheckerTest {
     }
     
     @Test
-    void rejectNonEmptyEffectBound() throws Exception {
+    void allowPureBodyWithinEffectBound() throws Exception {
         var source = """
             package test.effect;
             
             public fn read() -> String effects(FsRead) {
                 return "content";
+            }
+            """;
+        
+        var lexer = new Lexer(source, "test.ngj");
+        var parser = new Parser(lexer);
+        var unit = parser.parse();
+        
+        var typeChecker = new TypeChecker();
+        typeChecker.check(unit);
+        
+        var diagnostics = typeChecker.getDiagnostics();
+        assertFalse(diagnostics.stream()
+            .anyMatch(d -> d.id().equals("NGJ-EFFECT-001")));
+    }
+
+    @Test
+    void rejectEffectExceedingBound() throws Exception {
+        var source = """
+            package test.effect;
+            
+            public fn read() -> String effects(FsRead) {
+                return "content";
+            }
+            
+            public fn pureCaller() -> String effects() {
+                return read();
             }
             """;
         

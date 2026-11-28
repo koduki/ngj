@@ -27,6 +27,9 @@ public enum TokenType {
     LEFT_ARROW,         // <-
     BANG,               // !
     QUESTION,           // ?
+    DOT_DOT,            // ..
+    DOT_DOT_LT,         // ..<
+    AT,                 // @
     
     // Operators
     PLUS, MINUS, STAR, SLASH, PERCENT,

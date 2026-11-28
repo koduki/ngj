@@ -18,14 +18,25 @@ public record SymbolInfo(
     String signature
 ) {
     public String toJson() {
+        return toJson(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            Main.computePolicyDigest("standard", "default", "tier1", "jvm", List.of()),
+            Main.TARGET_PROFILE
+        );
+    }
+
+    public String toJson(String sourceRevision, String policyDigest, String targetProfile) {
         var effectsJson = effects.stream()
             .map(e -> "\"" + escapeJson(e) + "\"")
             .collect(Collectors.joining(", "));
-        
+
         return """
             {
               "schema_version": "%s",
               "compiler_version": "%s",
+              "source_revision": "%s",
+              "policy_digest": "%s",
+              "target_profile": "%s",
               "symbol_id": "%s",
               "kind": "%s",
               "name": "%s",
@@ -35,8 +46,11 @@ public record SymbolInfo(
               "visibility": "%s",
               "signature": "%s"
             }""".formatted(
-                Main.SCHEMA_VERSION,
+                Main.INSPECT_SCHEMA_VERSION,
                 Main.COMPILER_VERSION,
+                escapeJson(sourceRevision),
+                escapeJson(policyDigest),
+                escapeJson(targetProfile),
                 escapeJson(id),
                 escapeJson(kind),
                 escapeJson(name),
@@ -47,7 +61,7 @@ public record SymbolInfo(
                 escapeJson(signature)
             );
     }
-    
+
     public void printHuman(PrintStream out) {
         out.println("Symbol: " + id);
         out.println("  Kind: " + kind);
@@ -58,7 +72,7 @@ public record SymbolInfo(
             out.println("  Effects: " + effects);
         }
     }
-    
+
     private static String escapeJson(String s) {
         if (s == null) return "";
         return s.replace("\\", "\\\\")

@@ -12,12 +12,13 @@ NGJは、AIエージェントが生成・修正することを第一級の利用
 
 1. **Value first (Valhalla foundation):** 不変の値と、同一性・状態・寿命を持つリソースを分離する。Project Valhallaのvalue classes（JEP 401）と厳格なフィールド初期化（JEP 539）を言語設計の基盤とし、プリミティブ型とユーザー定義値型を統一する。NGJにおける`Int`/`Long`/`Bool`等はvalue型であり、boxed/primitive の二重性をユーザーに見せない。VMによるフラット化・スカラ化は性能最適化であり、言語の意味論は値の等価性と不変性に基づく。
 2. **Colorless structured concurrency:** `scope` / `fork` と仮想スレッド（`StructuredTaskScope` JEP 543、`ScopedValue` JEP 506、non-pinning `synchronized` JEP 491）によって、`async/await`なしの直接的な記述を提供する。
-3. **Checkable authority:** 型・Effect・Capabilityで、実行可能な操作と対象を表す。安全性をソース中の自己申告に依存させず、JVMのIntegrity by Default路線（`Unsafe`・JNI・`final`改変・動的エージェントの既定制限）と連動する。
-4. **Compiler as an agent interface:** 型付き穴、部分プログラム検査、構造化診断、意味に基づく文脈取得をコンパイラの公開機能とする。
-5. **Observable and verifiable behavior:** OTel/JFR（JEP 520/536）、契約、反例、I/O再実行を接続する。観測と保証を区別する。
-6. **Static interop and AOT:** NGJ自身は実行時リフレクションや動的クラス生成に依存せず、Java境界・FFM境界とProject Leyden（JEP 483/514/515/516/544）等のAOT要件をビルド時に検査する。
+3. **Checkable authority (Tracked Capabilities & Separation):** Scala 3風のJVMネイティブなCapture Checking・Separation Checking（`read`/`update`/`consume`・`caps(...)`）・Effect・有限状態`protocol`型により、実行可能な操作・局所純粋性・資源寿命を型で制約する。安全性をソース中の自己申告に依存させず、JVMのIntegrity by Default路線（`Unsafe`・JNI・`final`改変・動的エージェントの既定制限）と連動する。
+4. **First-class value refinements:** 値の不変条件と整数範囲制約（`{v: T where expr}`、`Int[lo..hi]`）をPhase 2のコア型構文へ組み込み、部分正当性意味論と決定的なE-graph / QF-LIA検査で安全性を合成する。
+5. **Compiler as an agent interface:** 型付きコード穴・証明穴（`?name`/`?proof_hole`）、部分プログラム検査、人間向け/AI向けの二層構造化診断、意味に基づく文脈・補題取得、Trust-First機械ゲートをコンパイラの公開機能とする。
+6. **Observable and verifiable behavior:** OTel/JFR（JEP 520/536）、契約、反例、I/O再実行、およびSurface A/B/C（検証器受理・仕様拘束・意味的忠実度/`Post2Exe`）を接続する。観測と保証を区別する。
+7. **Static interop and AOT:** NGJ自身は実行時リフレクションや動的クラス生成に依存せず、Java境界・FFM境界とProject Leyden（JEP 483/514/515/516/544）等のAOT要件をビルド時に検査する。
 
-AIを言語ランタイムやコンパイラの必須依存にはしない。同じソース・依存・ツールチェーンからのビルドにLLM呼び出しは不要。エージェント専用構文やプロンプトDSL、任意の依存型、完全な自動証明はv0.3の必須要件ではない。
+AIを言語ランタイムやコンパイラの必須依存にはしない。同じソース・依存・ツールチェーンからのビルドにLLM呼び出しは不要。エージェント専用構文やプロンプトDSL、一般の停止性証明（totality）、任意の依存型・対話型タクティク言語は採用しない。
 
 ### 1.3 Valhalla基盤 — 型システムの根幹
 
@@ -161,9 +162,9 @@ c1 === c1;  // true（同一インスタンス）
 
 `record`内の参照も安全な不変表現でなければならず、identity型フィールドを持つ場合はそのフィールドへの参照が外部で変更されないことを保証する設計が必要。
 
-`Copy`は複製しても寿命・権限・消費制約を破らない型の性質、`Send`は所有権を別タスクへ移せる性質、`Share`は共有借用を並行使用できる性質。コンパイラがフィールドから導出し、アプリ側の無検査な宣言は禁止する。`Copy`は物理的なメモリコピーを必須としない。メソッド呼び出しのreceiverは宣言された`self`モードに従って自動借用できるが、通常の関数引数の借用は`&`で明示する。
+`Copy`は複製しても寿命・権限・消費制約を破らない型の性質、`Send`は所有権を別タスクへ移せる性質、`Share`は共有借用（`read`）を並行使用できる性質。コンパイラがフィールドから導出し、アプリ側の無検査な宣言は禁止する。`Copy`は物理的なメモリコピーを必須としない。Capability・資源のアクセス制御と寿命はScala 3風のCapture CheckingおよびSeparation Checking（`read`/`update`/`consume`・`caps(...)`）で統合的に追跡し、暗黙パラメータは導入しない（3節参照）。
 
-不透明型の構築権限とCapabilityを合わせることで、`Verified<T, Source>`を外部入力やキャストから偽造できなくする。出典ラベルは出典の事実を表し、データ内容の真実性を証明しない。
+不透明型の構築権限とCapabilityを合わせることで、`Verified<T, Source>`を外部入力やキャストから偽造できなくする。出典ラベルは出典の事実を表し、データ内容の真実性を証明しない。また、値型の不変条件や整数範囲制約を第一級の型として表現・合成する機能（`{v: T where expr}`、`Int[lo..hi]`）はPhase 2のコア型構文として2.5節で定義する。
 
 ### 2.3 数値型・失敗・不在
 
@@ -492,45 +493,72 @@ public enum Point {
 
 実際には`record`は単独のvalue classとして出力され、enumのsealed hierarchy構造は持たない。しかし意味論（value型、不変、構造的等価性）は同一である。
 
-## 3. 所有権・借用・freeze・メモリ
+### 2.5 第一級の値篩型・範囲型（Phase 2 コア型構文）
 
-### 3.1 所有権規則
+値の不変条件や境界制約を関数境界の契約だけでなく**通常の型**として合成するため、Phase 2のコア型構文に第一級の値篩型（value refinement types）と整数範囲型を組み込む。
 
-`resource`、builder、タスクハンドル、消費型Capabilityはaffine: move後の元変数の使用を拒否する。分岐の合流点では、全ての到達経路で有効なものだけを使用できる。
+```scala
+// 第一級篩型と範囲型略記
+public type NonNegLong = Long[0L..];
+public type Port = Int[1..65535];
+public record Money(cents: Long[0L..], currency: Currency);
 
-- `&T`: 読み取り借用。所有者より長生きできない。
-- `&mut T`: 排他的借用。同時に他の借用を持てない。
-- 借用中は所有者のmove/close/freezeを拒否する。
-- closureへのcaptureにも同じ規則を適用。`fork`はcaptureのSend/Shareと寿命を検査する。
-- 所有権機能の初期実装の借用期間は字句スコープ単位。非字句ライフタイムは診断の改善後に導入できる。
+public fn readPayload(raw: read Bytes<caps(a)>, offset: Long[0L..raw.len()], len: Long[0L..raw.len() - offset])
+    -> Bytes<caps(a)> effects()
+{
+    return raw.sliceExact(offset, len); // 境界安全が型レベルで証明済み
+}
+```
+
+- **構文**: `{v: T where expr}`、束縛名再利用の略記`T where expr`、および整数範囲略記`Int[lo..hi]` / `Int[lo..<hi]` / `Int[lo..]` / `Long[lo..hi]`。
+- **述語の純粋性と一言語原則**: `expr`はNGJ自身の純粋式（`effects()`、可変`var`参照不可、構造的等価`==`のみ）に限定する。整数演算の意味論は実装と同じ32/64bitオーバーフロー規則に従い、別言語のゴースト型を要求しない。
+- **Value Invariant**: `record`フィールドに付与された篩型はコンストラクタ生成時に検査され、Valhallaの厳格初期化（JEP 539 `ACC_STRICT_INIT`）およびJEP 513 Flexible Constructor Bodiesにより、不変条件を破る値インスタンスの構築・反射改変をJVMレベルで不可能にする。
+- **部分正当性意味論**: 篩型`{v: T where p(v)}`は「`p(v)`が停止して`true`を返す」部分正当性として解釈し、一般の再帰関数に対する停止性証明（totality）は要求しない。
+- **二段階決定的検査**:
+  - **Tier 1（常時オン・決定的）**: `val`束縛の等価事実（`x ~ e`）＋selfification、非巡回E-graphによる構造的等価判定、QF-LIA範囲推論、`if`/`match`からのパス依存絞り込み（smart narrowing）、および`while`ループ単調性解析（`ranger`方式）。これによりループ不変条件を手書きせずに多くの境界・符号制約を決定的に検査する。
+  - **Tier 2（`--verify=smt` / Phase 4）**: Tier 1で判定不能な一般の一次述語をSMTソルバへ委譲する。
+- **無検査キャスト禁止と`Result`昇格**: AIエージェントが型エラー回避のために強制キャストを乱用するのを防ぐため、`!!`のような暗黙例外スローキャストはコアに置かない。未証明の値を篩型へ昇格するには`if`/`match`による分岐、または`refine::<T>(expr) -> Result<T, RefinementError>`を用いる。
+
+## 3. Capability追跡・分離・freeze・メモリ
+
+### 3.1 Capture Checking と Separation Checking（Scala 3スタイル）
+
+NGJはGCを持つJVM（Valhalla基盤）上の言語であり、Rust式のライフタイム変数`'a`や`&T`/`&mut T`構文の代わりに、**Scala 3風のCapture CheckingおよびSeparation Checking**をJVMネイティブな統合権限・寿命モデルとして採用する（暗黙パラメータ`using`/`?=>`は正規構文の明示性原則に基づき採用しない）。
+
+- **Capture Set（`caps(...)`）**: リソース・`Arena`・外部Capability等の追跡対象値（tracked capabilities）がクロージャやビュー型（`Bytes<caps(a)>`）に捕捉された場合、その型に`caps(...)`として記録される。関数が`effects()`と空のcapture setを持つ場合、その関数は完全に純粋であり外部資源へアクセスできない。
+- **読取共有（`read`）と排他所有（`update`）**:
+  - `read T`: 読み取り専用アクセス（`SharedCapability`）。`fork`等の並列タスク間でも安全に共有できる。
+  - `update T`: 排他的変更アクセス（`ExclusiveCapability`）。同時に他の`read`/`update`と別名競合を持てない。同一の排他資源を捕捉する複数の`fork`子タスクはコンパイルエラー（`NGJ-SEP-001`）となる。
+- **フロー依存失効（`consume`）**: `resource`、builder、タスクハンドル、単回承認Capability、`Budget<K>`の消費操作には`consume`修飾子を付与する。`consume`された変数およびそれに到達可能なすべての別名は以降の字句制御フローで静的に失効（revoke）し、stale参照の再利用を拒否する（`NGJ-CAP-002`）。分岐の合流点では全到達経路で有効なものだけを使用できる。
+- **Safe Mode**: NGJの通常コードでは、Capability追跡を迂回し得る無検査キャスト、実行時リフレクション、`@unchecked`相当の属性、グローバル可変状態を言語仕様として禁止する。内部キャッシュ等を持つ信頼済み標準ライブラリ・アダプターのみ、ホスト監査対象の`@trusted_pure`で隔離する。
 
 ### 3.2 buildと不変コレクション
 
 ```scala
-val values = build (builder: MutableList<Int>) {
+val values = build (builder: update MutableList<Int>) {
     builder.add(1);
     builder.add(2);
     builder
 };
 ```
 
-`builder`はblock内の一意なbuilder。正常終了時に消費し、不変`List<Int>`へ変換する。別名・可変slice・closureを外へ逃がすことは拒否する。Err伝播/cancel/faultではbuilderを破棄し、不完全な値を公開しない。
+`builder`はblock内の一意な`ExclusiveCapability`（`update`）。正常終了時に`consume`して不変`List<Int>`へゼロコピーfreezeする。別名・可変slice・closureを外へ逃がすことはCapture Checkingにより拒否する。Err伝播/cancel/faultではbuilderを破棄し、不完全な値を公開しない。
 
 `var`によるローカル変数の再束縛は許すが、共有オブジェクトの可変性を意味しない。純粋関数内でも外から観測できないローカル構築は許す。
 
 `List`/`Map`/`Set`は不変APIと構造共有を基本とする。独占しているbacking storageを再利用できるbuilderではゼロコピーfreezeを行う。表現変換が必要な場合のコピー・ノード割当は許容し、性能報告へ記録する。永続データ構造全体の無割当や全操作のロックフリー性は保証しない。
 
-コレクションの所有権性質は要素から導出する。`List<Task<T>>`のようにaffine要素を含むListもaffineであり、共有コピー・永続分岐は禁止。消費iteration/mapは元のcontainerから要素をmoveする。要素がShareの場合だけ構造共有を許す。`List.map`はeagerで、左から右に一度ずつcallbackを実行する。
+コレクションの所有権性質は要素から導出する。`List<Task<T>>`のように`consume`必須要素を含むListも非`Copy`であり、共有コピー・永続分岐は禁止。消費iteration/mapは元のcontainerから要素を`consume`する。要素が`Share`の場合だけ構造共有を許す。`List.map`はeagerで、左から右に一度ずつcallbackを実行する。
 
 ### 3.3 Bytes・Slice・Arena
 
-- `Bytes<'a>`は、寿命`'a`の不変バイト列を参照するview。`Slice<'a,T>`も同様。寿命が推論可能なら省略できるが、所有する値と混同してはならない。
-- 不変view自体は寿命制約を保ったままCopyできるが、Send/Shareはbacking storageの属性に従う。
+- `Bytes<caps(a)>`は、所有者`a`（`Arena`や`OwnedBytes`）を捕捉する不変バイト列ビュー。`Slice<T, caps(a)>`も同様。Capture Checkingにより、`a`のスコープ外へ`Bytes<caps(a)>`を含む値を返却・脱出させることは静的に拒否される。
+- 不変view自体は寿命制約を保ったまま`Copy`できるが、`Send`/`Share`はbacking storageの属性に従う。
 - `OwnedBytes`は所有する不変バイト列。`asBytes()`のviewは所有者を超えて生存できない。
-- slice生成は境界を検査し`Result`を返す。範囲は`offset <= len`かつ`length <= len - offset`で検証し、加算のオーバーフローを避ける。
+- slice生成は境界を検査し`Result`を返す（`sliceExact`では範囲型`Long[0L..raw.len() - offset]`により境界エラーなし）。範囲は`offset <= len`かつ`length <= len - offset`で検証し、加算のオーバーフローを避ける。
 - viewは新しいpayloadコピーを行わないが、viewオブジェクト自体の割当消去はバックエンド依存。
-- `Arena`のメモリをviewが参照している間はcloseを拒否する。`scope`と統合したArenaでは子タスクの終了を待ってからcloseする。
-- thread-confined Arenaのviewは`Send`ではない。共有Arenaでも、読み取り専用公開と所有者の寿命を検査する。
+- `Arena`のメモリを`Bytes<caps(arena)>`が捕捉している間は`close(consume arena)`を拒否する。`scope`と統合したArenaでは子タスクの終了を待ってからcloseする。
+- thread-confined Arenaのviewは`Send`ではない。共有Arenaでも、読み取り専用公開（`read`）と所有者の捕捉寿命を検査する。
 - mutableなJava/native側の別名を残したまま不変Bytesへ変換してはならない。コピーするか、信頼された独占所有権移譲を必要とする。
 - 外へ返す場合は所有者も安全に移譲するか、`OwnedBytes`へ明示コピーする。寿命消去キャストは禁止。
 
@@ -538,7 +566,7 @@ val values = build (builder: MutableList<Int>) {
 
 ### 3.4 resourceとcleanup
 
-`defer`は取得成功後に登録し、逆順で全ての通常終了・早期終了・キャンセル・fault経路で実行する。登録時にcleanup用の借用または所有権を保持し、解放済みの対象への二重登録を拒否する。
+`defer`は取得成功後に登録し、逆順で全ての通常終了・早期終了・キャンセル・fault経路で実行する。登録時にcleanup用の`consume`権限または捕捉を保持し、解放済みの対象への二重登録を拒否する。
 
 cleanupが失敗可能なら、境界APIは`CleanupFailure`を戻り値のエラーに含める。既存の主エラーがある場合はcleanup失敗を付随情報として保持し、主エラーを上書きしない。失敗しても残りのcleanupを試みる。cleanupはキャンセル保留下で実行するが、外部I/Oには期限を必要とする。
 
@@ -546,11 +574,11 @@ DBのcommit/rollbackや支払い解放を、メモリ解放と同じ暗黙destru
 
 ## 4. EffectとCapability
 
-### 4.1 Effect集合
+### 4.1 Effect集合と局所純粋性
 
 ```scala
 public fn calculateFee(amount: Money) -> Money effects() { return ?fee; }
-public fn findUser(db: &DbRead<Users>, id: UserId)
+public fn findUser(db: read DbRead<Users>, id: UserId)
     -> Result<Option<User>, DbError> effects(DbRead) { return ?find_user; }
 ```
 
@@ -558,19 +586,20 @@ public fn findUser(db: &DbRead<Users>, id: UserId)
 
 信頼されたアダプターは複数の下位操作を、対象が限定されたドメインEffectにまとめられる（例: PaymentWrite）。manifestには下位操作・Capability・監査要件を残し、無制限な権限を隠さない。通常のアプリコードにはこのEffect再分類を許さない。
 
-式のEffectは実行され得る子式と呼び出し先Effectの和集合。分岐は両側の和集合。関数本体の推論結果は宣言上限の部分集合でなければならない。上位関数もclosureのEffectを保持する。純粋callbackを要求するAPIへ副作用付きclosureを渡せない。
+式のEffectは実行され得る子式と呼び出し先Effectの和集合。分岐は両側の和集合。関数本体の推論結果は宣言上限の部分集合でなければならない。上位関数もclosureのEffect・Capture Setを保持する。`effects()`かつ空capture setの純粋callbackを要求するAPI（`Secret<T>.map`や`List<T>.map`等）へ副作用付き・Capability捕捉付きclosureを渡せない（`NGJ-CAP-003`）。
 
-高階関数とEffect多相性は後続段階で定義する。初期の副作用検査は明示された有限集合の和集合・部分集合検査に限定する。callback本体のEffectも呼び出し元へ伝播し、forやforkへの移動で権限検査を迂回できない。
+高階関数のEffect/Capture伝播は、引数の関数型が宣言する`caps(...)`をそのまま捕捉する形で表現し、複雑なEffect Row変数を要求しない。callback本体のEffectも呼び出し元へ伝播し、forやforkへの移動で権限検査を迂回できない。
 
 `effects()`は停止性や無faultを意味しない。コンパイラ管理の計測は業務Effectと区別するが、公開/マスク済みデータのみを許し、権限や情報フロー検査を迂回しない。再現テストでは無効化または収集先を固定する。
 
-### 4.2 Capabilityとホストポリシー
+### 4.2 Capability・線形予算・ホストポリシー
 
 Effectは「操作の種類」、Capabilityは「どの対象に何を許すか」を表す。`FsRead<Root>`や`DbWrite<Tenant>`等は信頼されたホストだけが発行する不透明値。文字列、JSON、公開コンストラクターから生成できない。
 
 - Capabilityを持つだけでは操作しない。呼び出し側のEffect上限も満たす必要がある。
-- Capabilityの複製・共有可否は発行時の型に含める。単回承認はaffine、読み取り権限は必要に応じShare。
+- Capabilityの複製・共有可否は発行時の型に含める。単回承認は`consume`必須、読み取り権限は`read`（`Share`）。
 - 委譲は同じか狭い権限のみ。対象・期限・回数・操作の拡大は拒否する。
+- **線形分割可能な予算型 `Budget<Kind>`**: リトライ回数・API呼び出し回数・決済上限等の量的権限をアフィン資源`Budget<K>`として表現し、`split(consume b: Budget<K>, share: Long[0L..b.remaining()]) -> (Budget<K>, Budget<K>)`により範囲型と`consume`で残高保存（負値分割・二重消費・超過委譲の静的排除）を保証する。
 - パスや接続先が動的なら、実行境界でも検査する。パス正規化、symlink、redirect等を含む対象解決をアダプターの責務とし、単なる文字列prefix比較にしない。
 - 実行時の失効・期限切れ・ポリシー拒否は型付きエラー。ソースの注釈だけで許可しない。
 
@@ -580,9 +609,9 @@ Effectは「操作の種類」、Capabilityは「どの対象に何を許すか�
 
 ### 5.1 scope/fork/join
 
-`scope { body }`は字句的な子タスク群を所有する。`fork { body }`は原則として仮想スレッドを起動し、`Task<'scope,T>`を返す。ハンドルはscope外へ返せない。`fork`自体は孤児タスクを生成しない。
+`scope { body }`は字句的な子タスク群を所有する。`fork { body }`は原則として仮想スレッドを起動し、`Task<caps(scope), T>`を返す。ハンドルはscope外へ返せない。`fork`自体は孤児タスクを生成しない。
 
-JVMランタイム上では **Project Loom確定版である `StructuredTaskScope`（JEP 543, JDK 28確定 / JEP 505の`Joiner`合成モデル）** および **`ScopedValue`（JEP 506, JDK 25確定）** を直接のバックエンド基盤とする。`Task<T>.join()`は一度だけ消費し、`Result<T, TaskError>`を返す。子が`Result<U,E>`を返す場合、joinの結果は`Result<Result<U,E>,TaskError>`。専用`Joiner`によりタスク失敗（未捕捉例外 / `ExecutionException`）とドメイン失敗（`Result.Err`）を明確に分離し、暗黙に同一化しない。
+JVMランタイム上では **Project Loom確定版である `StructuredTaskScope`（JEP 543, JDK 28確定 / JEP 505の`Joiner`合成モデル）** および **`ScopedValue`（JEP 506, JDK 25確定）** を直接のバックエンド基盤とする。`Task<T>.join()`は一度だけ`consume`し、`Result<T, TaskError>`を返す。子が`Result<U,E>`を返す場合、joinの結果は`Result<Result<U,E>,TaskError>`。専用`Joiner`によりタスク失敗（未捕捉例外 / `ExecutionException`）とドメイン失敗（`Result.Err`）を明確に分離し、暗黙に同一化しない。
 
 | 経路 | 必須動作 |
 |---|---|
@@ -598,13 +627,30 @@ scope式の正常結果は`Result<T,ScopeError>`。明示joinした失敗は観�
 
 ### 5.2 Channelとactor
 
-`Channel<T>`は容量を必須とするbounded channel。満杯ならsendを待機し、キャンセル/closeを型付きエラーで返す。無制限bufferは明示的な別APIとする。`T: Send`を要求し、send成功時に所有権を移譲、失敗時は値を返す。`Share`な不変値の共有はpayloadコピー不要だが、キューの同期コストは存在する。
+`Channel<T>`は容量を必須とするbounded channel。満杯ならsendを待機し、キャンセル/closeを型付きエラーで返す。無制限bufferは明示的な別APIとする。`T: Send`を要求し、send成功時に`consume`で所有権を移譲、失敗時は値を返す。`Share`な不変値の共有はpayloadコピー不要だが、キューの同期コストは存在する。
 
 actorはmailboxから一件ずつ処理し、状態はactor内に閉じる。actor handleはメッセージ送信権限であり、可変状態の共有参照ではない。actorも親scopeに属し、終了・キャンセルを待機する。actorの初期実装ではメッセージ処理中の再入を認めない。相互待機によるdeadlockを型だけで排除するとは主張しない。
 
-### 5.3 Typestateと外部操作
+### 5.3 有限状態 `protocol` 型と外部操作
 
-`resource Reservation<State>`等で状態遷移を表す。`commit`と`release`は`Pending`を消費し、二重使用を拒否する。ただしaffine性だけでは「必ずcommit/releaseする」を保証しないため、未解決の業務resourceは`must_resolve`属性を持ち、全正常/エラー退出経路で解決か復旧記録への移譲を要求する。
+単一リソースのTypestate（`Reservation<State>`）および複数ステップの業務手順を一般化し、**決定可能な有限状態`protocol`型**を導入する。
+
+```scala
+public protocol PaymentFlow {
+    initial Start;
+    states FraudChecked, Approved;
+    final Committed, Rejected, EscalatedToRecovery;
+
+    transition checkFraud(Start) -> FraudChecked | Rejected effects(FraudRead);
+    transition authorize(FraudChecked) -> Approved | Rejected effects(PaymentWrite);
+    transition charge(Approved) -> Committed | EscalatedToRecovery effects(PaymentWrite);
+}
+```
+
+- **定義時検査**: コンパイラは`protocol`定義時に①初期状態からの到達性、②`final`状態集合の非空性、③すべての非`final`状態から少なくとも1つの`final`状態へ到達可能であること（デッドエンド不在）を決定的に検査する。
+- **インスタンス同一性と`must_resolve`**: 状態遷移操作は元の状態トークンを`consume`し（別名経由のstale呼び出しを禁止）、インスタンスに束縛されたパス依存型で別資源との取り違えを防ぐ。`must_resolve`資源はすべての正常・`?`早期リターン・エラー退出経路で`final`状態（`Committed`/`Released`/`EscalatedToRecovery(RecoveryToken)`等）への到達を要求する。
+- **プロトコル安全洗練（`refines`）**: `protocol Sub refines Super`に対し、有限状態空間上のトレース包含検査を行い、親プロトコルの必須ステップ（例: 不正検知や人間承認）をバイパスする遷移経路をコンパイル時に拒否する（`NGJ-PROTO-003`）。
+- **人間レビュー用状態図**: `ngjc inspect --protocol=<id> --format=mermaid`により、型検査済みプロトコルから決定的にMermaid `stateDiagram-v2`を出力する。
 
 ```text
 commit(Pending) -> Committed | Rejected(Pending) | Unknown(RecoveryToken)
@@ -623,39 +669,46 @@ release(Pending) -> Released | Unknown(RecoveryToken)
 
 forのbodyはcallback境界であり、body直下の`?`および`return`は拒否する（`NGJ-PROP-002`）。body内のwhileにもこの規則が及ぶ。検証結果を収集するなら`List<Result<T,E>>`を明示的に生成する。複数結果をまとめるtraverse等は標準ライブラリの型付き操作として追加する。独立したlambda内の`?`はそのlambdaだけから退出する。
 
-for callbackとlambdaは初期実装で外側のvarをcaptureできない（`NGJ-CAPTURE-001`）。valのcaptureにも所有権規則を適用する。body内で宣言したvarは使用可能。外側の状態を更新する繰り返しには、その関数内のwhileを使う。break/continue/非局所returnは初期対応に含めない。
+for callbackとlambdaは初期実装で外側のvarをcaptureできない（`NGJ-CAPTURE-001`）。valのcaptureにもCapture/Separation規則を適用する。body内で宣言したvarは使用可能。外側の状態を更新する繰り返しには、その関数内のwhileを使う。break/continue/非局所returnは初期対応に含めない。
 
 ## 6. 情報フロー・機密・出典
 
 `Secret<T>`は機密性、`Untrusted<T>`は未検証入力、`Verified<T,S>`は信頼境界を通じて得た出典/検証の証拠を表し、相互に代用しない。
 
-- Secretのmap/連結/シリアライズ結果にもラベルを伝播する。汎用`expose(): T`は提供しない。
-- ログ/OTel/JFRにはマスク済みの固定表現か公開値のみを送る。機密を含む例外文・診断・反例・Baggageにも同じ規則を適用する。
+- `Secret<T>`の`map`は空capture setの純粋関数（`effects()`）のみを受理し、クロージャ経由の外部漏洩を静的に遮断する。連結/シリアライズ結果にもラベルを伝播する。汎用`expose(): T`は提供しない。
+- ログ/OTel/JFRおよびAIエージェント向け診断出力にはマスク済みの固定表現（`Secret(****)`）か公開値のみを送る（人間向け端末チャネルとエージェント向けコンテキストチャネルを分離）。機密を含む例外文・診断・反例・Baggageにも同じ規則を適用する。
 - `declassify`にはホスト発行の用途・出力先に束縛されたCapabilityと理由を要求する。操作は監査対象。
 - hashや暗号化を一般的な「公開化」とみなさない。出力先に適した変換を信頼されたAPIとして指定する。
 - `Untrusted<T>`からの検証は`Result<Validated<T>,ValidationError>`。JSONをparseしただけで業務検証や権限を取得しない。
+- **選択的制御フロー権限保護（Selective PC-Guard）**: 完全なnoninterferenceやタイミング側信道は保証外とする一方、`Untrusted<T>`に依存する条件分岐（`if`/`match`/`while`）の制御下では、ホストポリシーで`privileged_effects`に指定された書き込み系Effect（`PaymentWrite`, `DbWrite`, `FsWrite`, `Net`, `Declassify`等）の直接呼び出しを拒否する（`NGJ-IFC-PC-001`）。特権操作の前には分岐外で`Validated<T>`への明示的検証を要求する。
+- **単一宣言からの境界バリデーション導出**: `@boundary_schema`を付与した`record`/`enum`から、JSON/バイナリ境界でのデコード、篩型の実行時検証、`Secret`マスク付きシリアライズを静的展開で自動生成し、サービス・エージェント境界での型/ラベル欠落を防ぐ。
 - 出典の保証を保持できない変換は`Verified`を落とす。AIが任意データに出典ラベルを付けられない。
 
-最初の実装は**明示的なデータフロー**を対象とする。機密を条件にした分岐・例外・実行時間などの暗黙フローと側信道は保証外。完全なnoninterferenceやprompt injection耐性を主張しない。program-counterラベル等は後段の検討項目。
+## 7. 契約・反例・Surface A/B/C 検証
 
-## 7. 契約・反例・検証
-
-後続段階の契約は署名末尾のrequires(condition)、ensures(condition)の順に記述する。`requires`は呼び出し前条件、`ensures`は正常な戻り値への後条件。resource invariantは公開操作の出入口で検査する。契約式は純粋で、検査中の副作用・機密出力を禁止する。検証対象の整数は実装のbit幅とoverflow意味論に合わせる。
+契約は署名末尾の`requires(condition)`、`ensures(condition)`の順に記述する。`requires`は呼び出し前条件、`ensures`は正常な戻り値への後条件。契約式は純粋で、検査中の副作用・機密出力を禁止する。検証対象の整数は実装のbit幅とoverflow意味論に合わせる。
 
 ```scala
-public fn checkedLength(n: Int) -> Result<Long, LengthError> effects()
-    ensures (match (result) {
+public spec predicate NonNegativeOk(res: Result<Long, LengthError>) {
+    match (res) {
         case Ok(v) => { v >= 0L },
         case Err(_) => { true }
-    })
+    }
+}
+
+public fn checkedLength(n: Int) -> Result<Long, LengthError> effects()
+    ensures (NonNegativeOk(result))
 {
     return if (n < 0) { Err(LengthError.Negative()) } else { Ok(n.toLong()) };
 }
 ```
 
-失敗し得る外部入力は原則`Result`で検証し、契約違反を通常の入力エラーに使わない。実行時の契約違反はfaultとして扱う。契約の評価がfaultになる場合も契約失敗であり、無条件成功にはしない。
-
-検証結果は義務ごとに`proved` / `runtime_checked` / `unproven`を返す。証明器のtimeout/unknownは`unproven`。テスト通過を`proved`に昇格しない。proof-required buildでは未証明を拒否し、それ以外は実行時検査を維持する。公開契約の削除・弱化はAPI変更として差分に表示する。
+- **仕様語彙と消去可能証明の分離**: 公開契約が参照する仕様を`spec fn` / `spec predicate`として分離し、ホストの凍結対象（`spec-drift`ゲート）に指定できるようにする。ループ不変条件`invariant (cond)`、中間証明ブロック`proof { ... }`、補助補題`lemma`、および証明穴`?proof_hole`は**JVMクラスファイル生成時に完全消去**され、実行コストを持たない。
+- **Surface A / B / C 三層検証報告**: 単一の`proved`指標による空虚な検証成功（Vacuous Verification）を防ぐため、検証結果を以下の3面で独立報告する（[AGENT_TOOLING.md](AGENT_TOOLING.md) 5節参照）：
+  - **Surface A（検証器受理）**: `proved` / `runtime_checked` / `unproven`（timeout/unknownは`unproven`）。
+  - **Surface B（構造的仕様拘束）**: 事前条件の非空虚性（矛盾検査）、凍結`spec`シンボルへの`ensures`拘束、回避構文（`assume`等）不在。
+  - **Surface C（意味的仕様忠実度）**: 事後条件を純粋JVMコードへコンパイルして負例テストを拒否できるか検証する**`Post2Exe`**、および決定的純粋関数に対する二回呼び出し強仕様証明／ミューテーション＋PBTによる**弱仕様証人生成（`ngjc certify-spec`）**。
+- **失敗時扱い**: 失敗し得る外部入力は原則`Result`で検証し、契約違反を通常の入力エラーに使わない。実行時の契約違反はfaultとして扱う。契約の評価がfaultになる場合も契約失敗であり、無条件成功にはしない。
 
 プロパティテストはseed、生成器version、縮小された反例、ツールチェーンIDを記録する。エージェントに渡すのは機密除去後の再現可能なケース。仕様・契約・hidden testsは実装生成対象と分離し、テストを消して成功扱いにしない。
 
@@ -697,10 +750,10 @@ Java呼び出しはversion/hash固定のアダプターを経由する。各メ�
 | 回復可能例外 | `Result<T, AdapterError>`へ明示mapping |
 | 割り込み | キャンセルとして伝播。通常の業務失敗へ黙って変換しない |
 | VM致命障害 | 成功値や通常Errに偽装しない |
-| 可変参照/配列 | resource/借用として扱うか防御的コピー |
+| 可変参照/配列 | `ExclusiveCapability`（`update`）/ `read`分離として扱うか防御的コピー |
 | reflection/native/dynamic loading | 信頼された許可と到達可能性情報を要する |
 
-全戻り値の一律Option化はしない。全例外の無損失・ゼロコスト変換も主張しない。未知のEffect/所有権をpureとして推論せず、未検証境界として拒否または隔離する。
+全戻り値の一律Option化はしない。全例外の無損失・ゼロコスト変換も主張しない。未知のEffect/所有権をpureとして推論せず、未検証境界として拒否または隔離する。Java標準ライブラリやサードパーティJARのアダプター作成では、Javadoc等の非形式文書から状態遷移・範囲制約を抽出し、生成した正負テストおよびバイトコード走査で適合検証した後に、人間承認とハッシュ固定マニフェストへ凍結するオフライン合成ワークフローを推奨する。
 
 ### 9.2 Strict AOTとunsafe（Integrity by Default連動）
 
@@ -812,13 +865,13 @@ val nested: Option<Option<Int>> = Some(Some(42));
 **Valhallaは基盤であり、Phase 4ではない。** 以下のフェーズはValhalla意味論を前提とする。
 
 1. **Phase 1:** `fn`/`record`/`enum`（代数的データ型）/`Result`/`Option`、`package`/`import`、型検査、関数`return`必須検査、**Valhalla value意味論**、Typed Holes、構造化診断、型文脈検索、**`match`網羅性検査**。Effect宣言を保存し、未実装の強制機能を黙って受理しない。
-2. **Phase 2:** Effect/Capability、所有権・freeze、Bytes/Arena、Java adapterの信頼境界、restricted build。小さい意味論モデルとnegative testsを先に用意する。
-3. **Phase 3:** scope/fork/Channel/actor、Typestate、契約・property tests、明示的情報フロー、OTel/JFR、逐次I/O replay。
-4. **Phase 4:** AOTレベル統合（Leyden/native-image互換性行列）、ジェネリック特殊化最適化、限定的証明器、AI生成の比較実験。
+2. **Phase 2:** Effect/Capture-Separation（`caps(...)`・`read`/`update`/`consume`・Safe Mode・`Secret.map`純粋性）、**第一級値篩型・整数範囲型（Tier 1: E-graph/QF-LIA/単調性解析）**、freeze、`Bytes`/`Arena`、Java adapterの信頼境界、restricted build、二層診断（`human`/`agent`）とTrust-First機械ゲート（`spec-drift`/`axiom-drift`/`sibling-check`）。小さい意味論モデルとnegative testsを先に用意する。
+3. **Phase 3:** `scope`/`fork`/`Channel`/`actor`、**有限状態`protocol`型（`refines`・Mermaid出力）・線形分割`Budget<K>`**、契約・property tests、明示的情報フロー + **Selective PC-Guard** + `@boundary_schema`、OTel/JFR、逐次I/O replay。
+4. **Phase 4:** AOTレベル統合（Leyden/native-image互換性行列）、ジェネリック特殊化最適化、限定的SMT証明器（Tier 2）・`spec`/`proof`/`lemma`/`?proof_hole`、**Surface A/B/C検証・`Post2Exe`・`ngjc certify-spec`**、AI生成の比較実験（条件E含む）。
 
 AOTレベル（JIT/Leyden/native-image）の統一的なUXとProject Leyden対応については[AOT設計方向](AOT.md)を参照。Phase 4以降の実装計画として位置づける。
 
-未決事項: 効果多相性の一般化範囲、actor supervisionの拡張、非字句借用、任意handler、暗黙情報フロー、並行replay、証明器の具体選定。未決機能を利用するソースは`unsupported_feature`として拒否し、実装済み保証と混在させない。
+未決事項: 高階`caps`多相の一般化範囲、actor supervisionの拡張、任意handler、並行replay、Tier 2 SMT証明器の具体選定。未決機能を利用するソースは`unsupported_feature`として拒否し、実装済み保証と混在させない。
 
 詳細は[MVP_COVERAGE.md](MVP_COVERAGE.md)を参照。
 

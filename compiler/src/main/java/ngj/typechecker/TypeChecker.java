@@ -3,54 +3,122 @@ package ngj.typechecker;
 import ngj.ast.*;
 import ngj.diagnostic.*;
 import ngj.HoleContext.Binding;
+import ngj.HoleContext.RelevantSymbol;
+import ngj.ir.TypedIR;
+import ngj.typechecker.protocol.ProtocolChecker;
 
 import java.util.*;
-import java.util.Set;
-import java.util.HashSet;
 
 /**
- * Type checking pass: verifies type consistency and collects hole contexts.
+ * Type checking pass: verifies type consistency, collects hole contexts,
+ * and orchestrates Phase 2-4 refinement, capability, protocol, IFC, and proof checkers.
  */
 public final class TypeChecker {
+    public record CheckOptions(
+        String profile,
+        String verifyMode,
+        String smtBackend,
+        Set<String> trustedAllowlist,
+        Set<String> privilegedEffects
+    ) {
+        public static CheckOptions defaults() {
+            return new CheckOptions("standard", "tier1", "jvm", Set.of(), IfcPcChecker.DEFAULT_PRIVILEGED_EFFECTS);
+        }
+    }
+
     private final List<Diagnostic> diagnostics = new ArrayList<>();
     private final Map<String, TypeInfo> typeEnv = new HashMap<>();
     private final Map<String, FnDecl> fnEnv = new HashMap<>();
+    private final Map<String, TypeAliasDecl> aliasEnv = new LinkedHashMap<>();
+    private final Map<String, ProtocolDecl> protocolEnv = new LinkedHashMap<>();
+    private final Map<String, SpecFnDecl> specFnEnv = new LinkedHashMap<>();
+    private final Map<String, LemmaDecl> lemmaEnv = new LinkedHashMap<>();
+    private final Set<String> boundarySchemaTypes = new LinkedHashSet<>();
     private final Deque<Map<String, TypeExpr>> scopes = new ArrayDeque<>();
     private final Deque<Set<String>> mutableVars = new ArrayDeque<>();
     private TypeExpr currentReturnType;
     private TypeExpr currentExpectedType;
     private List<String> currentEffects;
-    
+    private TypedIR typedIR = TypedIR.empty();
+
     public List<Diagnostic> getDiagnostics() {
         return diagnostics;
     }
-    
-    public void check(CompilationUnit unit) {
-        checkAll(List.of(unit));
+
+    public TypedIR getTypedIR() {
+        return typedIR;
     }
-    
+
+    public void check(CompilationUnit unit) {
+        checkAll(List.of(unit), CheckOptions.defaults());
+    }
+
     public void checkAll(List<CompilationUnit> units) {
+        checkAll(units, CheckOptions.defaults());
+    }
+
+    public void checkAll(List<CompilationUnit> units, CheckOptions options) {
+        CheckOptions opts = options != null ? options : CheckOptions.defaults();
+        diagnostics.clear();
+        typeEnv.clear();
+        fnEnv.clear();
+        aliasEnv.clear();
+        protocolEnv.clear();
+        specFnEnv.clear();
+        lemmaEnv.clear();
+        boundarySchemaTypes.clear();
+        stdlibFunctions.clear();
+
         // Register built-in types
         registerBuiltins();
-        
+
         // First pass: register type and function declarations across all units
         for (var unit : units) {
             for (var decl : unit.declarations()) {
                 registerDecl(decl);
             }
         }
-        
+
         // Second pass: type check bodies
         for (var unit : units) {
             for (var decl : unit.declarations()) {
                 checkDecl(decl);
             }
         }
+
+        // Phase 2-4 specialized checkers
+        var refinementChecker = new RefinementChecker();
+        refinementChecker.checkAll(units);
+        diagnostics.addAll(refinementChecker.getDiagnostics());
+
+        var capabilityChecker = new CapabilityChecker(opts.profile(), opts.trustedAllowlist());
+        capabilityChecker.checkAll(units);
+        diagnostics.addAll(capabilityChecker.getDiagnostics());
+
+        var protocolChecker = new ProtocolChecker();
+        protocolChecker.checkAll(units);
+        diagnostics.addAll(protocolChecker.getDiagnostics());
+
+        var ifcChecker = new IfcPcChecker(opts.privilegedEffects());
+        ifcChecker.checkAll(units);
+        diagnostics.addAll(ifcChecker.getDiagnostics());
+
+        var proofChecker = new ProofChecker(opts.profile(), opts.verifyMode(), opts.smtBackend());
+        proofChecker.checkAll(units);
+        diagnostics.addAll(proofChecker.getDiagnostics());
+
+        this.typedIR = new TypedIR(
+            aliasEnv,
+            protocolEnv,
+            protocolChecker.getAutomata(),
+            specFnEnv,
+            lemmaEnv,
+            boundarySchemaTypes
+        );
     }
-    
+
     private void registerBuiltins() {
         // VALUE-03: All numeric types are value types with structural equality
-        // No primitive/boxed distinction - Int/Long/Bool behave as value types
         typeEnv.put("Int", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
         typeEnv.put("Long", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
         typeEnv.put("Bool", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
@@ -59,36 +127,45 @@ public final class TypeChecker {
         typeEnv.put("Double", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
         typeEnv.put("String", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
         typeEnv.put("Unit", new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
-        
+
         // STDLIB-02/03: Option and Result are ordinary enums (value types)
-        // with standard ADT variants
         var optionVariants = List.of(
             new VariantInfo("Some", List.of(new FieldInfo("value", null))),
             new VariantInfo("None", List.of())
         );
         typeEnv.put("Option", new TypeInfo(TypeInfo.Kind.GENERIC_ENUM, optionVariants));
-        
+
         var resultVariants = List.of(
             new VariantInfo("Ok", List.of(new FieldInfo("value", null))),
             new VariantInfo("Err", List.of(new FieldInfo("error", null)))
         );
         typeEnv.put("Result", new TypeInfo(TypeInfo.Kind.GENERIC_ENUM, resultVariants));
-        
+
         // STDLIB-04: List is a value type generic collection
         typeEnv.put("List", new TypeInfo(TypeInfo.Kind.GENERIC_VALUE, List.of("T")));
-        
+
+        // Phase 2-4 built-in types, capabilities, effects, and errors
+        for (String name : List.of(
+            "Secret", "Untrusted", "Validated", "Arena", "OwnedBytes", "Bytes",
+            "Slice", "Task", "MutableList", "Budget", "Pair",
+            "DbRead", "DbWrite", "FsRead", "FsWrite", "Net", "PaymentWrite", "Declassify",
+            "RefinementError", "ValidationError", "TaskError", "ScopeError", "MathInt"
+        )) {
+            typeEnv.put(name, new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+        }
+
         // Standard error types
         var overflowVariants = List.of(
             new VariantInfo("IntOverflow", List.of()),
             new VariantInfo("LongOverflow", List.of())
         );
         typeEnv.put("OverflowError", new TypeInfo(TypeInfo.Kind.ENUM, overflowVariants));
-        
+
         var rangeVariants = List.of(
             new VariantInfo("OutOfRange", List.of(new FieldInfo("message", new SimpleTypeExpr("String", null))))
         );
         typeEnv.put("RangeError", new TypeInfo(TypeInfo.Kind.ENUM, rangeVariants));
-        
+
         var indexVariants = List.of(
             new VariantInfo("IndexOutOfBounds", List.of(
                 new FieldInfo("index", new SimpleTypeExpr("Int", null)),
@@ -96,13 +173,12 @@ public final class TypeChecker {
             ))
         );
         typeEnv.put("IndexError", new TypeInfo(TypeInfo.Kind.ENUM, indexVariants));
-        
+
         // Register standard library functions
         registerStdlibFunctions();
     }
-    
+
     private void registerStdlibFunctions() {
-        // STDLIB-07: Checked arithmetic operations that return Result
         stdlibFunctions.put("checkedAdd", new StdlibFn(
             List.of("Int", "Int"),
             new GenericTypeExpr("Result", List.of(
@@ -124,15 +200,12 @@ public final class TypeChecker {
                 new SimpleTypeExpr("OverflowError", null)
             ), null)
         ));
-        
-        // STDLIB-08: List.get returns Option (not null)
-        // Note: Method calls on List are handled specially in checkMethodCall
     }
-    
+
     private final Map<String, StdlibFn> stdlibFunctions = new HashMap<>();
-    
+
     public record StdlibFn(List<String> paramTypes, TypeExpr returnType) {}
-    
+
     private void registerDecl(TopLevelDecl decl) {
         switch (decl) {
             case DataDecl data -> {
@@ -146,6 +219,9 @@ public final class TypeChecker {
                     .map(p -> new FieldInfo(p.name(), p.type()))
                     .toList();
                 typeEnv.put(record.name(), new TypeInfo(TypeInfo.Kind.DATA, fields));
+                if (record.annotations().stream().anyMatch(a -> a.name().equals("boundary_schema"))) {
+                    boundarySchemaTypes.add(record.name());
+                }
             }
             case EnumDecl enumDecl -> {
                 var variants = enumDecl.variants().stream()
@@ -154,50 +230,71 @@ public final class TypeChecker {
                         .toList()))
                     .toList();
                 typeEnv.put(enumDecl.name(), new TypeInfo(TypeInfo.Kind.ENUM, variants));
+                if (enumDecl.annotations().stream().anyMatch(a -> a.name().equals("boundary_schema"))) {
+                    boundarySchemaTypes.add(enumDecl.name());
+                }
             }
             case FnDecl fn -> fnEnv.put(fn.name(), fn);
+            case TypeAliasDecl alias -> {
+                aliasEnv.put(alias.name(), alias);
+                typeEnv.put(alias.name(), new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+            }
+            case ProtocolDecl protocol -> {
+                protocolEnv.put(protocol.name(), protocol);
+                typeEnv.put(protocol.name(), new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+                if (protocol.initialState() != null && !protocol.initialState().isEmpty()) {
+                    typeEnv.putIfAbsent(protocol.initialState(), new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+                }
+                for (var st : protocol.states()) {
+                    typeEnv.putIfAbsent(st, new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+                }
+                for (var fst : protocol.finalStates()) {
+                    typeEnv.putIfAbsent(fst, new TypeInfo(TypeInfo.Kind.VALUE_TYPE, List.of()));
+                }
+            }
+            case SpecFnDecl specFn -> specFnEnv.put(specFn.name(), specFn);
+            case LemmaDecl lemma -> lemmaEnv.put(lemma.name(), lemma);
         }
     }
-    
+
     private void checkDecl(TopLevelDecl decl) {
         switch (decl) {
             case FnDecl fn -> checkFn(fn);
             case DataDecl data -> checkData(data);
             case RecordDecl record -> checkRecord(record);
             case EnumDecl enumDecl -> checkEnum(enumDecl);
+            case TypeAliasDecl alias -> checkTypeExists(alias.targetType());
+            case ProtocolDecl _ -> {}
+            case SpecFnDecl _ -> {}
+            case LemmaDecl _ -> {}
         }
     }
-    
+
     private void checkRecord(RecordDecl record) {
+        pushScope();
         for (var param : record.params()) {
             checkTypeExists(param.type());
+            addLocal(param.name(), param.type(), false);
         }
+        popScope();
     }
-    
+
     private void checkFn(FnDecl fn) {
         pushScope();
         currentReturnType = fn.returnType();
         currentExpectedType = fn.returnType();
         currentEffects = fn.effects();
-        
-        // Check effect bound (MVP only allows empty)
-        if (!fn.effects().isEmpty()) {
-            diagnostics.add(Diagnostic.error(
-                "NGJ-EFFECT-001",
-                "Non-empty effect bound not supported in MVP: effects(" + String.join(", ", fn.effects()) + ")",
-                fn.span()
-            ));
-        }
-        
-        // Add parameters to scope
+
+        // Add parameters to scope (left-to-right for dependent bounds)
         for (var param : fn.params()) {
+            checkTypeExists(param.type());
             addLocal(param.name(), param.type());
         }
-        
+
         // Check body
         var bodyType = checkBlock(fn.body());
         boolean isUnitReturn = getTypeName(fn.returnType()).equals("Unit");
-        
+
         if (!isUnitReturn) {
             if (fn.body().tailExpr() instanceof HoleExpr) {
                 // Typed hole at function body level is incomplete, not a missing return error
@@ -236,7 +333,7 @@ public final class TypeChecker {
                 ));
             }
         }
-        
+
         popScope();
         currentReturnType = null;
         currentExpectedType = null;
@@ -478,6 +575,22 @@ public final class TypeChecker {
                     ));
                 }
             }
+            case TupleDestructureStmt destruct -> {
+                var initType = checkExpr(destruct.initializer());
+                for (int i = 0; i < destruct.names().size(); i++) {
+                    TypeExpr elemType = i < destruct.explicitTypes().size() ? destruct.explicitTypes().get(i) : null;
+                    if (elemType == null && initType instanceof TupleTypeExpr tup && i < tup.elements().size()) {
+                        elemType = tup.elements().get(i);
+                    }
+                    if (elemType != null) {
+                        checkTypeExists(elemType);
+                    }
+                    addLocal(destruct.names().get(i), elemType, false);
+                }
+            }
+            case InvariantStmt inv -> checkExpr(inv.condition());
+            case ProofStmt proof -> checkBlock(proof.body());
+            case AssumeStmt assume -> checkExpr(assume.condition());
         }
     }
     
@@ -497,22 +610,34 @@ public final class TypeChecker {
                 // Record hole context for context retrieval
                 hole.setExpectedType(currentExpectedType != null ? currentExpectedType : currentReturnType);
                 hole.setAllowedEffects(currentEffects != null ? currentEffects : List.of());
-                
-                // Add bindings from current scope
+
+                // Add bindings from current scope with capability_mode
                 for (var scope : scopes) {
                     for (var entry : scope.entrySet()) {
                         if (entry.getValue() != null) {
-                            hole.addBinding(new Binding(entry.getKey(), entry.getValue(), "owned"));
+                            String capMode = capabilityModeOf(entry.getKey(), entry.getValue());
+                            hole.addBinding(new Binding(entry.getKey(), entry.getValue(), capMode));
                         }
                     }
                 }
-                
-                diagnostics.add(Diagnostic.incomplete(
-                    "NGJ-HOLE-001",
-                    "Unresolved hole: ?" + hole.name(),
-                    hole.span()
-                ));
-                
+
+                if (hole.isProofHole()) {
+                    for (var spec : specFnEnv.values()) {
+                        hole.addRelevantSymbol(new RelevantSymbol(
+                            spec.name(), "spec fn " + spec.name() + "(...)", "spec", "sha256:spec"));
+                    }
+                    for (var lemma : lemmaEnv.values()) {
+                        hole.addRelevantSymbol(new RelevantSymbol(
+                            lemma.name(), "lemma " + lemma.name() + "(...)", "lemma", "sha256:lemma"));
+                    }
+                } else {
+                    diagnostics.add(Diagnostic.incomplete(
+                        "NGJ-HOLE-001",
+                        "Unresolved hole: ?" + hole.name(),
+                        hole.span()
+                    ));
+                }
+
                 yield null; // Type unknown
             }
             
@@ -805,6 +930,34 @@ public final class TypeChecker {
                             }
                         }
                         yield new GenericTypeExpr("Result", List.of(), call.span());
+                    } else if (name.equals("refine")) {
+                        for (var arg : call.args()) checkExpr(arg);
+                        TypeExpr target = !call.typeArgs().isEmpty()
+                            ? call.typeArgs().get(0)
+                            : new SimpleTypeExpr("_", call.span());
+                        yield new GenericTypeExpr("Result",
+                            List.of(target, new SimpleTypeExpr("RefinementError", call.span())),
+                            call.span());
+                    } else if (name.equals("validate")) {
+                        var argType = !call.args().isEmpty() ? checkExpr(call.args().get(0)) : null;
+                        TypeExpr inner = argType instanceof GenericTypeExpr g && g.name().equals("Untrusted") && !g.typeArgs().isEmpty()
+                            ? g.typeArgs().get(0)
+                            : new SimpleTypeExpr("_", call.span());
+                        yield new GenericTypeExpr("Result",
+                            List.of(new GenericTypeExpr("Validated", List.of(inner), call.span()),
+                                new SimpleTypeExpr("ValidationError", call.span())),
+                            call.span());
+                    } else if (name.equals("Validated")) {
+                        var argType = !call.args().isEmpty() ? checkExpr(call.args().get(0)) : null;
+                        yield new GenericTypeExpr("Validated",
+                            List.of(argType != null ? argType : new SimpleTypeExpr("_", call.span())),
+                            call.span());
+                    } else if (name.equals("declassify")) {
+                        var argType = !call.args().isEmpty() ? checkExpr(call.args().get(0)) : null;
+                        if (argType instanceof GenericTypeExpr g && g.name().equals("Secret") && !g.typeArgs().isEmpty()) {
+                            yield g.typeArgs().get(0);
+                        }
+                        yield argType;
                     } else if (fnEnv.containsKey(name)) {
                         var fn = fnEnv.get(name);
                         if (call.args().size() != fn.params().size()) {
@@ -922,6 +1075,12 @@ public final class TypeChecker {
                     }
                 }
                 
+                var calleeType = call.callee() instanceof FieldAccessExpr fa
+                    ? checkMethodCallReturnType(fa, call)
+                    : null;
+                if (calleeType != null) {
+                    yield calleeType;
+                }
                 checkExpr(call.callee());
                 for (var arg : call.args()) {
                     checkExpr(arg);
@@ -983,6 +1142,36 @@ public final class TypeChecker {
             case WhileExpr whileExpr -> checkWhileExpr(whileExpr);
             
             case LambdaExpr lambda -> checkLambdaExpr(lambda);
+
+            case ScopeExpr scope -> {
+                var bodyType = checkBlock(scope.body());
+                if (bodyType instanceof GenericTypeExpr g && g.name().equals("Result")
+                    && g.typeArgs().size() >= 2 && getTypeName(g.typeArgs().get(1)).equals("ScopeError")) {
+                    yield bodyType;
+                }
+                yield new GenericTypeExpr("Result",
+                    List.of(bodyType != null ? bodyType : new UnitTypeExpr(scope.span()),
+                        new SimpleTypeExpr("ScopeError", scope.span())),
+                    scope.span());
+            }
+
+            case ForkExpr fork -> {
+                var bodyType = checkBlock(fork.body());
+                yield new GenericTypeExpr("Task",
+                    List.of(bodyType != null ? bodyType : new UnitTypeExpr(fork.span())),
+                    fork.span());
+            }
+
+            case ConsumeExpr consume -> checkExpr(consume.target());
+
+            case TupleExpr tuple -> {
+                List<TypeExpr> elemTypes = new ArrayList<>();
+                for (var elem : tuple.elements()) {
+                    var t = checkExpr(elem);
+                    elemTypes.add(t != null ? t : new SimpleTypeExpr("_", elem.span()));
+                }
+                yield new TupleTypeExpr(elemTypes, tuple.span());
+            }
         };
     }
     
@@ -1077,6 +1266,8 @@ public final class TypeChecker {
             case AssignStmt assign -> checkExprForOuterVarCapture(assign.value(), outerVars);
             case LetStmt let -> checkExprForOuterVarCapture(let.initializer(), outerVars);
             case ReturnStmt ret -> { if (ret.value() != null) checkExprForOuterVarCapture(ret.value(), outerVars); }
+            case TupleDestructureStmt td -> checkExprForOuterVarCapture(td.initializer(), outerVars);
+            case InvariantStmt _, ProofStmt _, AssumeStmt _ -> {}
         }
     }
     
@@ -1147,6 +1338,8 @@ public final class TypeChecker {
                 ));
                 if (ret.value() != null) checkExprForPropagate(ret.value(), forSpan);
             }
+            case TupleDestructureStmt td -> checkExprForPropagate(td.initializer(), forSpan);
+            case InvariantStmt _, ProofStmt _, AssumeStmt _ -> {}
         }
     }
     
@@ -1332,6 +1525,9 @@ public final class TypeChecker {
     private TypeExpr checkIfExpr(IfExpr ifExpr) {
         var savedExpected = currentExpectedType;
         var condType = checkExprWithExpected(ifExpr.condition(), new SimpleTypeExpr("Bool", ifExpr.condition().span()));
+        if (condType instanceof GenericTypeExpr g && g.name().equals("Validated") && !g.typeArgs().isEmpty()) {
+            condType = g.typeArgs().get(0);
+        }
         if (condType != null && !getTypeName(condType).equals("Bool")) {
             diagnostics.add(Diagnostic.error(
                 "NGJ-TYPE-010",
@@ -1555,6 +1751,7 @@ public final class TypeChecker {
     }
     
     private void checkTypeExists(TypeExpr type) {
+        if (type == null) return;
         switch (type) {
             case SimpleTypeExpr simple -> {
                 if (!typeEnv.containsKey(simple.name())) {
@@ -1573,27 +1770,189 @@ public final class TypeChecker {
                         generic.span()
                     ));
                 }
-                for (var arg : generic.typeArgs()) {
-                    checkTypeExists(arg);
+                if (!generic.name().equals("Budget")) {
+                    for (var arg : generic.typeArgs()) {
+                        checkTypeExists(arg);
+                    }
                 }
             }
             case UnitTypeExpr _ -> {}
+            case CapabilityTypeExpr cap -> checkTypeExists(cap.inner());
+            case CaptureSetTypeExpr _ -> {}
+            case RefinedTypeExpr ref -> checkTypeExists(ref.baseType());
+            case RangeTypeExpr range -> checkTypeExists(range.baseType());
+            case FunctionTypeExpr fnType -> {
+                for (var p : fnType.paramTypes()) checkTypeExists(p);
+                checkTypeExists(fnType.returnType());
+            }
+            case TupleTypeExpr tuple -> {
+                for (var elem : tuple.elements()) checkTypeExists(elem);
+            }
         }
     }
-    
+
+    private TypeExpr checkMethodCallReturnType(FieldAccessExpr fa, CallExpr call) {
+        String method = fa.fieldName();
+        TypeExpr objType = checkExpr(fa.object());
+        for (var arg : call.args()) {
+            checkExpr(arg);
+        }
+        String objTypeName = objType != null ? getTypeName(objType) : "";
+        String staticTarget = fa.object() instanceof IdentExpr id ? id.name() : "";
+
+        if (staticTarget.equals("Arena")) {
+            if (method.equals("new")) return new SimpleTypeExpr("Arena", call.span());
+            if (method.equals("close")) return new UnitTypeExpr(call.span());
+        }
+        if (staticTarget.equals("Budget")) {
+            if (method.equals("split")) {
+                TypeExpr firstArgType = !call.args().isEmpty() ? checkExpr(call.args().get(0)) : null;
+                TypeExpr bType = firstArgType != null ? firstArgType : new SimpleTypeExpr("Budget", call.span());
+                return new GenericTypeExpr("Pair", List.of(bType, bType), call.span());
+            }
+            if (method.equals("mint")) {
+                TypeExpr kind = !call.typeArgs().isEmpty() ? call.typeArgs().get(0) : new SimpleTypeExpr("_", call.span());
+                return new GenericTypeExpr("Budget", List.of(kind), call.span());
+            }
+        }
+        if (staticTarget.equals("Secret") && method.equals("map") && call.args().size() >= 2) {
+            TypeExpr fnType = checkExpr(call.args().get(1));
+            return new GenericTypeExpr("Secret",
+                List.of(fnType != null ? fnType : new SimpleTypeExpr("_", call.span())),
+                call.span());
+        }
+        if (staticTarget.equals("Secret") && method.equals("expose") && !call.args().isEmpty()) {
+            TypeExpr secType = checkExpr(call.args().get(0));
+            if (secType instanceof GenericTypeExpr g && !g.typeArgs().isEmpty()) {
+                return g.typeArgs().get(0);
+            }
+        }
+        if (staticTarget.equals("List") && method.equals("map") && call.args().size() >= 2) {
+            TypeExpr fnType = checkExpr(call.args().get(1));
+            return new GenericTypeExpr("List",
+                List.of(fnType != null ? fnType : new SimpleTypeExpr("_", call.span())),
+                call.span());
+        }
+        if (staticTarget.equals("List") && method.equals("filter") && !call.args().isEmpty()) {
+            return checkExpr(call.args().get(0));
+        }
+        if (protocolEnv.containsKey(staticTarget)) {
+            var proto = protocolEnv.get(staticTarget);
+            String knownFromState = null;
+            if (!call.args().isEmpty()) {
+                TypeExpr argType = checkExpr(call.args().get(0));
+                if (argType instanceof CapabilityTypeExpr cap) argType = cap.inner();
+                if (argType instanceof GenericTypeExpr g && !g.typeArgs().isEmpty()
+                    && g.typeArgs().get(0) instanceof SimpleTypeExpr st) {
+                    knownFromState = st.name();
+                }
+            }
+            ProtocolDecl.Transition matched = null;
+            for (var t : proto.transitions()) {
+                if (!t.name().equals(method)) continue;
+                if (knownFromState != null && t.fromState().equals(knownFromState)) {
+                    matched = t;
+                    break;
+                }
+                if (matched == null) {
+                    matched = t;
+                }
+            }
+            if (matched != null) {
+                return new GenericTypeExpr(staticTarget,
+                    List.of(new SimpleTypeExpr(matched.toState(), call.span())),
+                    call.span());
+            }
+            return new SimpleTypeExpr(staticTarget, call.span());
+        }
+        if (protocolEnv.containsKey(objTypeName)) {
+            var proto = protocolEnv.get(objTypeName);
+            for (var t : proto.transitions()) {
+                if (t.name().equals(method)) {
+                    return new GenericTypeExpr(objTypeName,
+                        List.of(new SimpleTypeExpr(t.toState(), call.span())),
+                        call.span());
+                }
+            }
+            return new SimpleTypeExpr(objTypeName, call.span());
+        }
+        if (method.equals("len") || method.equals("remaining") || method.equals("toLong")) {
+            return new SimpleTypeExpr("Long", call.span());
+        }
+        if (method.equals("toInt")) {
+            return new SimpleTypeExpr("Int", call.span());
+        }
+        if (method.equals("asBytes") || method.equals("slice") || method.equals("sliceExact")) {
+            if (fa.object() instanceof IdentExpr id) {
+                return new GenericTypeExpr("Bytes",
+                    List.of(new CaptureSetTypeExpr(List.of(id.name()), call.span())),
+                    call.span());
+            }
+            return new SimpleTypeExpr("Bytes", call.span());
+        }
+        if (method.equals("join") && objType instanceof GenericTypeExpr g && g.name().equals("Task")
+            && !g.typeArgs().isEmpty()) {
+            return new GenericTypeExpr("Result",
+                List.of(g.typeArgs().get(0), new SimpleTypeExpr("TaskError", call.span())),
+                call.span());
+        }
+        if (method.equals("split") && objTypeName.equals("Budget")) {
+            return new GenericTypeExpr("Pair", List.of(objType, objType), call.span());
+        }
+        return null;
+    }
+
+    private TypeExpr unwrapAndExpand(TypeExpr type, Set<String> visiting) {
+        if (type == null) return null;
+        return switch (type) {
+            case SimpleTypeExpr s -> {
+                var alias = aliasEnv.get(s.name());
+                if (alias != null && visiting.add(s.name())) {
+                    yield unwrapAndExpand(alias.targetType(), visiting);
+                }
+                yield s;
+            }
+            case GenericTypeExpr g -> {
+                var alias = aliasEnv.get(g.name());
+                if (alias != null && visiting.add(g.name())) {
+                    yield unwrapAndExpand(alias.targetType(), visiting);
+                }
+                yield g;
+            }
+            case CapabilityTypeExpr c -> unwrapAndExpand(c.inner(), visiting);
+            case RefinedTypeExpr r -> unwrapAndExpand(r.baseType(), visiting);
+            case RangeTypeExpr r -> unwrapAndExpand(r.baseType(), visiting);
+            default -> type;
+        };
+    }
+
     private boolean isAssignable(TypeExpr target, TypeExpr source) {
         if (target == null || source == null) return true;
-        
-        var targetName = getTypeName(target);
-        var sourceName = getTypeName(source);
-        
+
+        var expTarget = unwrapAndExpand(target, new HashSet<>());
+        var expSource = unwrapAndExpand(source, new HashSet<>());
+
+        var targetName = getTypeName(expTarget);
+        var sourceName = getTypeName(expSource);
+
         // Wildcard type `_` matches anything
         if (targetName.equals("_") || sourceName.equals("_")) {
             return true;
         }
-        
+
+        if (expTarget instanceof TupleTypeExpr t1 && expSource instanceof TupleTypeExpr t2) {
+            if (t1.elements().size() != t2.elements().size()) return false;
+            for (int i = 0; i < t1.elements().size(); i++) {
+                if (!isAssignable(t1.elements().get(i), t2.elements().get(i))) return false;
+            }
+            return true;
+        }
+
         if (targetName.equals(sourceName)) {
-            if (target instanceof GenericTypeExpr targetGen && source instanceof GenericTypeExpr sourceGen) {
+            if (targetName.equals("Budget") || targetName.equals("Bytes")) {
+                return true;
+            }
+            if (expTarget instanceof GenericTypeExpr targetGen && expSource instanceof GenericTypeExpr sourceGen) {
                 if (targetGen.typeArgs().size() != sourceGen.typeArgs().size()) return false;
                 for (int i = 0; i < targetGen.typeArgs().size(); i++) {
                     if (!isAssignable(targetGen.typeArgs().get(i), sourceGen.typeArgs().get(i))) {
@@ -1603,16 +1962,36 @@ public final class TypeChecker {
             }
             return true;
         }
-        
+
         return false;
     }
-    
+
     private String getTypeName(TypeExpr type) {
+        if (type == null) return "";
         return switch (type) {
-            case SimpleTypeExpr simple -> simple.name();
+            case SimpleTypeExpr simple -> {
+                var alias = aliasEnv.get(simple.name());
+                yield alias != null ? getTypeName(alias.targetType()) : simple.name();
+            }
             case GenericTypeExpr generic -> generic.name();
             case UnitTypeExpr _ -> "Unit";
+            case CapabilityTypeExpr cap -> getTypeName(cap.inner());
+            case CaptureSetTypeExpr _ -> "caps";
+            case RefinedTypeExpr ref -> getTypeName(ref.baseType());
+            case RangeTypeExpr range -> getTypeName(range.baseType());
+            case FunctionTypeExpr _ -> "Function";
+            case TupleTypeExpr _ -> "Tuple";
         };
+    }
+
+    private String capabilityModeOf(String name, TypeExpr type) {
+        if (type instanceof CapabilityTypeExpr cap) {
+            return cap.mode() == CapabilityTypeExpr.CapabilityMode.READ ? "read" : "update";
+        }
+        if (isMutable(name)) {
+            return "update";
+        }
+        return "owned";
     }
     
     private void pushScope() {

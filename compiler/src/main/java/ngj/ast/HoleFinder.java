@@ -1,5 +1,7 @@
 package ngj.ast;
 
+import java.util.List;
+
 /**
  * Utility for finding holes in AST.
  */
@@ -26,16 +28,41 @@ public final class HoleFinder {
     
     private boolean hasHolesInDecl(TopLevelDecl decl) {
         return switch (decl) {
-            case FnDecl fn -> hasHolesInExpr(fn.body());
-            case DataDecl _, EnumDecl _, RecordDecl _ -> false;
+            case FnDecl fn -> hasHolesInContracts(fn.contracts()) || hasHolesInExpr(fn.body());
+            case SpecFnDecl specFn -> hasHolesInExpr(specFn.body());
+            case LemmaDecl lemma -> hasHolesInContracts(lemma.contracts()) || hasHolesInExpr(lemma.body());
+            case DataDecl _, EnumDecl _, RecordDecl _, TypeAliasDecl _, ProtocolDecl _ -> false;
         };
+    }
+
+    private boolean hasHolesInContracts(List<ContractClause> contracts) {
+        for (var c : contracts) {
+            if (hasHolesInExpr(c.condition())) return true;
+        }
+        return false;
     }
     
     private HoleExpr findHoleInDecl(TopLevelDecl decl, String holeId) {
         return switch (decl) {
-            case FnDecl fn -> findHoleInExpr(fn.body(), holeId);
-            case DataDecl _, EnumDecl _, RecordDecl _ -> null;
+            case FnDecl fn -> {
+                var inContracts = findHoleInContracts(fn.contracts(), holeId);
+                yield inContracts != null ? inContracts : findHoleInExpr(fn.body(), holeId);
+            }
+            case SpecFnDecl specFn -> findHoleInExpr(specFn.body(), holeId);
+            case LemmaDecl lemma -> {
+                var inContracts = findHoleInContracts(lemma.contracts(), holeId);
+                yield inContracts != null ? inContracts : findHoleInExpr(lemma.body(), holeId);
+            }
+            case DataDecl _, EnumDecl _, RecordDecl _, TypeAliasDecl _, ProtocolDecl _ -> null;
         };
+    }
+
+    private HoleExpr findHoleInContracts(List<ContractClause> contracts, String holeId) {
+        for (var c : contracts) {
+            var found = findHoleInExpr(c.condition(), holeId);
+            if (found != null) return found;
+        }
+        return null;
     }
     
     private boolean hasHolesInExpr(Expr expr) {
@@ -83,8 +110,19 @@ public final class HoleFinder {
             case PropagateExpr prop -> hasHolesInExpr(prop.inner());
             case ParenExpr paren -> hasHolesInExpr(paren.inner());
             case ForExpr forExpr -> hasHolesInExpr(forExpr.iterable()) || hasHolesInExpr(forExpr.body());
-            case WhileExpr whileExpr -> hasHolesInExpr(whileExpr.condition()) || hasHolesInExpr(whileExpr.body());
+            case WhileExpr whileExpr -> hasHolesInExpr(whileExpr.condition())
+                || (whileExpr.invariant() != null && hasHolesInExpr(whileExpr.invariant()))
+                || hasHolesInExpr(whileExpr.body());
             case LambdaExpr lambda -> hasHolesInExpr(lambda.body());
+            case ScopeExpr scope -> hasHolesInExpr(scope.body());
+            case ForkExpr fork -> hasHolesInExpr(fork.body());
+            case ConsumeExpr consume -> hasHolesInExpr(consume.target());
+            case TupleExpr tuple -> {
+                for (var el : tuple.elements()) {
+                    if (hasHolesInExpr(el)) yield true;
+                }
+                yield false;
+            }
         };
     }
     
@@ -96,6 +134,10 @@ public final class HoleFinder {
             case AssignStmt assign -> hasHolesInExpr(assign.value());
             case ExprStmt expr -> hasHolesInExpr(expr.expr());
             case ReturnStmt ret -> ret.value() != null && hasHolesInExpr(ret.value());
+            case TupleDestructureStmt tuple -> hasHolesInExpr(tuple.initializer());
+            case InvariantStmt inv -> hasHolesInExpr(inv.condition());
+            case ProofStmt proof -> hasHolesInExpr(proof.body());
+            case AssumeStmt assume -> hasHolesInExpr(assume.condition());
         };
     }
     
@@ -158,9 +200,24 @@ public final class HoleFinder {
             }
             case WhileExpr whileExpr -> {
                 var cond = findHoleInExpr(whileExpr.condition(), holeId);
-                yield cond != null ? cond : findHoleInExpr(whileExpr.body(), holeId);
+                if (cond != null) yield cond;
+                if (whileExpr.invariant() != null) {
+                    var inv = findHoleInExpr(whileExpr.invariant(), holeId);
+                    if (inv != null) yield inv;
+                }
+                yield findHoleInExpr(whileExpr.body(), holeId);
             }
             case LambdaExpr lambda -> findHoleInExpr(lambda.body(), holeId);
+            case ScopeExpr scope -> findHoleInExpr(scope.body(), holeId);
+            case ForkExpr fork -> findHoleInExpr(fork.body(), holeId);
+            case ConsumeExpr consume -> findHoleInExpr(consume.target(), holeId);
+            case TupleExpr tuple -> {
+                for (var el : tuple.elements()) {
+                    var found = findHoleInExpr(el, holeId);
+                    if (found != null) yield found;
+                }
+                yield null;
+            }
         };
     }
     
@@ -172,6 +229,10 @@ public final class HoleFinder {
             case AssignStmt assign -> findHoleInExpr(assign.value(), holeId);
             case ExprStmt expr -> findHoleInExpr(expr.expr(), holeId);
             case ReturnStmt ret -> ret.value() != null ? findHoleInExpr(ret.value(), holeId) : null;
+            case TupleDestructureStmt tuple -> findHoleInExpr(tuple.initializer(), holeId);
+            case InvariantStmt inv -> findHoleInExpr(inv.condition(), holeId);
+            case ProofStmt proof -> findHoleInExpr(proof.body(), holeId);
+            case AssumeStmt assume -> findHoleInExpr(assume.condition(), holeId);
         };
     }
 }

@@ -112,6 +112,24 @@ public final class NameResolver {
         globalSymbols.put("getOrElse", new Symbol("getOrElse", Symbol.Kind.FUNCTION, true));
         globalSymbols.put("toOption", new Symbol("toOption", Symbol.Kind.FUNCTION, true));
         globalSymbols.put("toResult", new Symbol("toResult", Symbol.Kind.FUNCTION, true));
+
+        // Phase 2-4 stdlib, capability, effect, and verification types
+        for (String typeName : List.of(
+            "Secret", "Untrusted", "Validated", "Arena", "OwnedBytes", "Bytes",
+            "Slice", "Task", "MutableList", "Budget", "Pair",
+            "DbRead", "DbWrite", "FsRead", "FsWrite", "Net", "PaymentWrite", "Declassify",
+            "RefinementError", "ValidationError", "TaskError", "ScopeError", "MathInt"
+        )) {
+            globalSymbols.put(typeName, new Symbol(typeName, Symbol.Kind.TYPE, true));
+        }
+
+        // Phase 2-4 stdlib functions and error constructors
+        for (String fnName : List.of(
+            "refine", "declassify", "validate", "close", "split", "spend", "join",
+            "alloc", "slice", "sliceExact", "len", "map", "filter", "push", "pop", "assert"
+        )) {
+            globalSymbols.put(fnName, new Symbol(fnName, Symbol.Kind.FUNCTION, true));
+        }
     }
     
     private void registerTopLevel(TopLevelDecl decl) {
@@ -138,6 +156,32 @@ public final class NameResolver {
                     globalSymbols.put(enumDecl.name() + "." + variant.name(), sym);
                 }
             }
+            case TypeAliasDecl alias -> {
+                String id = currentModule + "." + alias.name();
+                globalSymbols.put(alias.name(), new Symbol(id, Symbol.Kind.TYPE, alias.isPublic()));
+            }
+            case ProtocolDecl protocol -> {
+                String id = currentModule + "." + protocol.name();
+                globalSymbols.put(protocol.name(), new Symbol(id, Symbol.Kind.TYPE, protocol.isPublic()));
+                if (protocol.initialState() != null && !protocol.initialState().isEmpty()) {
+                    globalSymbols.putIfAbsent(protocol.initialState(),
+                        new Symbol(id + "." + protocol.initialState(), Symbol.Kind.TYPE, protocol.isPublic()));
+                }
+                for (var st : protocol.states()) {
+                    globalSymbols.putIfAbsent(st, new Symbol(id + "." + st, Symbol.Kind.TYPE, protocol.isPublic()));
+                }
+                for (var fst : protocol.finalStates()) {
+                    globalSymbols.putIfAbsent(fst, new Symbol(id + "." + fst, Symbol.Kind.TYPE, protocol.isPublic()));
+                }
+            }
+            case SpecFnDecl specFn -> {
+                String id = currentModule + "." + specFn.name();
+                globalSymbols.put(specFn.name(), new Symbol(id, Symbol.Kind.FUNCTION, specFn.isPublic()));
+            }
+            case LemmaDecl lemma -> {
+                String id = currentModule + "." + lemma.name();
+                globalSymbols.put(lemma.name(), new Symbol(id, Symbol.Kind.FUNCTION, lemma.isPublic()));
+            }
         }
     }
     
@@ -147,26 +191,51 @@ public final class NameResolver {
             case DataDecl data -> resolveData(data);
             case RecordDecl record -> resolveRecord(record);
             case EnumDecl enumDecl -> resolveEnum(enumDecl);
+            case TypeAliasDecl alias -> resolveTypeAlias(alias);
+            case ProtocolDecl protocol -> resolveProtocol(protocol);
+            case SpecFnDecl specFn -> resolveSpecFn(specFn);
+            case LemmaDecl lemma -> resolveLemma(lemma);
         }
     }
     
     private void resolveRecord(RecordDecl record) {
+        pushScope();
         for (var param : record.params()) {
+            if (param.type() instanceof RefinedTypeExpr ref && ref.binderName() == null) {
+                addLocal(param.name(), new Symbol(param.name(), Symbol.Kind.VARIABLE, false));
+            }
             resolveType(param.type());
+            addLocal(param.name(), new Symbol(param.name(), Symbol.Kind.VARIABLE, false));
         }
+        popScope();
     }
     
     private void resolveFn(FnDecl fn) {
         pushScope();
         
-        // Add parameters to scope
+        // Left-to-right sequential parameter scope for dependent parameter bounds
         for (var param : fn.params()) {
+            if (param.type() instanceof RefinedTypeExpr ref && ref.binderName() == null) {
+                addLocal(param.name(), new Symbol(param.name(), Symbol.Kind.VARIABLE, false));
+            }
             resolveType(param.type());
             addLocal(param.name(), new Symbol(param.name(), Symbol.Kind.VARIABLE, false));
         }
         
         // Resolve return type
         resolveType(fn.returnType());
+
+        // Resolve contract clauses
+        for (var contract : fn.contracts()) {
+            if (contract.kind() == ContractClause.Kind.ENSURES) {
+                pushScope();
+                addLocal("result", new Symbol("result", Symbol.Kind.VARIABLE, false));
+                resolveExpr(contract.condition());
+                popScope();
+            } else {
+                resolveExpr(contract.condition());
+            }
+        }
         
         // Resolve body
         resolveBlock(fn.body());
@@ -187,11 +256,53 @@ public final class NameResolver {
             }
         }
     }
+
+    private void resolveTypeAlias(TypeAliasDecl alias) {
+        pushScope();
+        for (var tp : alias.typeParams()) {
+            addLocal(tp, new Symbol(tp, Symbol.Kind.TYPE, false));
+        }
+        resolveType(alias.targetType());
+        popScope();
+    }
+
+    private void resolveProtocol(ProtocolDecl protocol) {
+        // Parent protocol and transition effects are validated by ProtocolChecker
+    }
+
+    private void resolveSpecFn(SpecFnDecl specFn) {
+        pushScope();
+        for (var param : specFn.params()) {
+            resolveType(param.type());
+            addLocal(param.name(), new Symbol(param.name(), Symbol.Kind.VARIABLE, false));
+        }
+        resolveType(specFn.returnType());
+        if (specFn.body() != null) {
+            resolveBlock(specFn.body());
+        }
+        popScope();
+    }
+
+    private void resolveLemma(LemmaDecl lemma) {
+        pushScope();
+        for (var param : lemma.params()) {
+            resolveType(param.type());
+            addLocal(param.name(), new Symbol(param.name(), Symbol.Kind.VARIABLE, false));
+        }
+        for (var contract : lemma.contracts()) {
+            resolveExpr(contract.condition());
+        }
+        if (lemma.body() != null) {
+            resolveBlock(lemma.body());
+        }
+        popScope();
+    }
     
     private void resolveType(TypeExpr type) {
+        if (type == null) return;
         switch (type) {
             case SimpleTypeExpr simple -> {
-                if (!globalSymbols.containsKey(simple.name())) {
+                if (!lookupSymbol(simple.name())) {
                     diagnostics.add(Diagnostic.error(
                         "NGJ-NAME-001",
                         "Unknown type: " + simple.name(),
@@ -200,18 +311,53 @@ public final class NameResolver {
                 }
             }
             case GenericTypeExpr generic -> {
-                if (!globalSymbols.containsKey(generic.name())) {
+                if (!lookupSymbol(generic.name())) {
                     diagnostics.add(Diagnostic.error(
                         "NGJ-NAME-001",
                         "Unknown type: " + generic.name(),
                         generic.span()
                     ));
                 }
-                for (var arg : generic.typeArgs()) {
-                    resolveType(arg);
+                if (!generic.name().equals("Budget")) {
+                    for (var arg : generic.typeArgs()) {
+                        resolveType(arg);
+                    }
                 }
             }
             case UnitTypeExpr _ -> {} // Built-in
+            case CapabilityTypeExpr cap -> resolveType(cap.inner());
+            case CaptureSetTypeExpr _ -> {} // Capture targets are symbolic capability/region names
+            case RefinedTypeExpr refined -> {
+                resolveType(refined.baseType());
+                pushScope();
+                if (refined.binderName() != null) {
+                    addLocal(refined.binderName(), new Symbol(refined.binderName(), Symbol.Kind.VARIABLE, false));
+                }
+                if (refined.predicate() != null) {
+                    resolveExpr(refined.predicate());
+                }
+                popScope();
+            }
+            case RangeTypeExpr range -> {
+                resolveType(range.baseType());
+                if (range.lowerBound() != null) {
+                    resolveExpr(range.lowerBound());
+                }
+                if (range.upperBound() != null) {
+                    resolveExpr(range.upperBound());
+                }
+            }
+            case FunctionTypeExpr fnType -> {
+                for (var p : fnType.paramTypes()) {
+                    resolveType(p);
+                }
+                resolveType(fnType.returnType());
+            }
+            case TupleTypeExpr tuple -> {
+                for (var elem : tuple.elements()) {
+                    resolveType(elem);
+                }
+            }
         }
     }
     
@@ -268,6 +414,20 @@ public final class NameResolver {
                     resolveExpr(ret.value());
                 }
             }
+            case TupleDestructureStmt destruct -> {
+                for (var t : destruct.explicitTypes()) {
+                    if (t != null) {
+                        resolveType(t);
+                    }
+                }
+                resolveExpr(destruct.initializer());
+                for (var name : destruct.names()) {
+                    addLocal(name, new Symbol(name, Symbol.Kind.VARIABLE, false));
+                }
+            }
+            case InvariantStmt inv -> resolveExpr(inv.condition());
+            case ProofStmt proof -> resolveBlock(proof.body());
+            case AssumeStmt assume -> resolveExpr(assume.condition());
         }
     }
     
@@ -291,6 +451,13 @@ public final class NameResolver {
             case UnaryExpr unary -> resolveExpr(unary.operand());
             case CallExpr call -> {
                 resolveExpr(call.callee());
+                boolean isBudgetCall = call.callee() instanceof FieldAccessExpr fa
+                    && fa.object() instanceof IdentExpr id && id.name().equals("Budget");
+                if (!isBudgetCall) {
+                    for (var typeArg : call.typeArgs()) {
+                        resolveType(typeArg);
+                    }
+                }
                 for (var arg : call.args()) {
                     resolveExpr(arg);
                 }
@@ -351,6 +518,14 @@ public final class NameResolver {
                 }
                 resolveBlock(lambda.body());
                 popScope();
+            }
+            case ScopeExpr scope -> resolveBlock(scope.body());
+            case ForkExpr fork -> resolveBlock(fork.body());
+            case ConsumeExpr consume -> resolveExpr(consume.target());
+            case TupleExpr tuple -> {
+                for (var elem : tuple.elements()) {
+                    resolveExpr(elem);
+                }
             }
         }
     }

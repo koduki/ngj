@@ -34,7 +34,7 @@ public final class SymbolFinder {
                         modulePath,
                         fn.returnType(),
                         fn.effects(),
-                        fn.isPublic() ? "pub" : "private",
+                        fn.isPublic() ? "public" : "private",
                         fn.signature()
                     );
                 }
@@ -100,6 +100,70 @@ public final class SymbolFinder {
                             enumDecl.name() + "." + variant.name()
                         );
                     }
+                }
+                yield null;
+            }
+            case TypeAliasDecl alias -> {
+                var id = modulePath + "." + alias.name();
+                if (id.equals(symbolId) || alias.name().equals(symbolId)) {
+                    yield new SymbolInfo(
+                        id,
+                        "type",
+                        alias.name(),
+                        modulePath,
+                        alias.targetType(),
+                        List.of(),
+                        alias.isPublic() ? "public" : "private",
+                        "type " + alias.name() + " = " + alias.targetType()
+                    );
+                }
+                yield null;
+            }
+            case ProtocolDecl proto -> {
+                var id = modulePath + "." + proto.name();
+                if (id.equals(symbolId) || proto.name().equals(symbolId)) {
+                    yield new SymbolInfo(
+                        id,
+                        "protocol",
+                        proto.name(),
+                        modulePath,
+                        null,
+                        List.of(),
+                        proto.isPublic() ? "public" : "private",
+                        "protocol " + proto.name()
+                    );
+                }
+                yield null;
+            }
+            case SpecFnDecl specFn -> {
+                var id = modulePath + "." + specFn.name();
+                if (id.equals(symbolId) || specFn.name().equals(symbolId)) {
+                    yield new SymbolInfo(
+                        id,
+                        specFn.isPredicate() ? "spec_predicate" : "spec_fn",
+                        specFn.name(),
+                        modulePath,
+                        specFn.returnType(),
+                        List.of(),
+                        specFn.isPublic() ? "public" : "private",
+                        (specFn.isPredicate() ? "spec predicate " : "spec fn ") + specFn.name()
+                    );
+                }
+                yield null;
+            }
+            case LemmaDecl lemma -> {
+                var id = modulePath + "." + lemma.name();
+                if (id.equals(symbolId) || lemma.name().equals(symbolId)) {
+                    yield new SymbolInfo(
+                        id,
+                        "lemma",
+                        lemma.name(),
+                        modulePath,
+                        null,
+                        List.of(),
+                        lemma.isPublic() ? "public" : "private",
+                        "lemma " + lemma.name()
+                    );
                 }
                 yield null;
             }

@@ -60,19 +60,36 @@ public final class Java25CodeGenerator {
     private final Map<String, DataDecl> datas = new HashMap<>();
     private final Map<String, EnumDecl> enums = new HashMap<>();
     private final Map<String, FnDecl> functions = new HashMap<>();
-    
+    private final Map<String, TypeAliasDecl> typeAliases = new HashMap<>();
+    private final List<PendingLambda> pendingLambdas = new ArrayList<>();
+    private int lambdaCounter = 0;
+
+    private record PendingLambda(
+        String methodName,
+        MethodTypeDesc methodType,
+        LambdaExpr lambda,
+        List<CapturedVar> captures
+    ) {}
+
+    private record CapturedVar(String name, String typeName, int outerSlot) {}
+
     public List<Path> generate(CompilationUnit unit) throws CodeGenException {
         currentModule = unit.modulePath();
         records.clear();
         datas.clear();
         enums.clear();
         functions.clear();
+        typeAliases.clear();
         for (var decl : unit.declarations()) {
             switch (decl) {
                 case RecordDecl r -> records.put(r.name(), r);
                 case DataDecl d -> datas.put(d.name(), d);
                 case EnumDecl e -> enums.put(e.name(), e);
                 case FnDecl f -> functions.put(f.name(), f);
+                case TypeAliasDecl ta -> typeAliases.put(ta.name(), ta);
+                case ProtocolDecl _, SpecFnDecl _, LemmaDecl _ -> {
+                    // PROOF-01: Erased from runtime bytecode
+                }
             }
         }
         var outputs = new ArrayList<Path>();
@@ -94,6 +111,31 @@ public final class Java25CodeGenerator {
                 if (decl instanceof EnumDecl enumDecl) {
                     outputs.addAll(generateEnumVariants(enumDecl));
                 }
+                if (decl instanceof RecordDecl rec && rec.annotations().stream().anyMatch(a -> a.name().equals("boundary_schema"))) {
+                    for (String tag : List.of("Ok", "Err")) {
+                        var wrapperName = currentModule.replace('.', '/') + "/" + rec.name() + "$" + tag;
+                        var wrapperDesc = ClassDesc.ofInternalName(wrapperName);
+                        byte[] wrapperBytes = ClassFile.of().build(wrapperDesc, cb -> {
+                            cb.withVersion(CLASS_FILE_VERSION, PREVIEW_MINOR_VERSION);
+                            cb.withFlags(ACC_PUBLIC | ACC_FINAL);
+                            cb.withSuperclass(ConstantDescs.CD_Object);
+                            cb.withField("value", ConstantDescs.CD_Object, ACC_PUBLIC | ACC_FINAL);
+                            cb.withMethod(ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object),
+                                ACC_PUBLIC, mb -> mb.withCode(code -> {
+                                    code.aload(0);
+                                    code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME,
+                                        MethodTypeDesc.of(ConstantDescs.CD_void));
+                                    code.aload(0);
+                                    code.aload(1);
+                                    code.putfield(wrapperDesc, "value", ConstantDescs.CD_Object);
+                                    code.return_();
+                                }));
+                        });
+                        var wrapperPath = moduleDir.resolve(rec.name() + "$" + tag + ".class");
+                        Files.write(wrapperPath, wrapperBytes);
+                        outputs.add(wrapperPath);
+                    }
+                }
             }
             
             return outputs;
@@ -112,6 +154,7 @@ public final class Java25CodeGenerator {
             case DataDecl data -> generateData(data);
             case RecordDecl record -> generateRecord(record);
             case EnumDecl enumDecl -> generateEnum(enumDecl);
+            case TypeAliasDecl _, ProtocolDecl _, SpecFnDecl _, LemmaDecl _ -> null;
         };
     }
     
@@ -121,12 +164,18 @@ public final class Java25CodeGenerator {
             case DataDecl data -> data.name();
             case RecordDecl record -> record.name();
             case EnumDecl enumDecl -> enumDecl.name();
+            case TypeAliasDecl ta -> ta.name();
+            case ProtocolDecl p -> p.name();
+            case SpecFnDecl sf -> sf.name();
+            case LemmaDecl l -> l.name();
         };
     }
     
     private byte[] generateFunction(FnDecl fn) {
         var className = currentModule.replace('.', '/') + "/" + fn.name() + "$Fn";
         var classDesc = ClassDesc.ofInternalName(className);
+        pendingLambdas.clear();
+        lambdaCounter = 0;
         
         return ClassFile.of().build(classDesc, classBuilder -> {
             classBuilder.withVersion(CLASS_FILE_VERSION, 0);
@@ -136,7 +185,7 @@ public final class Java25CodeGenerator {
             var methodDesc = buildMethodDescriptor(fn);
             classBuilder.withMethod("invoke", methodDesc, ACC_PUBLIC | ACC_STATIC, mb -> {
                 mb.withCode(codeBuilder -> {
-                    var ctx = new CodeGenContext(codeBuilder, fn);
+                    var ctx = new CodeGenContext(codeBuilder, fn, classDesc);
                     generateBlock(ctx, fn.body());
                     
                     if (!ctx.hasReturn) {
@@ -150,6 +199,52 @@ public final class Java25CodeGenerator {
                     }
                 });
             });
+
+            // Emit any synthetic lambda methods collected during function body generation
+            for (int i = 0; i < pendingLambdas.size(); i++) {
+                var pl = pendingLambdas.get(i);
+                classBuilder.withMethod(pl.methodName(), pl.methodType(), ACC_PRIVATE | ACC_STATIC, mb -> {
+                    mb.withCode(codeBuilder -> {
+                        var lCtx = new CodeGenContext(codeBuilder, null, classDesc);
+                        for (var cap : pl.captures()) {
+                            lCtx.allocateLocal(cap.name(), cap.typeName());
+                        }
+                        List<Integer> rawParamSlots = new ArrayList<>();
+                        for (int pi = 0; pi < pl.lambda().params().size(); pi++) {
+                            rawParamSlots.add(lCtx.allocateLocal("$rawParam$" + pi, "Object"));
+                        }
+                        for (int pi = 0; pi < pl.lambda().params().size(); pi++) {
+                            var p = pl.lambda().params().get(pi);
+                            String pType = getTypeName(p.type());
+                            if (pType.equals("Int") || pType.equals("Bool") || pType.equals("Long")) {
+                                codeBuilder.aload(rawParamSlots.get(pi));
+                                unboxIfNeeded(lCtx, pType);
+                                int pSlot = lCtx.allocateLocal(p.name(), pType);
+                                storeSlot(codeBuilder, pSlot, pType);
+                            } else {
+                                lCtx.locals.put(p.name(), rawParamSlots.get(pi));
+                                lCtx.localTypes.put(p.name(), pType);
+                            }
+                        }
+                        generateBlock(lCtx, pl.lambda().body());
+                        if (!lCtx.hasReturn) {
+                            var retDesc = pl.methodType().returnType();
+                            if (retDesc.equals(ConstantDescs.CD_void)) {
+                                codeBuilder.return_();
+                            } else if (retDesc.equals(ConstantDescs.CD_int) || retDesc.equals(ConstantDescs.CD_boolean)) {
+                                codeBuilder.ireturn();
+                            } else if (retDesc.equals(ConstantDescs.CD_long)) {
+                                codeBuilder.lreturn();
+                            } else {
+                                if (pl.lambda().body().tailExpr() != null) {
+                                    boxIfPrimitive(lCtx, pl.lambda().body().tailExpr());
+                                }
+                                codeBuilder.areturn();
+                            }
+                        }
+                    });
+                });
+            }
             
             if (fn.params().isEmpty() && getTypeName(fn.returnType()).equals("Int")) {
                 var mainDesc = MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String.arrayType());
@@ -173,15 +268,64 @@ public final class Java25CodeGenerator {
         return MethodTypeDesc.of(returnType, paramTypes);
     }
     
-    private ClassDesc typeToClassDesc(TypeExpr type) {
+    private TypeExpr resolveTypeAlias(TypeExpr type) {
+        Set<String> visited = new HashSet<>();
+        TypeExpr current = type;
+        while (current != null) {
+            if (current instanceof SimpleTypeExpr simple && typeAliases.containsKey(simple.name())) {
+                if (!visited.add(simple.name())) {
+                    break;
+                }
+                current = typeAliases.get(simple.name()).targetType();
+            } else if (current instanceof GenericTypeExpr generic && typeAliases.containsKey(generic.name())) {
+                if (!visited.add(generic.name())) {
+                    break;
+                }
+                TypeAliasDecl alias = typeAliases.get(generic.name());
+                Map<String, TypeExpr> subst = new HashMap<>();
+                for (int i = 0; i < Math.min(alias.typeParams().size(), generic.typeArgs().size()); i++) {
+                    subst.put(alias.typeParams().get(i), generic.typeArgs().get(i));
+                }
+                current = substituteTypeParams(alias.targetType(), subst);
+            } else {
+                break;
+            }
+        }
+        return current;
+    }
+
+    private TypeExpr substituteTypeParams(TypeExpr type, Map<String, TypeExpr> subst) {
+        if (type == null || subst.isEmpty()) return type;
         return switch (type) {
+            case SimpleTypeExpr s -> subst.getOrDefault(s.name(), s);
+            case GenericTypeExpr g -> new GenericTypeExpr(
+                g.name(),
+                g.typeArgs().stream().map(a -> substituteTypeParams(a, subst)).toList(),
+                g.span()
+            );
+            case CapabilityTypeExpr c -> new CapabilityTypeExpr(c.mode(), substituteTypeParams(c.inner(), subst), c.span());
+            case RefinedTypeExpr r -> new RefinedTypeExpr(r.binderName(), substituteTypeParams(r.baseType(), subst), r.predicate(), r.span());
+            case RangeTypeExpr r -> new RangeTypeExpr(substituteTypeParams(r.baseType(), subst), r.lowerBound(), r.upperBound(), r.upperInclusive(), r.span());
+            case TupleTypeExpr t -> new TupleTypeExpr(t.elements().stream().map(e -> substituteTypeParams(e, subst)).toList(), t.span());
+            default -> type;
+        };
+    }
+
+    private ClassDesc typeToClassDesc(TypeExpr type) {
+        TypeExpr resolved = resolveTypeAlias(type);
+        return switch (resolved) {
             case SimpleTypeExpr simple -> switch (simple.name()) {
                 case "Int" -> ConstantDescs.CD_int;
                 case "Long" -> ConstantDescs.CD_long;
                 case "Bool" -> ConstantDescs.CD_boolean;
                 case "String" -> ConstantDescs.CD_String;
                 case "Unit" -> ConstantDescs.CD_void;
-                case "OverflowError", "RangeError", "IndexError" -> ConstantDescs.CD_Object;
+                case "Secret" -> ClassDesc.of("ngj.runtime.SecretValue");
+                case "Budget" -> ClassDesc.of("ngj.runtime.Budget");
+                case "Untrusted" -> ClassDesc.of("ngj.runtime.UntrustedValue");
+                case "Validated" -> ClassDesc.of("ngj.runtime.ValidatedValue");
+                case "Pair" -> ClassDesc.of("ngj.runtime.Pair");
+                case "RefinementError", "ValidationError", "OverflowError", "RangeError", "IndexError", "Bytes", "Arena" -> ConstantDescs.CD_Object;
                 default -> ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + simple.name());
             };
             case GenericTypeExpr generic -> switch (generic.name()) {
@@ -192,9 +336,20 @@ public final class Java25CodeGenerator {
                     ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option")
                     : ClassDesc.of("java.util.Optional");
                 case "List" -> ClassDesc.of("java.util.List");
+                case "Secret" -> ClassDesc.of("ngj.runtime.SecretValue");
+                case "Budget" -> ClassDesc.of("ngj.runtime.Budget");
+                case "Untrusted" -> ClassDesc.of("ngj.runtime.UntrustedValue");
+                case "Validated" -> ClassDesc.of("ngj.runtime.ValidatedValue");
+                case "Pair" -> ClassDesc.of("ngj.runtime.Pair");
                 default -> ConstantDescs.CD_Object;
             };
             case UnitTypeExpr _ -> ConstantDescs.CD_void;
+            case CapabilityTypeExpr cap -> typeToClassDesc(cap.inner());
+            case CaptureSetTypeExpr _ -> ConstantDescs.CD_Object;
+            case RefinedTypeExpr ref -> typeToClassDesc(ref.baseType());
+            case RangeTypeExpr rng -> typeToClassDesc(rng.baseType());
+            case FunctionTypeExpr _ -> ClassDesc.of("java.util.function.Function");
+            case TupleTypeExpr _ -> ClassDesc.of("java.util.List");
         };
     }
     
@@ -227,15 +382,20 @@ public final class Java25CodeGenerator {
                 yield "Unit";
             }
             case BlockExpr block -> block.tailExpr() != null ? inferTypeName(ctx, block.tailExpr()) : "Unit";
+            case ScopeExpr scope -> scope.body().tailExpr() != null ? inferTypeName(ctx, scope.body().tailExpr()) : "Unit";
+            case ForkExpr fork -> fork.body().tailExpr() != null ? inferTypeName(ctx, fork.body().tailExpr()) : "Unit";
+            case ConsumeExpr consume -> inferTypeName(ctx, consume.target());
+            case TupleExpr _ -> "Tuple";
             case CallExpr call -> {
                 if (call.callee() instanceof IdentExpr ident) {
                     var name = ident.name();
                     yield switch (name) {
                         case "length" -> "Int";
                         case "isEmpty", "isSome", "isNone", "isOk", "isErr" -> "Bool";
-                        case "Ok", "Err", "checkedAdd", "checkedSub", "checkedMul", "toResult" -> "Result";
+                        case "Ok", "Err", "checkedAdd", "checkedSub", "checkedMul", "toResult", "refine" -> "Result";
                         case "Some", "None", "head", "get", "toOption" -> "Option";
                         case "Nil", "listOf", "Cons" -> "List";
+                        case "Budget" -> "Budget";
                         case "getOrElse" -> call.args().size() >= 2 ? inferTypeName(ctx, call.args().get(1)) : "Object";
                         default -> {
                             if (functions.containsKey(name)) {
@@ -254,9 +414,35 @@ public final class Java25CodeGenerator {
                             yield "Object";
                         }
                     };
-                } else if (call.callee() instanceof FieldAccessExpr access && access.object() instanceof IdentExpr enumIdent) {
-                    if (enums.containsKey(enumIdent.name())) {
-                        yield enumIdent.name();
+                } else if (call.callee() instanceof FieldAccessExpr access) {
+                    if (access.object() instanceof IdentExpr objIdent) {
+                        if (objIdent.name().equals("Budget") && access.fieldName().equals("split")) {
+                            yield "Pair";
+                        }
+                        if (objIdent.name().equals("Budget") && access.fieldName().equals("spend")) {
+                            yield "Budget";
+                        }
+                        if (objIdent.name().equals("Secret") && (access.fieldName().equals("map") || access.fieldName().equals("of"))) {
+                            yield "Secret";
+                        }
+                        if (objIdent.name().equals("List") && access.fieldName().equals("map")) {
+                            yield "List";
+                        }
+                        if (enums.containsKey(objIdent.name())) {
+                            yield objIdent.name();
+                        }
+                    }
+                    if (access.fieldName().equals("split")) {
+                        yield "Pair";
+                    }
+                    if (access.fieldName().equals("spend")) {
+                        yield "Budget";
+                    }
+                    if (access.fieldName().equals("remaining")) {
+                        yield "Long";
+                    }
+                    if (access.fieldName().equals("toJson")) {
+                        yield "String";
                     }
                 }
                 yield "Object";
@@ -288,6 +474,12 @@ public final class Java25CodeGenerator {
                         && !gen.typeArgs().isEmpty()) {
                         yield getTypeName(gen.typeArgs().get(0));
                     }
+                }
+                yield "Object";
+            }
+            case MatchExpr matchExpr -> {
+                if (!matchExpr.arms().isEmpty()) {
+                    yield inferTypeName(ctx, matchExpr.arms().get(0).body());
                 }
                 yield "Object";
             }
@@ -355,6 +547,61 @@ public final class Java25CodeGenerator {
                     default -> ctx.code.astore(slot);
                 }
             }
+            case TupleDestructureStmt tds -> {
+                generateExpr(ctx, tds.initializer());
+                var initType = inferTypeName(ctx, tds.initializer());
+                boolean isPair = initType.equals("Pair") && tds.names().size() == 2;
+                if (isPair) {
+                    ctx.code.checkcast(ClassDesc.of("ngj.runtime.Pair"));
+                } else {
+                    ctx.code.checkcast(ClassDesc.of("java.util.List"));
+                }
+                int tupleSlot = ctx.allocateLocal("$tuple$" + ctx.nextSlot, isPair ? "Pair" : "List");
+                ctx.code.astore(tupleSlot);
+                Expr unwrappedInit = tds.initializer();
+                while (unwrappedInit instanceof ParenExpr p) unwrappedInit = p.inner();
+                TupleExpr tupleLiteral = unwrappedInit instanceof TupleExpr te ? te : null;
+                boolean isBudgetSplit = isPair && isBudgetSplitExpr(unwrappedInit);
+                for (int i = 0; i < tds.names().size(); i++) {
+                    String varName = tds.names().get(i);
+                    TypeExpr explicitType = i < tds.explicitTypes().size() ? tds.explicitTypes().get(i) : null;
+                    String varType;
+                    if (explicitType != null) {
+                        varType = getTypeName(explicitType);
+                    } else if (isBudgetSplit) {
+                        varType = "Budget";
+                    } else if (tupleLiteral != null && i < tupleLiteral.elements().size()) {
+                        varType = inferTypeName(ctx, tupleLiteral.elements().get(i));
+                    } else {
+                        varType = "Object";
+                    }
+                    ctx.code.aload(tupleSlot);
+                    if (isPair) {
+                        ctx.code.invokevirtual(
+                            ClassDesc.of("ngj.runtime.Pair"),
+                            i == 0 ? "first" : "second",
+                            MethodTypeDesc.of(ConstantDescs.CD_Object)
+                        );
+                    } else {
+                        ctx.code.ldc(i);
+                        ctx.code.invokeinterface(
+                            ClassDesc.of("java.util.List"),
+                            "get",
+                            MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_int)
+                        );
+                    }
+                    unboxIfNeeded(ctx, varType);
+                    int slot = ctx.allocateLocal(varName, varType);
+                    switch (varType) {
+                        case "Long" -> ctx.code.lstore(slot);
+                        case "Int", "Bool" -> ctx.code.istore(slot);
+                        default -> ctx.code.astore(slot);
+                    }
+                }
+            }
+            case InvariantStmt _, ProofStmt _, AssumeStmt _ -> {
+                // PROOF-01: Erased completely from runtime bytecode
+            }
             case ExprStmt expr -> {
                 generateExpr(ctx, expr.expr());
             }
@@ -363,7 +610,7 @@ public final class Java25CodeGenerator {
                     generateExpr(ctx, ret.value());
                 }
                 if (!ctx.hasReturn) {
-                    var retType = getTypeName(ctx.fn.returnType());
+                    var retType = ctx.fn != null ? getTypeName(ctx.fn.returnType()) : "Object";
                     switch (retType) {
                         case "Unit" -> ctx.code.return_();
                         case "Int", "Bool" -> ctx.code.ireturn();
@@ -393,8 +640,39 @@ public final class Java25CodeGenerator {
             case ForExpr forExpr -> generateFor(ctx, forExpr);
             case WhileExpr whileExpr -> generateWhile(ctx, whileExpr);
             case LambdaExpr lambda -> generateLambda(ctx, lambda);
+            case ScopeExpr scope -> generateBlock(ctx, scope.body());
+            case ForkExpr fork -> generateBlock(ctx, fork.body());
+            case ConsumeExpr consume -> generateExpr(ctx, consume.target());
+            case TupleExpr tuple -> generateTuple(ctx, tuple);
             case HoleExpr hole -> throw new IllegalStateException("Hole in codegen: ?" + hole.name());
         }
+    }
+
+    private void generateTuple(CodeGenContext ctx, TupleExpr tuple) {
+        if (tuple.elements().isEmpty()) {
+            ctx.code.invokestatic(
+                ClassDesc.of("java.util.List"),
+                "of",
+                MethodTypeDesc.of(ClassDesc.of("java.util.List")),
+                true
+            );
+            return;
+        }
+        ctx.code.ldc(tuple.elements().size());
+        ctx.code.anewarray(ConstantDescs.CD_Object);
+        for (int i = 0; i < tuple.elements().size(); i++) {
+            ctx.code.dup();
+            ctx.code.ldc(i);
+            generateExpr(ctx, tuple.elements().get(i));
+            boxIfPrimitive(ctx, tuple.elements().get(i));
+            ctx.code.aastore();
+        }
+        ctx.code.invokestatic(
+            ClassDesc.of("java.util.List"),
+            "of",
+            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ConstantDescs.CD_Object.arrayType()),
+            true
+        );
     }
     
     private void generateFor(CodeGenContext ctx, ForExpr forExpr) {
@@ -492,7 +770,139 @@ public final class Java25CodeGenerator {
     }
     
     private void generateLambda(CodeGenContext ctx, LambdaExpr lambda) {
-        throw new IllegalStateException("lambda expression codegen not yet implemented");
+        if (ctx.ownerClass == null) {
+            throw new IllegalStateException("Lambda outside function context");
+        }
+        String methodName = "lambda$" + (lambdaCounter++);
+        List<CapturedVar> captures = collectCaptures(ctx, lambda);
+        List<ClassDesc> implParams = new ArrayList<>();
+        List<ClassDesc> invokedArgs = new ArrayList<>();
+        for (var cap : captures) {
+            ClassDesc cd = typeNameToClassDesc(cap.typeName());
+            implParams.add(cd);
+            invokedArgs.add(cd);
+            switch (cap.typeName()) {
+                case "Int", "Bool" -> ctx.code.iload(cap.outerSlot());
+                case "Long" -> ctx.code.lload(cap.outerSlot());
+                default -> ctx.code.aload(cap.outerSlot());
+            }
+        }
+        for (int i = 0; i < lambda.params().size(); i++) {
+            implParams.add(ConstantDescs.CD_Object);
+        }
+        MethodTypeDesc implDesc = MethodTypeDesc.of(ConstantDescs.CD_Object, implParams);
+        pendingLambdas.add(new PendingLambda(methodName, implDesc, lambda, captures));
+
+        ClassDesc targetInterface;
+        String samName;
+        MethodTypeDesc samType;
+        if (lambda.params().isEmpty()) {
+            targetInterface = ClassDesc.of("java.util.function.Supplier");
+            samName = "get";
+            samType = MethodTypeDesc.of(ConstantDescs.CD_Object);
+        } else {
+            targetInterface = ClassDesc.of("java.util.function.Function");
+            samName = "apply";
+            samType = MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object);
+        }
+
+        DirectMethodHandleDesc metafactory = MethodHandleDesc.ofMethod(
+            DirectMethodHandleDesc.Kind.STATIC,
+            ClassDesc.of("java.lang.invoke.LambdaMetafactory"),
+            "metafactory",
+            MethodTypeDesc.of(
+                ClassDesc.of("java.lang.invoke.CallSite"),
+                ClassDesc.of("java.lang.invoke.MethodHandles$Lookup"),
+                ConstantDescs.CD_String,
+                ClassDesc.of("java.lang.invoke.MethodType"),
+                ClassDesc.of("java.lang.invoke.MethodType"),
+                ClassDesc.of("java.lang.invoke.MethodHandle"),
+                ClassDesc.of("java.lang.invoke.MethodType")
+            )
+        );
+        DirectMethodHandleDesc implHandle = MethodHandleDesc.ofMethod(
+            DirectMethodHandleDesc.Kind.STATIC,
+            ctx.ownerClass,
+            methodName,
+            implDesc
+        );
+        DynamicCallSiteDesc callSite = DynamicCallSiteDesc.of(
+            metafactory,
+            samName,
+            MethodTypeDesc.of(targetInterface, invokedArgs.toArray(ClassDesc[]::new)),
+            samType,
+            implHandle,
+            samType
+        );
+        ctx.code.invokedynamic(callSite);
+    }
+
+    private List<CapturedVar> collectCaptures(CodeGenContext ctx, LambdaExpr lambda) {
+        Set<String> bound = new HashSet<>();
+        for (var p : lambda.params()) {
+            bound.add(p.name());
+        }
+        Map<String, CapturedVar> found = new LinkedHashMap<>();
+        collectIdentsInBlock(lambda.body(), ctx, bound, found);
+        return List.copyOf(found.values());
+    }
+
+    private void collectIdentsInBlock(BlockExpr block, CodeGenContext ctx, Set<String> bound, Map<String, CapturedVar> found) {
+        if (block == null) return;
+        for (var s : block.statements()) {
+            switch (s) {
+                case ValStmt v -> { collectIdentsInExpr(v.initializer(), ctx, bound, found); bound.add(v.name()); }
+                case VarStmt v -> { collectIdentsInExpr(v.initializer(), ctx, bound, found); bound.add(v.name()); }
+                case LetStmt l -> { collectIdentsInExpr(l.initializer(), ctx, bound, found); bound.add(l.name()); }
+                case AssignStmt a -> collectIdentsInExpr(a.value(), ctx, bound, found);
+                case ExprStmt e -> collectIdentsInExpr(e.expr(), ctx, bound, found);
+                case ReturnStmt r -> collectIdentsInExpr(r.value(), ctx, bound, found);
+                case TupleDestructureStmt t -> { collectIdentsInExpr(t.initializer(), ctx, bound, found); bound.addAll(t.names()); }
+                case InvariantStmt _, ProofStmt _, AssumeStmt _ -> {}
+            }
+        }
+        collectIdentsInExpr(block.tailExpr(), ctx, bound, found);
+    }
+
+    private void collectIdentsInExpr(Expr expr, CodeGenContext ctx, Set<String> bound, Map<String, CapturedVar> found) {
+        if (expr == null) return;
+        switch (expr) {
+            case IdentExpr id -> {
+                if (!bound.contains(id.name()) && ctx.locals.containsKey(id.name()) && !found.containsKey(id.name())) {
+                    found.put(id.name(), new CapturedVar(id.name(), ctx.getLocalType(id.name()), ctx.locals.get(id.name())));
+                }
+            }
+            case BinaryExpr b -> { collectIdentsInExpr(b.left(), ctx, bound, found); collectIdentsInExpr(b.right(), ctx, bound, found); }
+            case UnaryExpr u -> collectIdentsInExpr(u.operand(), ctx, bound, found);
+            case ParenExpr p -> collectIdentsInExpr(p.inner(), ctx, bound, found);
+            case CallExpr c -> {
+                collectIdentsInExpr(c.callee(), ctx, bound, found);
+                for (var a : c.args()) collectIdentsInExpr(a, ctx, bound, found);
+            }
+            case FieldAccessExpr f -> collectIdentsInExpr(f.object(), ctx, bound, found);
+            case IfExpr i -> {
+                collectIdentsInExpr(i.condition(), ctx, bound, found);
+                collectIdentsInBlock(i.thenBranch(), ctx, bound, found);
+                collectIdentsInExpr(i.elseBranch(), ctx, bound, found);
+            }
+            case BlockExpr b -> collectIdentsInBlock(b, ctx, bound, found);
+            case PropagateExpr p -> collectIdentsInExpr(p.inner(), ctx, bound, found);
+            case ConsumeExpr c -> collectIdentsInExpr(c.target(), ctx, bound, found);
+            case TupleExpr t -> { for (var e : t.elements()) collectIdentsInExpr(e, ctx, bound, found); }
+            default -> {}
+        }
+    }
+
+    private ClassDesc typeNameToClassDesc(String typeName) {
+        return switch (typeName) {
+            case "Int" -> ConstantDescs.CD_int;
+            case "Long" -> ConstantDescs.CD_long;
+            case "Bool" -> ConstantDescs.CD_boolean;
+            case "String" -> ConstantDescs.CD_String;
+            case "Secret" -> ClassDesc.of("ngj.runtime.SecretValue");
+            case "Budget" -> ClassDesc.of("ngj.runtime.Budget");
+            default -> ConstantDescs.CD_Object;
+        };
     }
     
     private void generateLiteral(CodeGenContext ctx, LiteralExpr lit) {
@@ -732,7 +1142,8 @@ public final class Java25CodeGenerator {
                     ctx.code.invokestatic(
                         ClassDesc.of("java.util.List"),
                         "of",
-                        MethodTypeDesc.of(ClassDesc.of("java.util.List"))
+                        MethodTypeDesc.of(ClassDesc.of("java.util.List")),
+                        true
                     );
                     return;
                 }
@@ -741,7 +1152,8 @@ public final class Java25CodeGenerator {
                         ctx.code.invokestatic(
                             ClassDesc.of("java.util.List"),
                             "of",
-                            MethodTypeDesc.of(ClassDesc.of("java.util.List"))
+                            MethodTypeDesc.of(ClassDesc.of("java.util.List")),
+                            true
                         );
                     } else {
                         ctx.code.ldc(call.args().size());
@@ -756,7 +1168,8 @@ public final class Java25CodeGenerator {
                         ctx.code.invokestatic(
                             ClassDesc.of("java.util.List"),
                             "of",
-                            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ConstantDescs.CD_Object.arrayType())
+                            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ConstantDescs.CD_Object.arrayType()),
+                            true
                         );
                     }
                     return;
@@ -1054,6 +1467,20 @@ public final class Java25CodeGenerator {
                     );
                     return;
                 }
+                case "refine" -> {
+                    generateRefine(ctx, call);
+                    return;
+                }
+                case "Budget" -> {
+                    var budgetDesc = ClassDesc.of("ngj.runtime.Budget");
+                    ctx.code.new_(budgetDesc);
+                    ctx.code.dup();
+                    generateExpr(ctx, call.args().get(0));
+                    generateExpr(ctx, call.args().get(1));
+                    ctx.code.invokespecial(budgetDesc, ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String, ConstantDescs.CD_long));
+                    return;
+                }
             }
             
             // Record constructor call
@@ -1119,30 +1546,169 @@ public final class Java25CodeGenerator {
             } else {
                 ctx.code.invokestatic(classDesc, "invoke", MethodTypeDesc.of(ConstantDescs.CD_Object));
             }
-        } else if (call.callee() instanceof FieldAccessExpr access && access.object() instanceof IdentExpr enumIdent) {
-            var enumName = enumIdent.name();
-            var variantName = access.fieldName();
-            if (enums.containsKey(enumName)) {
-                for (var variant : enums.get(enumName).variants()) {
-                    if (variant.name().equals(variantName)) {
-                        var variantClassDesc = ClassDesc.ofInternalName(
-                            currentModule.replace('.', '/') + "/" + enumName + "$" + variantName);
-                        ctx.code.new_(variantClassDesc);
-                        ctx.code.dup();
-                        for (var arg : call.args()) {
-                            generateExpr(ctx, arg);
+        } else if (call.callee() instanceof FieldAccessExpr access) {
+            if (access.object() instanceof IdentExpr objIdent) {
+                var targetName = objIdent.name();
+                var memberName = access.fieldName();
+                if (targetName.equals("Budget") && memberName.equals("split") && call.args().size() == 2) {
+                    generateExpr(ctx, call.args().get(0));
+                    generateExpr(ctx, call.args().get(1));
+                    ctx.code.invokestatic(
+                        ClassDesc.of("ngj.runtime.Budget"),
+                        "split",
+                        MethodTypeDesc.of(ClassDesc.of("ngj.runtime.Pair"), ClassDesc.of("ngj.runtime.Budget"), ConstantDescs.CD_long)
+                    );
+                    return;
+                }
+                if (targetName.equals("Budget") && memberName.equals("spend") && call.args().size() == 2) {
+                    generateExpr(ctx, call.args().get(0));
+                    generateExpr(ctx, call.args().get(1));
+                    ctx.code.invokevirtual(
+                        ClassDesc.of("ngj.runtime.Budget"),
+                        "spend",
+                        MethodTypeDesc.of(ClassDesc.of("ngj.runtime.Budget"), ConstantDescs.CD_long)
+                    );
+                    return;
+                }
+                if (targetName.equals("Secret") && memberName.equals("of") && call.args().size() == 1) {
+                    generateExpr(ctx, call.args().get(0));
+                    boxIfPrimitive(ctx, call.args().get(0));
+                    ctx.code.invokestatic(
+                        ClassDesc.of("ngj.runtime.SecretValue"),
+                        "of",
+                        MethodTypeDesc.of(ClassDesc.of("ngj.runtime.SecretValue"), ConstantDescs.CD_Object)
+                    );
+                    return;
+                }
+                if (targetName.equals("Secret") && memberName.equals("map") && call.args().size() == 2) {
+                    generateExpr(ctx, call.args().get(0));
+                    generateExpr(ctx, call.args().get(1));
+                    ctx.code.invokevirtual(
+                        ClassDesc.of("ngj.runtime.SecretValue"),
+                        "map",
+                        MethodTypeDesc.of(ClassDesc.of("ngj.runtime.SecretValue"), ClassDesc.of("java.util.function.Function"))
+                    );
+                    return;
+                }
+                if (targetName.equals("Secret") && memberName.equals("expose") && call.args().size() == 1) {
+                    generateExpr(ctx, call.args().get(0));
+                    ctx.code.invokevirtual(
+                        ClassDesc.of("ngj.runtime.SecretValue"),
+                        "expose",
+                        MethodTypeDesc.of(ConstantDescs.CD_Object)
+                    );
+                    return;
+                }
+                if (targetName.equals("List") && memberName.equals("map") && call.args().size() == 2) {
+                    generateExpr(ctx, call.args().get(0));
+                    ctx.code.invokeinterface(
+                        ClassDesc.of("java.util.Collection"),
+                        "stream",
+                        MethodTypeDesc.of(ClassDesc.of("java.util.stream.Stream"))
+                    );
+                    generateExpr(ctx, call.args().get(1));
+                    ctx.code.invokeinterface(
+                        ClassDesc.of("java.util.stream.Stream"),
+                        "map",
+                        MethodTypeDesc.of(ClassDesc.of("java.util.stream.Stream"), ClassDesc.of("java.util.function.Function"))
+                    );
+                    ctx.code.invokeinterface(
+                        ClassDesc.of("java.util.stream.Stream"),
+                        "toList",
+                        MethodTypeDesc.of(ClassDesc.of("java.util.List"))
+                    );
+                    return;
+                }
+                if (records.containsKey(targetName) && (memberName.equals("decodeJson") || memberName.equals("decodeBinary"))) {
+                    var recDesc = ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + targetName);
+                    generateExpr(ctx, call.args().get(0));
+                    ctx.code.invokestatic(
+                        recDesc,
+                        memberName,
+                        MethodTypeDesc.of(
+                            ConstantDescs.CD_Object,
+                            memberName.equals("decodeJson") ? ConstantDescs.CD_String : ConstantDescs.CD_byte.arrayType()
+                        )
+                    );
+                    return;
+                }
+                if (enums.containsKey(targetName)) {
+                    for (var variant : enums.get(targetName).variants()) {
+                        if (variant.name().equals(memberName)) {
+                            var variantClassDesc = ClassDesc.ofInternalName(
+                                currentModule.replace('.', '/') + "/" + targetName + "$" + memberName);
+                            ctx.code.new_(variantClassDesc);
+                            ctx.code.dup();
+                            for (var arg : call.args()) {
+                                generateExpr(ctx, arg);
+                            }
+                            var paramDescs = variant.fields().stream()
+                                .map(f -> typeToClassDesc(f.type()))
+                                .toArray(ClassDesc[]::new);
+                            ctx.code.invokespecial(variantClassDesc, ConstantDescs.INIT_NAME,
+                                MethodTypeDesc.of(ConstantDescs.CD_void, paramDescs));
+                            return;
                         }
-                        var paramDescs = variant.fields().stream()
-                            .map(f -> typeToClassDesc(f.type()))
-                            .toArray(ClassDesc[]::new);
-                        ctx.code.invokespecial(variantClassDesc, ConstantDescs.INIT_NAME,
-                            MethodTypeDesc.of(ConstantDescs.CD_void, paramDescs));
-                        return;
                     }
                 }
+                // Built-in error enum variant (e.g., OverflowError.IntOverflow())
+                if (memberName.equals("IntOverflow") || memberName.equals("OutOfRange") || memberName.equals("OutOfBounds")) {
+                    ctx.code.ldc(memberName);
+                    return;
+                }
             }
-            // Built-in error enum variant (e.g., OverflowError.IntOverflow())
-            ctx.code.ldc(variantName);
+
+            // Instance method calls (e.g. b.remaining(), b.spend(x), b.split(x), sec.map(f), obj.toJson())
+            var memberName = access.fieldName();
+            var objType = inferTypeName(ctx, access.object());
+            if (memberName.equals("remaining")) {
+                generateExpr(ctx, access.object());
+                ctx.code.invokevirtual(
+                    ClassDesc.of("ngj.runtime.Budget"),
+                    "remaining",
+                    MethodTypeDesc.of(ConstantDescs.CD_long)
+                );
+                return;
+            }
+            if (memberName.equals("spend") && call.args().size() == 1) {
+                generateExpr(ctx, access.object());
+                generateExpr(ctx, call.args().get(0));
+                ctx.code.invokevirtual(
+                    ClassDesc.of("ngj.runtime.Budget"),
+                    "spend",
+                    MethodTypeDesc.of(ClassDesc.of("ngj.runtime.Budget"), ConstantDescs.CD_long)
+                );
+                return;
+            }
+            if (memberName.equals("split") && call.args().size() == 1) {
+                generateExpr(ctx, access.object());
+                generateExpr(ctx, call.args().get(0));
+                ctx.code.invokevirtual(
+                    ClassDesc.of("ngj.runtime.Budget"),
+                    "split",
+                    MethodTypeDesc.of(ClassDesc.of("ngj.runtime.Pair"), ConstantDescs.CD_long)
+                );
+                return;
+            }
+            if (memberName.equals("toJson") && records.containsKey(objType)) {
+                generateExpr(ctx, access.object());
+                ctx.code.invokevirtual(
+                    ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + objType),
+                    "toJson",
+                    MethodTypeDesc.of(ConstantDescs.CD_String)
+                );
+                return;
+            }
+            if (memberName.equals("encodeBinary") && records.containsKey(objType)) {
+                generateExpr(ctx, access.object());
+                ctx.code.invokevirtual(
+                    ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + objType),
+                    "encodeBinary",
+                    MethodTypeDesc.of(ConstantDescs.CD_byte.arrayType())
+                );
+                return;
+            }
+            ctx.code.ldc(memberName);
         } else {
             for (var arg : call.args()) {
                 generateExpr(ctx, arg);
@@ -1236,6 +1802,15 @@ public final class Java25CodeGenerator {
         }
     }
     
+    private boolean isBudgetSplitExpr(Expr expr) {
+        Expr cur = expr;
+        while (cur instanceof ParenExpr p) cur = p.inner();
+        if (cur instanceof CallExpr c && c.callee() instanceof FieldAccessExpr fa && fa.fieldName().equals("split")) {
+            return true;
+        }
+        return false;
+    }
+
     private void unboxIfNeeded(CodeGenContext ctx, String targetTypeName) {
         switch (targetTypeName) {
             case "Int" -> {
@@ -1262,11 +1837,23 @@ public final class Java25CodeGenerator {
                     MethodTypeDesc.of(ConstantDescs.CD_boolean)
                 );
             }
+            case "String" -> ctx.code.checkcast(ConstantDescs.CD_String);
+            case "Budget" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.Budget"));
+            case "Secret" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.SecretValue"));
+            case "Untrusted" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.UntrustedValue"));
+            case "Validated" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.ValidatedValue"));
+            case "Pair" -> ctx.code.checkcast(ClassDesc.of("ngj.runtime.Pair"));
+            case "List", "Tuple" -> ctx.code.checkcast(ClassDesc.of("java.util.List"));
+            case "Option" -> ctx.code.checkcast(enums.containsKey("Option")
+                ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Option")
+                : ClassDesc.of("java.util.Optional"));
+            case "Result" -> ctx.code.checkcast(enums.containsKey("Result")
+                ? ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/Result")
+                : ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+            case "Function" -> ctx.code.checkcast(ClassDesc.of("java.util.function.Function"));
             default -> {
                 if (records.containsKey(targetTypeName) || datas.containsKey(targetTypeName) || enums.containsKey(targetTypeName)) {
                     ctx.code.checkcast(ClassDesc.ofInternalName(currentModule.replace('.', '/') + "/" + targetTypeName));
-                } else if (targetTypeName.equals("String")) {
-                    ctx.code.checkcast(ConstantDescs.CD_String);
                 }
             }
         }
@@ -1312,12 +1899,294 @@ public final class Java25CodeGenerator {
         ctx.code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
     }
     
+    private void generateRefine(CodeGenContext ctx, CallExpr call) {
+        if (call.typeArgs().isEmpty() || call.args().size() != 1) {
+            ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+            ctx.code.dup();
+            ctx.code.ldc("Err");
+            ctx.code.ldc("PredicateFailed");
+            ctx.code.invokespecial(
+                ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                ConstantDescs.INIT_NAME,
+                MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+            );
+            return;
+        }
+        TypeExpr targetType = resolveTypeAlias(call.typeArgs().get(0));
+        String baseTypeName = getTypeName(targetType);
+        generateExpr(ctx, call.args().get(0));
+        int valSlot = ctx.allocateLocal("$ref$" + ctx.nextSlot, baseTypeName);
+        switch (baseTypeName) {
+            case "Long" -> ctx.code.lstore(valSlot);
+            case "Int", "Bool" -> ctx.code.istore(valSlot);
+            default -> ctx.code.astore(valSlot);
+        }
+
+        var failLabel = ctx.code.newLabel();
+        var endLabel = ctx.code.newLabel();
+        emitTypeConstraintCheck(ctx.code, targetType, valSlot, baseTypeName, failLabel, Map.of());
+
+        // Ok(boxedVal)
+        ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+        ctx.code.dup();
+        ctx.code.ldc("Ok");
+        loadSlot(ctx.code, valSlot, baseTypeName);
+        boxSlotIfPrimitive(ctx.code, baseTypeName);
+        ctx.code.invokespecial(
+            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+            ConstantDescs.INIT_NAME,
+            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+        );
+        ctx.code.goto_(endLabel);
+
+        // Err("PredicateFailed")
+        ctx.code.labelBinding(failLabel);
+        ctx.code.new_(ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"));
+        ctx.code.dup();
+        ctx.code.ldc("Err");
+        ctx.code.ldc("PredicateFailed");
+        ctx.code.invokespecial(
+            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+            ConstantDescs.INIT_NAME,
+            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object, ConstantDescs.CD_Object)
+        );
+        ctx.code.labelBinding(endLabel);
+    }
+
     private void generateMatch(CodeGenContext ctx, MatchExpr matchExpr) {
+        var scrutType = inferTypeName(ctx, matchExpr.scrutinee());
         generateExpr(ctx, matchExpr.scrutinee());
-        
-        if (!matchExpr.arms().isEmpty()) {
-            ctx.code.pop();
-            generateExpr(ctx, matchExpr.arms().get(0).body());
+        if (matchExpr.arms().isEmpty()) {
+            if (scrutType.equals("Long")) ctx.code.pop2();
+            else if (!scrutType.equals("Unit")) ctx.code.pop();
+            return;
+        }
+        int scrutSlot = ctx.allocateLocal("$match$" + ctx.nextSlot, scrutType);
+        switch (scrutType) {
+            case "Long" -> ctx.code.lstore(scrutSlot);
+            case "Int", "Bool" -> ctx.code.istore(scrutSlot);
+            default -> ctx.code.astore(scrutSlot);
+        }
+
+        var endLabel = ctx.code.newLabel();
+        boolean prevReturn = ctx.hasReturn;
+        boolean allReturned = true;
+
+        for (int i = 0; i < matchExpr.arms().size(); i++) {
+            var arm = matchExpr.arms().get(i);
+            var nextArmLabel = ctx.code.newLabel();
+            emitPatternMatch(ctx, arm.pattern(), scrutSlot, scrutType, matchExpr.scrutinee(), nextArmLabel);
+
+            ctx.hasReturn = false;
+            generateExpr(ctx, arm.body());
+            if (!ctx.hasReturn) {
+                allReturned = false;
+                ctx.code.goto_(endLabel);
+            }
+            ctx.code.labelBinding(nextArmLabel);
+        }
+
+        // Fallback if no arm matched at runtime
+        ctx.code.new_(ClassDesc.of("java.lang.IllegalStateException"));
+        ctx.code.dup();
+        ctx.code.ldc("Non-exhaustive match at runtime");
+        ctx.code.invokespecial(
+            ClassDesc.of("java.lang.IllegalStateException"),
+            ConstantDescs.INIT_NAME,
+            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String)
+        );
+        ctx.code.athrow();
+
+        if (!allReturned) {
+            ctx.code.labelBinding(endLabel);
+        }
+        ctx.hasReturn = prevReturn || allReturned;
+    }
+
+    private void emitPatternMatch(
+        CodeGenContext ctx,
+        Pattern pattern,
+        int scrutSlot,
+        String scrutType,
+        Expr scrutineeExpr,
+        Label failLabel
+    ) {
+        switch (pattern) {
+            case WildcardPattern _ -> {
+                // Always matches
+            }
+            case BindingPattern bp -> {
+                int slot = ctx.allocateLocal(bp.name(), scrutType);
+                loadSlot(ctx.code, scrutSlot, scrutType);
+                storeSlot(ctx.code, slot, scrutType);
+            }
+            case LiteralPattern lp -> {
+                loadSlot(ctx.code, scrutSlot, scrutType);
+                switch (lp.literal().kind()) {
+                    case INT -> {
+                        ctx.code.ldc((Integer) lp.literal().value());
+                        ctx.code.if_icmpne(failLabel);
+                    }
+                    case BOOL -> {
+                        ctx.code.ldc((Boolean) lp.literal().value() ? 1 : 0);
+                        ctx.code.if_icmpne(failLabel);
+                    }
+                    case LONG -> {
+                        ctx.code.ldc((Long) lp.literal().value());
+                        ctx.code.lcmp();
+                        ctx.code.ifne(failLabel);
+                    }
+                    case STRING -> {
+                        ctx.code.ldc((String) lp.literal().value());
+                        ctx.code.invokevirtual(
+                            ConstantDescs.CD_Object,
+                            "equals",
+                            MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+                        );
+                        ctx.code.ifeq(failLabel);
+                    }
+                    case UNIT -> {}
+                }
+            }
+            case ConstructorPattern cp -> {
+                String tag = cp.typePath();
+                if (tag.equals("Ok") || tag.equals("Err")) {
+                    ctx.code.aload(scrutSlot);
+                    ctx.code.invokevirtual(
+                        ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                        "getKey",
+                        MethodTypeDesc.of(ConstantDescs.CD_Object)
+                    );
+                    ctx.code.ldc(tag);
+                    ctx.code.invokevirtual(
+                        ConstantDescs.CD_Object,
+                        "equals",
+                        MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object)
+                    );
+                    ctx.code.ifeq(failLabel);
+
+                    if (!cp.fields().isEmpty()) {
+                        var fieldPat = cp.fields().get(0).pattern();
+                        if (fieldPat instanceof BindingPattern bp) {
+                            String innerType = inferWrappedInnerType(scrutineeExpr, tag);
+                            ctx.code.aload(scrutSlot);
+                            ctx.code.invokevirtual(
+                                ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                                "getValue",
+                                MethodTypeDesc.of(ConstantDescs.CD_Object)
+                            );
+                            unboxIfNeeded(ctx, innerType);
+                            int slot = ctx.allocateLocal(bp.name(), innerType);
+                            storeSlot(ctx.code, slot, innerType);
+                        }
+                    }
+                } else if (tag.equals("Some") || tag.equals("None")) {
+                    ctx.code.aload(scrutSlot);
+                    ctx.code.invokevirtual(
+                        ClassDesc.of("java.util.Optional"),
+                        tag.equals("Some") ? "isPresent" : "isEmpty",
+                        MethodTypeDesc.of(ConstantDescs.CD_boolean)
+                    );
+                    ctx.code.ifeq(failLabel);
+                    if (tag.equals("Some") && !cp.fields().isEmpty()) {
+                        var fieldPat = cp.fields().get(0).pattern();
+                        if (fieldPat instanceof BindingPattern bp) {
+                            String innerType = inferWrappedInnerType(scrutineeExpr, "Some");
+                            ctx.code.aload(scrutSlot);
+                            ctx.code.invokevirtual(
+                                ClassDesc.of("java.util.Optional"),
+                                "get",
+                                MethodTypeDesc.of(ConstantDescs.CD_Object)
+                            );
+                            unboxIfNeeded(ctx, innerType);
+                            int slot = ctx.allocateLocal(bp.name(), innerType);
+                            storeSlot(ctx.code, slot, innerType);
+                        }
+                    }
+                } else {
+                    // User-defined enum variant
+                    String enumName = null;
+                    Variant matchedVariant = null;
+                    String variantShort = tag.contains(".") ? tag.substring(tag.lastIndexOf('.') + 1) : tag;
+                    String explicitEnum = tag.contains(".") ? tag.substring(0, tag.lastIndexOf('.')) : null;
+                    for (var entry : enums.entrySet()) {
+                        if (explicitEnum != null && !entry.getKey().equals(explicitEnum)) continue;
+                        for (var v : entry.getValue().variants()) {
+                            if (v.name().equals(variantShort)) {
+                                enumName = entry.getKey();
+                                matchedVariant = v;
+                                break;
+                            }
+                        }
+                        if (matchedVariant != null) break;
+                    }
+                    if (enumName != null && matchedVariant != null) {
+                        var variantDesc = ClassDesc.ofInternalName(
+                            currentModule.replace('.', '/') + "/" + enumName + "$" + matchedVariant.name());
+                        ctx.code.aload(scrutSlot);
+                        ctx.code.instanceOf(variantDesc);
+                        ctx.code.ifeq(failLabel);
+                        for (int i = 0; i < cp.fields().size() && i < matchedVariant.fields().size(); i++) {
+                            var pf = cp.fields().get(i);
+                            var vf = matchedVariant.fields().get(i);
+                            if (pf.pattern() instanceof BindingPattern bp) {
+                                String fType = getTypeName(vf.type());
+                                ctx.code.aload(scrutSlot);
+                                ctx.code.checkcast(variantDesc);
+                                ctx.code.getfield(variantDesc, vf.name(), typeToClassDesc(vf.type()));
+                                int slot = ctx.allocateLocal(bp.name(), fType);
+                                storeSlot(ctx.code, slot, fType);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private String inferWrappedInnerType(Expr scrutineeExpr, String variantTag) {
+        if (scrutineeExpr instanceof CallExpr call && call.callee() instanceof IdentExpr id) {
+            if (id.name().equals("refine") && !call.typeArgs().isEmpty() && variantTag.equals("Ok")) {
+                return getTypeName(call.typeArgs().get(0));
+            }
+            if (functions.containsKey(id.name())) {
+                TypeExpr ret = resolveTypeAlias(functions.get(id.name()).returnType());
+                if (ret instanceof GenericTypeExpr gen) {
+                    int idx = variantTag.equals("Err") ? 1 : 0;
+                    if (idx < gen.typeArgs().size()) {
+                        return getTypeName(gen.typeArgs().get(idx));
+                    }
+                }
+            }
+        }
+        return "Object";
+    }
+
+    private void loadSlot(CodeBuilder code, int slot, String typeName) {
+        switch (typeName) {
+            case "Int", "Bool" -> code.iload(slot);
+            case "Long" -> code.lload(slot);
+            default -> code.aload(slot);
+        }
+    }
+
+    private void storeSlot(CodeBuilder code, int slot, String typeName) {
+        switch (typeName) {
+            case "Int", "Bool" -> code.istore(slot);
+            case "Long" -> code.lstore(slot);
+            default -> code.astore(slot);
+        }
+    }
+
+    private void boxSlotIfPrimitive(CodeBuilder code, String typeName) {
+        switch (typeName) {
+            case "Int" -> code.invokestatic(ClassDesc.of("java.lang.Integer"), "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Integer"), ConstantDescs.CD_int));
+            case "Long" -> code.invokestatic(ClassDesc.of("java.lang.Long"), "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Long"), ConstantDescs.CD_long));
+            case "Bool" -> code.invokestatic(ClassDesc.of("java.lang.Boolean"), "valueOf",
+                MethodTypeDesc.of(ClassDesc.of("java.lang.Boolean"), ConstantDescs.CD_boolean));
+            default -> {}
         }
     }
     
@@ -1461,7 +2330,9 @@ public final class Java25CodeGenerator {
     private byte[] generateRecord(RecordDecl record) {
         var className = currentModule.replace('.', '/') + "/" + record.name();
         var classDesc = ClassDesc.ofInternalName(className);
-        
+        boolean isBoundarySchema = record.annotations().stream()
+            .anyMatch(a -> a.name().equals("boundary_schema"));
+
         return ClassFile.of().build(classDesc, classBuilder -> {
             // VALUE-01: Use preview minor version for JEP 401
             classBuilder.withVersion(CLASS_FILE_VERSION, PREVIEW_MINOR_VERSION);
@@ -1482,6 +2353,12 @@ public final class Java25CodeGenerator {
             
             classBuilder.withMethod(ConstantDescs.INIT_NAME, ctorDesc, ACC_PUBLIC, mb -> {
                 mb.withCode(code -> {
+                    // JEP 513 Flexible Constructor Bodies: validate refinements BEFORE super.<init>()
+                    emitConstructorPrologueChecks(
+                        code,
+                        record.params().stream().map(p -> new FieldDecl(p.name(), p.type(), p.span())).toList()
+                    );
+
                     code.aload(0);
                     code.invokespecial(ConstantDescs.CD_Object, ConstantDescs.INIT_NAME, 
                         MethodTypeDesc.of(ConstantDescs.CD_void));
@@ -1511,7 +2388,432 @@ public final class Java25CodeGenerator {
             
             // hashCode based on field values
             generateValueHashCode(classBuilder, record.params());
+
+            if (isBoundarySchema) {
+                generateBoundarySchemaMethods(classBuilder, classDesc, ctorDesc, record);
+            }
         });
+    }
+
+    private void emitConstructorPrologueChecks(CodeBuilder code, List<FieldDecl> fields) {
+        Map<String, Integer> paramSlots = new LinkedHashMap<>();
+        Map<String, String> paramTypes = new LinkedHashMap<>();
+        int slot = 1;
+        boolean hasAnyConstraint = false;
+        for (var f : fields) {
+            String tName = getTypeName(f.type());
+            paramSlots.put(f.name(), slot);
+            paramTypes.put(f.name(), tName);
+            slot += tName.equals("Long") ? 2 : 1;
+            if (hasRefinementOrRange(f.type())) {
+                hasAnyConstraint = true;
+            }
+        }
+        if (!hasAnyConstraint) {
+            return;
+        }
+        var failLabel = code.newLabel();
+        var passLabel = code.newLabel();
+        for (var f : fields) {
+            TypeExpr resolved = resolveTypeAlias(f.type());
+            if (hasRefinementOrRange(resolved)) {
+                emitTypeConstraintCheck(
+                    code, resolved, paramSlots.get(f.name()), paramTypes.get(f.name()), failLabel, paramSlots, paramTypes, slot
+                );
+            }
+        }
+        code.goto_(passLabel);
+        code.labelBinding(failLabel);
+        code.new_(ClassDesc.of("java.lang.IllegalArgumentException"));
+        code.dup();
+        code.ldc("Refinement invariant violated in constructor");
+        code.invokespecial(
+            ClassDesc.of("java.lang.IllegalArgumentException"),
+            ConstantDescs.INIT_NAME,
+            MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String)
+        );
+        code.athrow();
+        code.labelBinding(passLabel);
+    }
+
+    private boolean hasRefinementOrRange(TypeExpr type) {
+        TypeExpr resolved = resolveTypeAlias(type);
+        return switch (resolved) {
+            case RangeTypeExpr _, RefinedTypeExpr _ -> true;
+            case CapabilityTypeExpr cap -> hasRefinementOrRange(cap.inner());
+            default -> false;
+        };
+    }
+
+    private void emitTypeConstraintCheck(
+        CodeBuilder code,
+        TypeExpr type,
+        int valSlot,
+        String baseTypeName,
+        Label failLabel,
+        Map<String, Integer> allParamSlots
+    ) {
+        emitTypeConstraintCheck(code, type, valSlot, baseTypeName, failLabel, allParamSlots, Map.of(), valSlot + 2);
+    }
+
+    private void emitTypeConstraintCheck(
+        CodeBuilder code,
+        TypeExpr type,
+        int valSlot,
+        String baseTypeName,
+        Label failLabel,
+        Map<String, Integer> allParamSlots,
+        Map<String, String> allParamTypes,
+        int nextFreeSlot
+    ) {
+        TypeExpr resolved = resolveTypeAlias(type);
+        switch (resolved) {
+            case CapabilityTypeExpr cap ->
+                emitTypeConstraintCheck(code, cap.inner(), valSlot, baseTypeName, failLabel, allParamSlots, allParamTypes, nextFreeSlot);
+            case RangeTypeExpr rng -> {
+                emitTypeConstraintCheck(code, rng.baseType(), valSlot, baseTypeName, failLabel, allParamSlots, allParamTypes, nextFreeSlot);
+                var tmpCtx = new CodeGenContext(code, null, null);
+                tmpCtx.nextSlot = nextFreeSlot;
+                tmpCtx.locals.putAll(allParamSlots);
+                tmpCtx.localTypes.putAll(allParamTypes);
+                if (baseTypeName.equals("Long")) {
+                    if (rng.lowerBound() != null) {
+                        code.lload(valSlot);
+                        generateExpr(tmpCtx, rng.lowerBound());
+                        if (!inferTypeName(tmpCtx, rng.lowerBound()).equals("Long")) code.i2l();
+                        code.lcmp();
+                        code.iflt(failLabel);
+                    }
+                    if (rng.upperBound() != null) {
+                        code.lload(valSlot);
+                        generateExpr(tmpCtx, rng.upperBound());
+                        if (!inferTypeName(tmpCtx, rng.upperBound()).equals("Long")) code.i2l();
+                        code.lcmp();
+                        if (rng.upperInclusive()) code.ifgt(failLabel);
+                        else code.ifge(failLabel);
+                    }
+                } else {
+                    if (rng.lowerBound() != null) {
+                        code.iload(valSlot);
+                        generateExpr(tmpCtx, rng.lowerBound());
+                        code.if_icmplt(failLabel);
+                    }
+                    if (rng.upperBound() != null) {
+                        code.iload(valSlot);
+                        generateExpr(tmpCtx, rng.upperBound());
+                        if (rng.upperInclusive()) code.if_icmpgt(failLabel);
+                        else code.if_icmpge(failLabel);
+                    }
+                }
+            }
+            case RefinedTypeExpr ref -> {
+                emitTypeConstraintCheck(code, ref.baseType(), valSlot, baseTypeName, failLabel, allParamSlots, allParamTypes, nextFreeSlot);
+                if (ref.predicate() != null) {
+                    var tmpCtx = new CodeGenContext(code, null, null);
+                    tmpCtx.nextSlot = nextFreeSlot;
+                    tmpCtx.locals.putAll(allParamSlots);
+                    tmpCtx.localTypes.putAll(allParamTypes);
+                    String binder = ref.binderName() != null ? ref.binderName() : "it";
+                    tmpCtx.locals.put(binder, valSlot);
+                    tmpCtx.localTypes.put(binder, baseTypeName);
+                    generateExpr(tmpCtx, ref.predicate());
+                    code.ifeq(failLabel);
+                }
+            }
+            default -> {}
+        }
+    }
+
+    private void generateBoundarySchemaMethods(
+        ClassBuilder classBuilder,
+        ClassDesc classDesc,
+        MethodTypeDesc ctorDesc,
+        RecordDecl record
+    ) {
+        var okDesc = ClassDesc.ofInternalName(classDesc.packageName().replace('.', '/') + "/" + record.name() + "$Ok");
+        var errDesc = ClassDesc.ofInternalName(classDesc.packageName().replace('.', '/') + "/" + record.name() + "$Err");
+        var codecDesc = ClassDesc.of("ngj.runtime.BoundaryCodec");
+        var rawJsonDesc = ClassDesc.of("ngj.runtime.BoundaryCodec$RawJson");
+        var secretDesc = ClassDesc.of("ngj.runtime.SecretValue");
+        var mapDesc = ClassDesc.of("java.util.Map");
+        var linkedMapDesc = ClassDesc.of("java.util.LinkedHashMap");
+        var baosDesc = ClassDesc.of("java.io.ByteArrayOutputStream");
+        var dosDesc = ClassDesc.of("java.io.DataOutputStream");
+        var baisDesc = ClassDesc.of("java.io.ByteArrayInputStream");
+        var disDesc = ClassDesc.of("java.io.DataInputStream");
+
+        // 1. public String toJson()
+        classBuilder.withMethod("toJson", MethodTypeDesc.of(ConstantDescs.CD_String), ACC_PUBLIC, mb -> {
+            mb.withCode(code -> {
+                code.new_(linkedMapDesc);
+                code.dup();
+                code.invokespecial(linkedMapDesc, ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void));
+                code.astore(1);
+                for (var param : record.params()) {
+                    String tName = getTypeName(param.type());
+                    ClassDesc fieldDesc = typeToClassDesc(param.type());
+                    code.aload(1);
+                    code.ldc(param.name());
+                    code.aload(0);
+                    code.getfield(classDesc, param.name(), fieldDesc);
+                    if (isNestedBoundarySchemaRecord(tName)) {
+                        code.invokevirtual(fieldDesc, "toJson", MethodTypeDesc.of(ConstantDescs.CD_String));
+                        code.invokestatic(codecDesc, "rawJson", MethodTypeDesc.of(rawJsonDesc, ConstantDescs.CD_String));
+                    } else {
+                        boxSlotIfPrimitive(code, tName);
+                    }
+                    code.invokeinterface(mapDesc, "put",
+                        MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object, ConstantDescs.CD_Object));
+                    code.pop();
+                }
+                code.aload(1);
+                code.invokestatic(codecDesc, "encodeJsonObject",
+                    MethodTypeDesc.of(ConstantDescs.CD_String, mapDesc));
+                code.areturn();
+            });
+        });
+
+        // 2a. public static <Record> decodeJsonMap(Map<String, Object> map)
+        classBuilder.withMethod("decodeJsonMap", MethodTypeDesc.of(classDesc, mapDesc),
+            ACC_PUBLIC | ACC_STATIC, mb -> {
+            mb.withCode(code -> {
+                code.new_(classDesc);
+                code.dup();
+                int tempSlot = 1;
+                for (var param : record.params()) {
+                    code.aload(0);
+                    code.ldc(param.name());
+                    code.invokeinterface(mapDesc, "get",
+                        MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_Object));
+                    code.astore(tempSlot);
+                    code.aload(tempSlot);
+                    var nonNullLabel = code.newLabel();
+                    code.ifnonnull(nonNullLabel);
+                    code.new_(ClassDesc.of("java.lang.IllegalArgumentException"));
+                    code.dup();
+                    code.ldc("Missing required field: " + param.name());
+                    code.invokespecial(ClassDesc.of("java.lang.IllegalArgumentException"), ConstantDescs.INIT_NAME,
+                        MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String));
+                    code.athrow();
+                    code.labelBinding(nonNullLabel);
+
+                    String tName = getTypeName(param.type());
+                    ClassDesc fieldDesc = typeToClassDesc(param.type());
+                    switch (tName) {
+                        case "Int" -> {
+                            code.aload(tempSlot);
+                            code.invokestatic(codecDesc, "requireInt",
+                                MethodTypeDesc.of(ConstantDescs.CD_int, ConstantDescs.CD_Object));
+                        }
+                        case "Long" -> {
+                            code.aload(tempSlot);
+                            code.invokestatic(codecDesc, "requireLong",
+                                MethodTypeDesc.of(ConstantDescs.CD_long, ConstantDescs.CD_Object));
+                        }
+                        case "Bool" -> {
+                            code.aload(tempSlot);
+                            code.checkcast(ClassDesc.of("java.lang.Boolean"));
+                            code.invokevirtual(ClassDesc.of("java.lang.Boolean"), "booleanValue", MethodTypeDesc.of(ConstantDescs.CD_boolean));
+                        }
+                        case "String" -> {
+                            code.aload(tempSlot);
+                            code.checkcast(ConstantDescs.CD_String);
+                        }
+                        case "Secret" -> {
+                            code.aload(tempSlot);
+                            code.invokestatic(secretDesc, "of", MethodTypeDesc.of(secretDesc, ConstantDescs.CD_Object));
+                        }
+                        default -> {
+                            code.aload(tempSlot);
+                            if (isNestedBoundarySchemaRecord(tName)) {
+                                code.checkcast(mapDesc);
+                                code.invokestatic(fieldDesc, "decodeJsonMap", MethodTypeDesc.of(fieldDesc, mapDesc));
+                            } else if (!fieldDesc.equals(ConstantDescs.CD_Object)) {
+                                code.checkcast(fieldDesc);
+                            }
+                        }
+                    }
+                }
+                code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
+                code.areturn();
+            });
+        });
+
+        // 2b. public static Object decodeJson(String json)
+        classBuilder.withMethod("decodeJson", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_String),
+            ACC_PUBLIC | ACC_STATIC, mb -> {
+            mb.withCode(code -> {
+                var tryStart = code.newLabel();
+                var tryEnd = code.newLabel();
+                var catchStart = code.newLabel();
+                code.exceptionCatch(tryStart, tryEnd, catchStart, ClassDesc.of("java.lang.Exception"));
+
+                code.labelBinding(tryStart);
+                code.aload(0);
+                code.invokestatic(codecDesc, "decodeJsonObject", MethodTypeDesc.of(mapDesc, ConstantDescs.CD_String));
+                code.invokestatic(classDesc, "decodeJsonMap", MethodTypeDesc.of(classDesc, mapDesc));
+                code.astore(1);
+                code.new_(okDesc);
+                code.dup();
+                code.aload(1);
+                code.invokespecial(okDesc, ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object));
+                code.labelBinding(tryEnd);
+                code.areturn();
+
+                code.labelBinding(catchStart);
+                code.pop();
+                code.new_(errDesc);
+                code.dup();
+                code.ldc("BoundaryDecodeOrValidationFailed");
+                code.invokespecial(errDesc, ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object));
+                code.areturn();
+            });
+        });
+
+        // 3a. public void encodeBinaryStream(DataOutputStream dos)
+        classBuilder.withMethod("encodeBinaryStream", MethodTypeDesc.of(ConstantDescs.CD_void, dosDesc), ACC_PUBLIC, mb -> {
+            mb.withCode(code -> {
+                for (var param : record.params()) {
+                    String tName = getTypeName(param.type());
+                    ClassDesc fieldDesc = typeToClassDesc(param.type());
+                    if (isNestedBoundarySchemaRecord(tName)) {
+                        code.aload(0);
+                        code.getfield(classDesc, param.name(), fieldDesc);
+                        code.aload(1);
+                        code.invokevirtual(fieldDesc, "encodeBinaryStream", MethodTypeDesc.of(ConstantDescs.CD_void, dosDesc));
+                        continue;
+                    }
+                    code.aload(1);
+                    code.aload(0);
+                    code.getfield(classDesc, param.name(), fieldDesc);
+                    switch (tName) {
+                        case "Int" -> code.invokevirtual(dosDesc, "writeInt", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_int));
+                        case "Long" -> code.invokevirtual(dosDesc, "writeLong", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_long));
+                        case "Bool" -> code.invokevirtual(dosDesc, "writeBoolean", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_boolean));
+                        case "Secret" -> {
+                            code.pop();
+                            code.ldc("Secret(****)");
+                            code.invokevirtual(dosDesc, "writeUTF", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String));
+                        }
+                        default -> {
+                            code.invokestatic(ConstantDescs.CD_String, "valueOf",
+                                MethodTypeDesc.of(ConstantDescs.CD_String, ConstantDescs.CD_Object));
+                            code.invokevirtual(dosDesc, "writeUTF", MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_String));
+                        }
+                    }
+                }
+                code.return_();
+            });
+        });
+
+        // 3b. public byte[] encodeBinary()
+        classBuilder.withMethod("encodeBinary", MethodTypeDesc.of(ConstantDescs.CD_byte.arrayType()), ACC_PUBLIC, mb -> {
+            mb.withCode(code -> {
+                code.new_(baosDesc);
+                code.dup();
+                code.invokespecial(baosDesc, ConstantDescs.INIT_NAME, MethodTypeDesc.of(ConstantDescs.CD_void));
+                code.astore(1);
+                code.new_(dosDesc);
+                code.dup();
+                code.aload(1);
+                code.invokespecial(dosDesc, ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, ClassDesc.of("java.io.OutputStream")));
+                code.astore(2);
+
+                code.aload(0);
+                code.aload(2);
+                code.invokevirtual(classDesc, "encodeBinaryStream", MethodTypeDesc.of(ConstantDescs.CD_void, dosDesc));
+
+                code.aload(2);
+                code.invokevirtual(dosDesc, "flush", MethodTypeDesc.of(ConstantDescs.CD_void));
+                code.aload(1);
+                code.invokevirtual(baosDesc, "toByteArray", MethodTypeDesc.of(ConstantDescs.CD_byte.arrayType()));
+                code.areturn();
+            });
+        });
+
+        // 4a. public static <Record> decodeBinaryStream(DataInputStream dis)
+        classBuilder.withMethod("decodeBinaryStream", MethodTypeDesc.of(classDesc, disDesc),
+            ACC_PUBLIC | ACC_STATIC, mb -> {
+            mb.withCode(code -> {
+                code.new_(classDesc);
+                code.dup();
+                for (var param : record.params()) {
+                    String tName = getTypeName(param.type());
+                    ClassDesc fieldDesc = typeToClassDesc(param.type());
+                    code.aload(0);
+                    switch (tName) {
+                        case "Int" -> code.invokevirtual(disDesc, "readInt", MethodTypeDesc.of(ConstantDescs.CD_int));
+                        case "Long" -> code.invokevirtual(disDesc, "readLong", MethodTypeDesc.of(ConstantDescs.CD_long));
+                        case "Bool" -> code.invokevirtual(disDesc, "readBoolean", MethodTypeDesc.of(ConstantDescs.CD_boolean));
+                        case "String" -> code.invokevirtual(disDesc, "readUTF", MethodTypeDesc.of(ConstantDescs.CD_String));
+                        case "Secret" -> {
+                            code.invokevirtual(disDesc, "readUTF", MethodTypeDesc.of(ConstantDescs.CD_String));
+                            code.invokestatic(secretDesc, "of", MethodTypeDesc.of(secretDesc, ConstantDescs.CD_Object));
+                        }
+                        default -> {
+                            if (isNestedBoundarySchemaRecord(tName)) {
+                                code.invokestatic(fieldDesc, "decodeBinaryStream", MethodTypeDesc.of(fieldDesc, disDesc));
+                            } else {
+                                code.invokevirtual(disDesc, "readUTF", MethodTypeDesc.of(ConstantDescs.CD_String));
+                                if (!fieldDesc.equals(ConstantDescs.CD_String) && !fieldDesc.equals(ConstantDescs.CD_Object)) {
+                                    code.checkcast(fieldDesc);
+                                }
+                            }
+                        }
+                    }
+                }
+                code.invokespecial(classDesc, ConstantDescs.INIT_NAME, ctorDesc);
+                code.areturn();
+            });
+        });
+
+        // 4b. public static Object decodeBinary(byte[] bytes)
+        classBuilder.withMethod("decodeBinary", MethodTypeDesc.of(ConstantDescs.CD_Object, ConstantDescs.CD_byte.arrayType()),
+            ACC_PUBLIC | ACC_STATIC, mb -> {
+            mb.withCode(code -> {
+                var tryStart = code.newLabel();
+                var tryEnd = code.newLabel();
+                var catchStart = code.newLabel();
+                code.exceptionCatch(tryStart, tryEnd, catchStart, ClassDesc.of("java.lang.Exception"));
+
+                code.labelBinding(tryStart);
+                code.new_(disDesc);
+                code.dup();
+                code.new_(baisDesc);
+                code.dup();
+                code.aload(0);
+                code.invokespecial(baisDesc, ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_byte.arrayType()));
+                code.invokespecial(disDesc, ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, ClassDesc.of("java.io.InputStream")));
+                code.invokestatic(classDesc, "decodeBinaryStream", MethodTypeDesc.of(classDesc, disDesc));
+                code.astore(1);
+                code.new_(okDesc);
+                code.dup();
+                code.aload(1);
+                code.invokespecial(okDesc, ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object));
+                code.labelBinding(tryEnd);
+                code.areturn();
+
+                code.labelBinding(catchStart);
+                code.pop();
+                code.new_(errDesc);
+                code.dup();
+                code.ldc("BoundaryBinaryDecodeFailed");
+                code.invokespecial(errDesc, ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_Object));
+                code.areturn();
+            });
+        });
+    }
+
+    private boolean isNestedBoundarySchemaRecord(String typeName) {
+        RecordDecl rec = records.get(typeName);
+        return rec != null && rec.annotations().stream().anyMatch(a -> a.name().equals("boundary_schema"));
     }
     
     /**
@@ -1526,7 +2828,6 @@ public final class Java25CodeGenerator {
                 code.aload(0);
                 code.aload(1);
                 var notSame = code.newLabel();
-                var returnTrue = code.newLabel();
                 var returnFalse = code.newLabel();
                 var end = code.newLabel();
                 
@@ -1597,19 +2898,6 @@ public final class Java25CodeGenerator {
     
     /**
      * VALUE-01: Generate enum as a sealed hierarchy of value classes.
-     * 
-     * JVM representation:
-     *   public sealed value interface Shape permits Shape.Circle, Shape.Rectangle, Shape.Point {}
-     *   public final value class Shape.Circle implements Shape { ... }
-     *   public final value class Shape.Rectangle implements Shape { ... }
-     *   public final value class Shape.Point implements Shape {}
-     * 
-     * We generate:
-     * 1. A sealed abstract base class (the enum type itself)
-     * 2. A nested value class for each variant (permitted subclasses)
-     * 
-     * Note: Since Java's sealed classes require the PermittedSubclasses attribute,
-     * we generate it. For value classes, we omit ACC_IDENTITY.
      */
     private byte[] generateEnum(EnumDecl enumDecl) {
         var className = currentModule.replace('.', '/') + "/" + enumDecl.name();
@@ -1688,6 +2976,9 @@ public final class Java25CodeGenerator {
                     
                     classBuilder.withMethod(ConstantDescs.INIT_NAME, ctorDesc, ACC_PUBLIC, mb -> {
                         mb.withCode(code -> {
+                            // JEP 513 Flexible Constructor Bodies: validate refinements BEFORE super.<init>()
+                            emitConstructorPrologueChecks(code, variantFields);
+
                             code.aload(0);
                             code.invokespecial(baseClassDesc, ConstantDescs.INIT_NAME,
                                 MethodTypeDesc.of(ConstantDescs.CD_void));
@@ -1725,40 +3016,51 @@ public final class Java25CodeGenerator {
     }
     
     private String getTypeName(TypeExpr type) {
-        return switch (type) {
+        TypeExpr resolved = resolveTypeAlias(type);
+        return switch (resolved) {
             case SimpleTypeExpr simple -> simple.name();
             case GenericTypeExpr generic -> generic.name();
             case UnitTypeExpr _ -> "Unit";
+            case CapabilityTypeExpr cap -> getTypeName(cap.inner());
+            case CaptureSetTypeExpr _ -> "Object";
+            case RefinedTypeExpr ref -> getTypeName(ref.baseType());
+            case RangeTypeExpr rng -> getTypeName(rng.baseType());
+            case FunctionTypeExpr _ -> "Function";
+            case TupleTypeExpr _ -> "Tuple";
         };
     }
     
     private class CodeGenContext {
         final CodeBuilder code;
         final FnDecl fn;
+        final ClassDesc ownerClass;
         final Map<String, Integer> locals = new HashMap<>();
         final Map<String, String> localTypes = new HashMap<>();
         int nextSlot;
         boolean hasReturn = false;
         
-        CodeGenContext(CodeBuilder code, FnDecl fn) {
+        CodeGenContext(CodeBuilder code, FnDecl fn, ClassDesc ownerClass) {
             this.code = code;
             this.fn = fn;
+            this.ownerClass = ownerClass;
             this.nextSlot = 0;
             
-            for (var param : fn.params()) {
-                locals.put(param.name(), nextSlot);
-                var typeName = getTypeName(param.type());
-                localTypes.put(param.name(), typeName);
-                if (typeName.equals("Long")) {
-                    nextSlot += 2;
-                } else {
-                    nextSlot++;
+            if (fn != null) {
+                for (var param : fn.params()) {
+                    locals.put(param.name(), nextSlot);
+                    var typeName = getTypeName(param.type());
+                    localTypes.put(param.name(), typeName);
+                    if (typeName.equals("Long")) {
+                        nextSlot += 2;
+                    } else {
+                        nextSlot++;
+                    }
                 }
             }
         }
         
         CodeGenContext withCode(CodeBuilder newCode) {
-            var ctx = new CodeGenContext(newCode, fn);
+            var ctx = new CodeGenContext(newCode, fn, ownerClass);
             ctx.locals.putAll(this.locals);
             ctx.localTypes.putAll(this.localTypes);
             ctx.nextSlot = this.nextSlot;

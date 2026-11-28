@@ -53,6 +53,16 @@ compilerとテストはリポジトリに存在する。以下は受入条件で
 | GENERIC-01 | `List<Int>`が型検査通過 | value型ジェネリクス拒否 | 1 |
 | TARGET-01 | backend間で意味論一致 | 未対応preview/ABIを黙ってfallbackしない | 4 |
 | TARGET-02 | Valhalla未対応時の明示エラー | 黙ってidentity fallback | 1 |
+| DIAG-01 | `agent`モードで導出スタック・式断片・マスク済反例を返却 | `human`モードとの診断ID不一致、機密文字列の露出 | 2 |
+| GATE-01 | `spec-drift`/`axiom-drift`/`sibling-check`通過パッチのみ受理 | 契約弱化・無許可公理追加・兄弟破壊パッチの受理 | 2 |
+| CAP-02 | `Secret.map`へ`effects()`クロージャのみ受理 | 外部Capability捕捉クロージャの受理 | 2 |
+| SEP-01 | `read`共有での`fork`並列読取 | 同一`ExclusiveCapability`への並列`update`受理 | 2 |
+| REF-01 | 範囲型`Int[lo..hi]`・単調性解析・`refine`経由昇格 | 境界外アクセス、暗黙キャストによる篩型偽装 | 2 |
+| PROTO-01 | `protocol`全状態到達・`final`完了・`refines`検査・Mermaid出力 | 手順スキップ、未解決`?`脱出、バイパス洗練の受理 | 3 |
+| BUDGET-01 | `Budget.split`による残高保存・並列委譲 | 負値分割・総和超過・二重消費の受理 | 3 |
+| IFC-03 | `Validated`昇格後の特権Effect実行 | `Untrusted`分岐直下での`PaymentWrite`等の受理 | 3 |
+| CERT-01 | 非空虚性・凍結`spec`拘束・`Post2Exe`負例拒否 | 矛盾事前条件、空`ensures`、テスト漏れ仕様の強仕様扱い | 4 |
+| PROOF-01 | 消去可能`proof`/`lemma`検証と`?proof_hole`局所化 | `MathInt`の実行部混入、`?proof_hole`残存での`proof-required`合格 | 4 |
 
 fault/cancel/cleanup試験はfailure injectionで全退出経路を通す。プロセスクラッシュ時の業務復旧はadapter integration testで別に検証し、言語の静的保証と混ぜない。
 
@@ -64,8 +74,9 @@ fault/cancel/cleanup試験はfailure injectionで全退出経路を通す。プ�
 |---|---|
 | A | 言語マニュアル・API一覧・通常のコンパイラfeedback |
 | B | A + 型に基づくcontext取得 |
-| C | B + Typed Holes・部分検査・構造化診断 |
+| C | B + Typed Holes・部分検査・構造化診断（`human`） |
 | D | C + 契約・反例・property tests |
+| E | D + 二層診断（`agent`）・証明穴局所化・Surface B/Cゲート・`protocol`図 |
 
 対象はREST/DB境界、バイナリパーサー、bounded並列CLI、結果不明を含む決済復旧、API変更修正。最低30の独立課題、各条件3回以上を初期pilotとし、信頼区間を添える。必要標本数はpilot分散から再計画する。課題/seed/モデル変更後に同一実験として比較しない。
 

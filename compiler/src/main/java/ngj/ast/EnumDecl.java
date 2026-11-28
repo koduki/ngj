@@ -10,8 +10,8 @@ import java.util.List;
  * 
  * Example:
  *   enum Option<T> {
- *       Some { value: T },
- *       None
+ *       Some(value: T),
+ *       None()
  *   }
  * 
  * JVM representation: sealed hierarchy of value classes
@@ -21,11 +21,16 @@ public record EnumDecl(
     boolean isPublic,
     List<String> typeParams,
     List<Variant> variants,
+    List<Annotation> annotations,
     SourceSpan span
 ) implements TopLevelDecl {
     
+    public EnumDecl(String name, boolean isPublic, List<String> typeParams, List<Variant> variants, SourceSpan span) {
+        this(name, isPublic, typeParams, variants, List.of(), span);
+    }
+
     public EnumDecl(String name, boolean isPublic, List<Variant> variants, SourceSpan span) {
-        this(name, isPublic, List.of(), variants, span);
+        this(name, isPublic, List.of(), variants, List.of(), span);
     }
     
     public boolean isGeneric() {

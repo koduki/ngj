@@ -11,6 +11,7 @@ public final class Parser {
     private final List<Diagnostic> diagnostics = new ArrayList<>();
     private Token current;
     private Token previous;
+    private boolean inProofContext = false;
     
     public Parser(Lexer lexer, String fileName) {
         this.lexer = lexer;
@@ -101,7 +102,8 @@ public final class Parser {
                type == TokenType.VAL || type == TokenType.VAR ||
                type == TokenType.FOR || type == TokenType.YIELD ||
                type == TokenType.WHILE || type == TokenType.CASE ||
-               type == TokenType.EFFECTS;
+               type == TokenType.EFFECTS || type == TokenType.IDENTITY ||
+               type == TokenType.CLASS || type == TokenType.MUT;
     }
     
     private ImportDecl parseImportDecl() throws ParseException {
@@ -157,6 +159,7 @@ public final class Parser {
     }
     
     private TopLevelDecl parseTopLevelDecl() throws ParseException {
+        var annotations = parseAnnotations();
         boolean isPublic = false;
         
         if (match(TokenType.PUB)) {
@@ -171,19 +174,52 @@ public final class Parser {
         }
         
         if (check(TokenType.FN)) {
-            return parseFnDecl(isPublic);
+            return parseFnDecl(isPublic, annotations);
         } else if (check(TokenType.RECORD)) {
-            return parseRecordDecl(isPublic);
+            return parseRecordDecl(isPublic, annotations);
         } else if (check(TokenType.DATA)) {
             return parseDataDeclLegacy(isPublic);
         } else if (check(TokenType.ENUM)) {
-            return parseEnumDecl(isPublic);
+            return parseEnumDecl(isPublic, annotations);
+        } else if (checkIdent("type")) {
+            return parseTypeAliasDecl(isPublic, annotations);
+        } else if (checkIdent("protocol")) {
+            return parseProtocolDecl(isPublic, annotations);
+        } else if (checkIdent("spec")) {
+            return parseSpecFnDecl(isPublic, annotations);
+        } else if (checkIdent("lemma")) {
+            return parseLemmaDecl(isPublic, annotations);
         }
         
-        throw error("NGJ-PARSE-002", "Expected function, record, or enum declaration", current.span());
+        throw error("NGJ-PARSE-002", "Expected function, record, enum, type, protocol, spec, or lemma declaration", current.span());
+    }
+
+    private List<Annotation> parseAnnotations() throws ParseException {
+        var annotations = new ArrayList<Annotation>();
+        while (match(TokenType.AT)) {
+            int annStart = previous.span().startByte();
+            consumeIdentOrKeyword("Expected annotation name after '@'");
+            String name = previous.text();
+            var args = new ArrayList<String>();
+            if (match(TokenType.LPAREN)) {
+                if (!check(TokenType.RPAREN)) {
+                    do {
+                        if (match(TokenType.STRING_LITERAL)) {
+                            args.add((String) previous.value());
+                        } else {
+                            consumeIdentOrKeyword("Expected annotation argument");
+                            args.add(previous.text());
+                        }
+                    } while (match(TokenType.COMMA));
+                }
+                consume(TokenType.RPAREN, "Expected ')' after annotation arguments");
+            }
+            annotations.add(new Annotation(name, args, span(annStart, previous.span().endByte())));
+        }
+        return annotations;
     }
     
-    private FnDecl parseFnDecl(boolean isPublic) throws ParseException {
+    private FnDecl parseFnDecl(boolean isPublic, List<Annotation> annotations) throws ParseException {
         int start = current.span().startByte();
         consume(TokenType.FN, "Expected 'fn'");
         
@@ -203,22 +239,25 @@ public final class Parser {
         var returnType = parseTypeExpr();
         
         var effects = parseEffectBound();
+        var captureBounds = parseCaptureBounds();
+        var contracts = parseContractClauses();
         
         var body = parseBlock();
         
-        return new FnDecl(name, isPublic, params, returnType, effects, body,
-            span(start, previous.span().endByte()));
+        return new FnDecl(name, isPublic, params, returnType, effects, captureBounds,
+            annotations, contracts, body, span(start, previous.span().endByte()));
     }
     
     private Param parseParam() throws ParseException {
         int start = current.span().startByte();
+        boolean isConsume = matchIdent("consume");
         consume(TokenType.IDENT, "Expected parameter name");
         String name = previous.text();
         
         consume(TokenType.COLON, "Expected ':' after parameter name");
         var type = parseTypeExpr();
         
-        return new Param(name, type, span(start, previous.span().endByte()));
+        return new Param(name, type, isConsume, span(start, previous.span().endByte()));
     }
     
     private List<String> parseEffectBound() throws ParseException {
@@ -254,19 +293,205 @@ public final class Parser {
         }
         
         consume(TokenType.RPAREN, "Expected ')' after effect list");
-        
-        if (!effects.isEmpty()) {
-            diagnostics.add(Diagnostic.error(
-                "NGJ-EFFECT-001",
-                "Effects other than 'effects()' are not supported in MVP",
-                previous.span()
-            ));
-        }
-        
         return effects;
     }
+
+    private List<String> parseCaptureBounds() throws ParseException {
+        var bounds = new ArrayList<String>();
+        if (matchIdent("caps")) {
+            consume(TokenType.LPAREN, "Expected '(' after 'caps'");
+            if (!check(TokenType.RPAREN)) {
+                do {
+                    consume(TokenType.IDENT, "Expected capture target");
+                    bounds.add(previous.text());
+                } while (match(TokenType.COMMA));
+            }
+            consume(TokenType.RPAREN, "Expected ')' after capture bounds");
+        }
+        return bounds;
+    }
+
+    private List<ContractClause> parseContractClauses() throws ParseException {
+        var clauses = new ArrayList<ContractClause>();
+        while (checkIdent("requires") || checkIdent("ensures")) {
+            int clauseStart = current.span().startByte();
+            ContractClause.Kind kind;
+            if (matchIdent("requires")) {
+                kind = ContractClause.Kind.REQUIRES;
+            } else {
+                advance();
+                kind = ContractClause.Kind.ENSURES;
+            }
+            var cond = parseExpr();
+            clauses.add(new ContractClause(kind, cond, span(clauseStart, previous.span().endByte())));
+        }
+        return clauses;
+    }
+
+    private TypeAliasDecl parseTypeAliasDecl(boolean isPublic, List<Annotation> annotations) throws ParseException {
+        int start = current.span().startByte();
+        advance(); // consume 'type'
+        consume(TokenType.IDENT, "Expected type alias name");
+        String name = previous.text();
+
+        var typeParams = new ArrayList<String>();
+        if (match(TokenType.LANGLE)) {
+            do {
+                consume(TokenType.IDENT, "Expected type parameter name");
+                typeParams.add(previous.text());
+            } while (match(TokenType.COMMA));
+            consume(TokenType.RANGLE, "Expected '>' after type parameters");
+        }
+
+        consume(TokenType.ASSIGN, "Expected '=' after type alias name");
+        var targetType = parseTypeExpr();
+        consume(TokenType.SEMICOLON, "Expected ';' after type alias declaration");
+
+        return new TypeAliasDecl(name, isPublic, typeParams, targetType, annotations,
+            span(start, previous.span().endByte()));
+    }
+
+    private ProtocolDecl parseProtocolDecl(boolean isPublic, List<Annotation> annotations) throws ParseException {
+        int start = current.span().startByte();
+        advance(); // consume 'protocol'
+        consume(TokenType.IDENT, "Expected protocol name");
+        String name = previous.text();
+
+        String parentProtocol = null;
+        if (matchIdent("refines")) {
+            consume(TokenType.IDENT, "Expected parent protocol name after 'refines'");
+            parentProtocol = previous.text();
+        }
+
+        consume(TokenType.LBRACE, "Expected '{' after protocol header");
+        String initialState = null;
+        var states = new ArrayList<String>();
+        var finalStates = new ArrayList<String>();
+        var transitions = new ArrayList<ProtocolDecl.Transition>();
+
+        while (!check(TokenType.RBRACE) && !isAtEnd()) {
+            if (matchIdent("initial")) {
+                consume(TokenType.IDENT, "Expected initial state name");
+                initialState = previous.text();
+                consume(TokenType.SEMICOLON, "Expected ';' after initial state");
+            } else if (matchIdent("states")) {
+                if (!check(TokenType.SEMICOLON)) {
+                    do {
+                        consume(TokenType.IDENT, "Expected state name");
+                        states.add(previous.text());
+                    } while (match(TokenType.COMMA));
+                }
+                consume(TokenType.SEMICOLON, "Expected ';' after states");
+            } else if (matchIdent("final")) {
+                if (!check(TokenType.SEMICOLON)) {
+                    do {
+                        consume(TokenType.IDENT, "Expected final state name");
+                        finalStates.add(previous.text());
+                    } while (match(TokenType.COMMA));
+                }
+                consume(TokenType.SEMICOLON, "Expected ';' after final states");
+            } else if (matchIdent("transition")) {
+                int trStart = previous.span().startByte();
+                consume(TokenType.IDENT, "Expected transition name");
+                String trName = previous.text();
+                consume(TokenType.LPAREN, "Expected '(' after transition name");
+                consume(TokenType.IDENT, "Expected source state");
+                String fromState = previous.text();
+                consume(TokenType.RPAREN, "Expected ')' after source state");
+                consume(TokenType.ARROW, "Expected '->' before target state");
+                consume(TokenType.IDENT, "Expected target state");
+                String toState = previous.text();
+                List<String> effects = check(TokenType.EFFECTS) ? parseEffectBound() : List.of();
+                consume(TokenType.SEMICOLON, "Expected ';' after transition");
+                transitions.add(new ProtocolDecl.Transition(trName, fromState, toState, effects,
+                    span(trStart, previous.span().endByte())));
+            } else {
+                throw error("NGJ-PARSE-007", "Expected 'initial', 'states', 'final', or 'transition' in protocol body, got " + current.type(), current.span());
+            }
+        }
+
+        consume(TokenType.RBRACE, "Expected '}' after protocol body");
+        var allStates = new LinkedHashSet<String>();
+        if (initialState != null) {
+            allStates.add(initialState);
+        }
+        allStates.addAll(states);
+        allStates.addAll(finalStates);
+        return new ProtocolDecl(name, isPublic, parentProtocol, initialState, List.copyOf(allStates), finalStates,
+            transitions, annotations, span(start, previous.span().endByte()));
+    }
+
+    private SpecFnDecl parseSpecFnDecl(boolean isPublic, List<Annotation> annotations) throws ParseException {
+        int start = current.span().startByte();
+        advance(); // consume 'spec'
+        boolean isPredicate;
+        if (match(TokenType.FN)) {
+            isPredicate = false;
+        } else if (matchIdent("predicate")) {
+            isPredicate = true;
+        } else {
+            throw error("NGJ-PARSE-007", "Expected 'fn' or 'predicate' after 'spec', got " + current.type(), current.span());
+        }
+
+        consume(TokenType.IDENT, "Expected spec name");
+        String name = previous.text();
+
+        consume(TokenType.LPAREN, "Expected '(' after spec name");
+        var params = new ArrayList<Param>();
+        if (!check(TokenType.RPAREN)) {
+            do {
+                params.add(parseParam());
+            } while (match(TokenType.COMMA));
+        }
+        consume(TokenType.RPAREN, "Expected ')' after spec parameters");
+
+        TypeExpr returnType;
+        if (isPredicate && !check(TokenType.ARROW)) {
+            returnType = new SimpleTypeExpr("Bool", span(previous.span().startByte(), previous.span().endByte()));
+        } else {
+            consume(TokenType.ARROW, "Expected '->' before spec return type");
+            returnType = parseTypeExpr();
+        }
+
+        if (check(TokenType.EFFECTS)) {
+            parseEffectBound();
+        }
+
+        var body = parseBlock();
+        return new SpecFnDecl(name, isPublic, isPredicate, params, returnType, body, annotations,
+            span(start, previous.span().endByte()));
+    }
+
+    private LemmaDecl parseLemmaDecl(boolean isPublic, List<Annotation> annotations) throws ParseException {
+        int start = current.span().startByte();
+        advance(); // consume 'lemma'
+        consume(TokenType.IDENT, "Expected lemma name");
+        String name = previous.text();
+
+        consume(TokenType.LPAREN, "Expected '(' after lemma name");
+        var params = new ArrayList<Param>();
+        if (!check(TokenType.RPAREN)) {
+            do {
+                params.add(parseParam());
+            } while (match(TokenType.COMMA));
+        }
+        consume(TokenType.RPAREN, "Expected ')' after lemma parameters");
+
+        var contracts = parseContractClauses();
+        boolean prevProof = inProofContext;
+        inProofContext = true;
+        BlockExpr body;
+        try {
+            body = parseBlock();
+        } finally {
+            inProofContext = prevProof;
+        }
+
+        return new LemmaDecl(name, isPublic, params, contracts, body, annotations,
+            span(start, previous.span().endByte()));
+    }
     
-    private RecordDecl parseRecordDecl(boolean isPublic) throws ParseException {
+    private RecordDecl parseRecordDecl(boolean isPublic, List<Annotation> annotations) throws ParseException {
         int start = current.span().startByte();
         consume(TokenType.RECORD, "Expected 'record'");
         
@@ -283,7 +508,7 @@ public final class Parser {
         consume(TokenType.RPAREN, "Expected ')' after record fields");
         consume(TokenType.SEMICOLON, "Expected ';' after record declaration");
         
-        return new RecordDecl(name, isPublic, params, span(start, previous.span().endByte()));
+        return new RecordDecl(name, isPublic, params, annotations, span(start, previous.span().endByte()));
     }
     
     private DataDecl parseDataDeclLegacy(boolean isPublic) throws ParseException {
@@ -338,7 +563,7 @@ public final class Parser {
         return new FieldDecl(name, type, span(start, previous.span().endByte()));
     }
     
-    private EnumDecl parseEnumDecl(boolean isPublic) throws ParseException {
+    private EnumDecl parseEnumDecl(boolean isPublic, List<Annotation> annotations) throws ParseException {
         int start = current.span().startByte();
         consume(TokenType.ENUM, "Expected 'enum'");
         
@@ -365,7 +590,7 @@ public final class Parser {
         
         consume(TokenType.RBRACE, "Expected '}' after enum variants");
         
-        return new EnumDecl(name, isPublic, typeParams, variants, span(start, previous.span().endByte()));
+        return new EnumDecl(name, isPublic, typeParams, variants, annotations, span(start, previous.span().endByte()));
     }
     
     /**
@@ -399,13 +624,90 @@ public final class Parser {
     
     private TypeExpr parseTypeExpr() throws ParseException {
         int start = current.span().startByte();
+        TypeExpr base = parseBaseTypeExpr();
+
+        if (matchIdent("where")) {
+            var pred = parseExpr();
+            base = new RefinedTypeExpr(null, base, pred, span(start, previous.span().endByte()));
+        }
+
+        return base;
+    }
+
+    private TypeExpr parseBaseTypeExpr() throws ParseException {
+        int start = current.span().startByte();
         
         if (match(TokenType.UNIT)) {
             return new UnitTypeExpr(span(start, previous.span().endByte()));
         }
+
+        if (matchIdent("read")) {
+            var inner = parseBaseTypeExpr();
+            return new CapabilityTypeExpr(CapabilityTypeExpr.CapabilityMode.READ, inner,
+                span(start, previous.span().endByte()));
+        }
+
+        if (matchIdent("update")) {
+            var inner = parseBaseTypeExpr();
+            return new CapabilityTypeExpr(CapabilityTypeExpr.CapabilityMode.UPDATE, inner,
+                span(start, previous.span().endByte()));
+        }
+
+        if (matchIdent("caps")) {
+            consume(TokenType.LPAREN, "Expected '(' after 'caps'");
+            var targets = new ArrayList<String>();
+            if (!check(TokenType.RPAREN)) {
+                do {
+                    consume(TokenType.IDENT, "Expected capture target");
+                    targets.add(previous.text());
+                } while (match(TokenType.COMMA));
+            }
+            consume(TokenType.RPAREN, "Expected ')' after capture targets");
+            return new CaptureSetTypeExpr(targets, span(start, previous.span().endByte()));
+        }
+
+        if (match(TokenType.LBRACE)) {
+            consume(TokenType.IDENT, "Expected refinement binder variable");
+            String binder = previous.text();
+            consume(TokenType.COLON, "Expected ':' after refinement binder");
+            var baseType = parseBaseTypeExpr();
+            if (!matchIdent("where")) {
+                throw error("NGJ-PARSE-007", "Expected 'where' in refinement type, got " + current.type(), current.span());
+            }
+            var pred = parseExpr();
+            consume(TokenType.RBRACE, "Expected '}' after refinement type");
+            return new RefinedTypeExpr(binder, baseType, pred, span(start, previous.span().endByte()));
+        }
+
+        if (match(TokenType.LPAREN)) {
+            var elements = new ArrayList<TypeExpr>();
+            if (!check(TokenType.RPAREN)) {
+                do {
+                    elements.add(parseTypeExpr());
+                } while (match(TokenType.COMMA));
+            }
+            consume(TokenType.RPAREN, "Expected ')' after type list");
+
+            if (match(TokenType.ARROW)) {
+                var returnType = parseTypeExpr();
+                var effects = check(TokenType.EFFECTS) ? parseEffectBound() : List.<String>of();
+                var caps = parseCaptureBounds();
+                return new FunctionTypeExpr(elements, returnType, effects, caps,
+                    span(start, previous.span().endByte()));
+            }
+
+            if (elements.isEmpty()) {
+                return new UnitTypeExpr(span(start, previous.span().endByte()));
+            }
+            if (elements.size() == 1) {
+                return elements.get(0);
+            }
+            return new TupleTypeExpr(elements, span(start, previous.span().endByte()));
+        }
         
         consume(TokenType.IDENT, "Expected type name");
         String name = previous.text();
+        TypeExpr base;
         
         if (match(TokenType.LANGLE)) {
             var typeArgs = new ArrayList<TypeExpr>();
@@ -414,19 +716,31 @@ public final class Parser {
             } while (match(TokenType.COMMA));
             
             consume(TokenType.RANGLE, "Expected '>' after type arguments");
-            
-            if (!name.equals("Result") && !name.equals("Option") && !name.equals("List")) {
-                diagnostics.add(Diagnostic.error(
-                    "NGJ-PARSE-004",
-                    "Generic types other than Result<T,E>, Option<T>, and List<T> are not supported in MVP",
-                    span(start, previous.span().endByte())
-                ));
-            }
-            
-            return new GenericTypeExpr(name, typeArgs, span(start, previous.span().endByte()));
+            base = new GenericTypeExpr(name, typeArgs, span(start, previous.span().endByte()));
+        } else {
+            base = new SimpleTypeExpr(name, span(start, previous.span().endByte()));
         }
-        
-        return new SimpleTypeExpr(name, span(start, previous.span().endByte()));
+
+        if (match(TokenType.LBRACKET)) {
+            var lower = parseExpr();
+            boolean upperInclusive;
+            Expr upper = null;
+            if (match(TokenType.DOT_DOT_LT)) {
+                upperInclusive = false;
+                upper = parseExpr();
+            } else if (match(TokenType.DOT_DOT)) {
+                upperInclusive = true;
+                if (!check(TokenType.RBRACKET)) {
+                    upper = parseExpr();
+                }
+            } else {
+                throw error("NGJ-PARSE-007", "Expected '..' or '..<' in range type, got " + current.type(), current.span());
+            }
+            consume(TokenType.RBRACKET, "Expected ']' after range type");
+            base = new RangeTypeExpr(base, lower, upper, upperInclusive, span(start, previous.span().endByte()));
+        }
+
+        return base;
     }
     
     private BlockExpr parseBlock() throws ParseException {
@@ -438,13 +752,23 @@ public final class Parser {
         
         while (!check(TokenType.RBRACE) && !isAtEnd()) {
             if (check(TokenType.VAL)) {
-                statements.add(parseValStmt());
+                if (peekNext().type() == TokenType.LPAREN) {
+                    statements.add(parseTupleDestructureStmt());
+                } else {
+                    statements.add(parseValStmt());
+                }
             } else if (check(TokenType.VAR)) {
                 statements.add(parseVarStmt());
             } else if (check(TokenType.LET)) {
                 statements.add(parseLetStmtLegacy());
             } else if (check(TokenType.RETURN)) {
                 statements.add(parseReturnStmt());
+            } else if (checkIdent("invariant")) {
+                statements.add(parseInvariantStmt());
+            } else if (checkIdent("proof") && peekNext().type() == TokenType.LBRACE) {
+                statements.add(parseProofStmt());
+            } else if (checkIdent("assume") && peekNext().type() == TokenType.LPAREN) {
+                statements.add(parseAssumeStmt());
             } else if (check(TokenType.IDENT) && peekNext().type() == TokenType.ASSIGN) {
                 statements.add(parseAssignStmt());
             } else {
@@ -471,6 +795,61 @@ public final class Parser {
         consume(TokenType.RBRACE, "Expected '}'");
         
         return new BlockExpr(statements, tailExpr, span(start, previous.span().endByte()));
+    }
+
+    private TupleDestructureStmt parseTupleDestructureStmt() throws ParseException {
+        int start = current.span().startByte();
+        consume(TokenType.VAL, "Expected 'val'");
+        consume(TokenType.LPAREN, "Expected '('");
+        var names = new ArrayList<String>();
+        var types = new ArrayList<TypeExpr>();
+        do {
+            consume(TokenType.IDENT, "Expected variable name in tuple destructuring");
+            names.add(previous.text());
+            TypeExpr t = null;
+            if (match(TokenType.COLON)) {
+                t = parseTypeExpr();
+            }
+            types.add(t);
+        } while (match(TokenType.COMMA));
+        consume(TokenType.RPAREN, "Expected ')' after tuple destructuring names");
+        consume(TokenType.ASSIGN, "Expected '=' after tuple destructuring");
+        var init = parseExpr();
+        consume(TokenType.SEMICOLON, "Expected ';' after tuple destructuring");
+        return new TupleDestructureStmt(names, types, init, span(start, previous.span().endByte()));
+    }
+
+    private InvariantStmt parseInvariantStmt() throws ParseException {
+        int start = current.span().startByte();
+        advance(); // consume 'invariant'
+        var cond = parseExpr();
+        match(TokenType.SEMICOLON);
+        return new InvariantStmt(cond, span(start, previous.span().endByte()));
+    }
+
+    private ProofStmt parseProofStmt() throws ParseException {
+        int start = current.span().startByte();
+        advance(); // consume 'proof'
+        boolean prevProof = inProofContext;
+        inProofContext = true;
+        BlockExpr body;
+        try {
+            body = parseBlock();
+        } finally {
+            inProofContext = prevProof;
+        }
+        match(TokenType.SEMICOLON);
+        return new ProofStmt(body, span(start, previous.span().endByte()));
+    }
+
+    private AssumeStmt parseAssumeStmt() throws ParseException {
+        int start = current.span().startByte();
+        advance(); // consume 'assume'
+        consume(TokenType.LPAREN, "Expected '(' after 'assume'");
+        var cond = parseExpr();
+        consume(TokenType.RPAREN, "Expected ')' after assume condition");
+        consume(TokenType.SEMICOLON, "Expected ';' after assume statement");
+        return new AssumeStmt(cond, span(start, previous.span().endByte()));
     }
     
     private Token peekedToken = null;
@@ -752,12 +1131,7 @@ public final class Parser {
                     } while (match(TokenType.COMMA));
                 }
                 consume(TokenType.RPAREN, "Expected ')' after arguments");
-                diagnostics.add(Diagnostic.error(
-                    "NGJ-UNSUPPORTED-001",
-                    "Explicit type argument calls f::<T>(x) are not supported in MVP",
-                    span(expr.span().startByte(), previous.span().endByte())
-                ));
-                expr = new CallExpr(expr, args,
+                expr = new CallExpr(expr, typeArgs, args,
                     span(expr.span().startByte(), previous.span().endByte()));
             } else if (match(TokenType.QUESTION)) {
                 expr = new PropagateExpr(expr,
@@ -813,7 +1187,8 @@ public final class Parser {
         }
         
         if (match(TokenType.HOLE)) {
-            return new HoleExpr((String) previous.value(),
+            var kind = inProofContext ? HoleExpr.HoleKind.PROOF : HoleExpr.HoleKind.CODE;
+            return new HoleExpr((String) previous.value(), kind,
                 span(start, previous.span().endByte()));
         }
         
@@ -832,6 +1207,24 @@ public final class Parser {
         if (match(TokenType.WHILE)) {
             return parseWhileExpr(start);
         }
+
+        if (checkIdent("scope") && peekNext().type() == TokenType.LBRACE) {
+            advance();
+            var body = parseBlock();
+            return new ScopeExpr(body, span(start, previous.span().endByte()));
+        }
+
+        if (checkIdent("fork") && peekNext().type() == TokenType.LBRACE) {
+            advance();
+            var body = parseBlock();
+            return new ForkExpr(body, span(start, previous.span().endByte()));
+        }
+
+        if (checkIdent("consume") && peekNext().type() == TokenType.IDENT) {
+            advance();
+            var target = parsePostfix();
+            return new ConsumeExpr(target, span(start, previous.span().endByte()));
+        }
         
         if (check(TokenType.LBRACE)) {
             return parseBlock();
@@ -839,17 +1232,30 @@ public final class Parser {
         
         if (match(TokenType.LPAREN)) {
             if (match(TokenType.RPAREN)) {
+                if (match(TokenType.FAT_ARROW)) {
+                    var body = parseBlock();
+                    return new LambdaExpr(List.of(), body, span(start, previous.span().endByte()));
+                }
                 return new LiteralExpr(LiteralExpr.LiteralKind.UNIT, null,
                     span(start, previous.span().endByte()));
             }
             
-            if (check(TokenType.IDENT) && peekNextIsColonOrCommaOrRparen()) {
+            if (check(TokenType.IDENT) && peekNext().type() == TokenType.COLON) {
                 return parseLambdaExpr(start);
             }
             
-            var expr = parseExpr();
+            var first = parseExpr();
+            if (match(TokenType.COMMA)) {
+                var elements = new ArrayList<Expr>();
+                elements.add(first);
+                do {
+                    elements.add(parseExpr());
+                } while (match(TokenType.COMMA));
+                consume(TokenType.RPAREN, "Expected ')' after tuple elements");
+                return new TupleExpr(elements, span(start, previous.span().endByte()));
+            }
             consume(TokenType.RPAREN, "Expected ')' after expression");
-            return new ParenExpr(expr, span(start, previous.span().endByte()));
+            return new ParenExpr(first, span(start, previous.span().endByte()));
         }
         
         if (match(TokenType.IDENT)) {
@@ -863,13 +1269,6 @@ public final class Parser {
         }
         
         throw error("NGJ-PARSE-005", "Unexpected token: " + current.type(), current.span());
-    }
-    
-    private boolean peekNextIsColonOrCommaOrRparen() {
-        Token next = peekNext();
-        return next.type() == TokenType.COLON || 
-               next.type() == TokenType.COMMA ||
-               next.type() == TokenType.RPAREN;
     }
     
     private Expr parseIfExpr(int start) throws ParseException {
@@ -1030,6 +1429,11 @@ public final class Parser {
         consume(TokenType.LPAREN, "Expected '(' after 'while'");
         var condition = parseExpr();
         consume(TokenType.RPAREN, "Expected ')' after while condition");
+
+        Expr invariant = null;
+        if (matchIdent("invariant")) {
+            invariant = parseExpr();
+        }
         
         var body = parseBlock();
         
@@ -1041,7 +1445,7 @@ public final class Parser {
             ));
         }
         
-        return new WhileExpr(condition, body, span(start, previous.span().endByte()));
+        return new WhileExpr(condition, invariant, body, span(start, previous.span().endByte()));
     }
     
     private Expr parseLambdaExpr(int start) throws ParseException {
@@ -1097,6 +1501,18 @@ public final class Parser {
     
     private boolean check(TokenType type) {
         return current.type() == type;
+    }
+
+    private boolean checkIdent(String keyword) {
+        return check(TokenType.IDENT) && current.text().equals(keyword);
+    }
+
+    private boolean matchIdent(String keyword) {
+        if (checkIdent(keyword)) {
+            advance();
+            return true;
+        }
+        return false;
     }
     
     private boolean match(TokenType... types) {

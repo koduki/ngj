@@ -7,11 +7,17 @@ import java.util.List;
 import java.util.ArrayList;
 
 /**
- * A typed hole: ?name
+ * A typed hole: ?name or ?proof_hole
  * The expected type and context are computed during type checking.
  */
 public final class HoleExpr implements Expr {
+    public enum HoleKind {
+        CODE,
+        PROOF
+    }
+
     private final String name;
+    private final HoleKind kind;
     private final SourceSpan span;
     
     private TypeExpr expectedType;
@@ -20,11 +26,18 @@ public final class HoleExpr implements Expr {
     private List<RelevantSymbol> relevantSymbols = new ArrayList<>();
     
     public HoleExpr(String name, SourceSpan span) {
+        this(name, HoleKind.CODE, span);
+    }
+
+    public HoleExpr(String name, HoleKind kind, SourceSpan span) {
         this.name = name;
+        this.kind = kind;
         this.span = span;
     }
     
     public String name() { return name; }
+    public HoleKind kind() { return kind; }
+    public boolean isProofHole() { return kind == HoleKind.PROOF; }
     public SourceSpan span() { return span; }
     
     public TypeExpr expectedType() { return expectedType; }
