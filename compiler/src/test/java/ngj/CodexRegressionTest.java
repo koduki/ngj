@@ -860,4 +860,137 @@ class CodexRegressionTest {
         assertEquals(1, code, "Nested block early return 1 must fail ensures(result == 0): " + stdout);
         assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
     }
+
+    @Test
+    void shortCircuitAndOrPropagatesUntrustedPc() throws Exception {
+        Path file = tempDir.resolve("short_circuit_pc.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn pay() -> Bool effects(PaymentWrite) {
+                return true;
+            }
+
+            public fn bad(flag: Untrusted<Option<Int>>) -> Bool effects(PaymentWrite) {
+                val selected: Bool = isSome(flag) && pay();
+                return selected;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Short-circuit && with Untrusted left operand must reject pay(): " + stdout);
+        assertTrue(stdout.contains("NGJ-IFC-PC-001"), "Expected NGJ-IFC-PC-001: " + stdout);
+    }
+
+    @Test
+    void tupleDestructureShadowingUpdatesProofContext() throws Exception {
+        Path file = tempDir.resolve("tuple_destructure_pre.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn positive(x: Int) -> Int effects()
+                requires (x > 0)
+                ensures (result > 0)
+            {
+                return x;
+            }
+
+            public fn bad(x: Int) -> Int effects()
+                requires (x == 1)
+            {
+                val (x: Int, other: Int) = (0, 0);
+                return positive(x);
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Tuple destructuring shadowing x = 0 must fail positive(x): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void tupleDestructureShadowingUpdatesPostconditionVc() throws Exception {
+        Path file = tempDir.resolve("tuple_destructure_post.ngj");
+        Files.writeString(file, """
+            package test.codex;
+
+            public fn bad(x: Int) -> Int effects()
+                requires (x == 1)
+                ensures (result == 1)
+            {
+                val (x: Int, other: Int) = (0, 0);
+                return x;
+            }
+            """, StandardCharsets.UTF_8);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        int code = Main.run(
+            new String[]{"check", "--format=json", "--diagnostic-detail=agent", "--verify=smt", "--smt-backend=jvm", file.toString()},
+            new PrintStream(out, true, StandardCharsets.UTF_8),
+            new PrintStream(err, true, StandardCharsets.UTF_8)
+        );
+        String stdout = out.toString(StandardCharsets.UTF_8);
+        assertEquals(1, code, "Tuple destructuring shadowing x = 0 must fail ensures(result == 1): " + stdout);
+        assertTrue(stdout.contains("NGJ-VERIFY-001"), "Expected NGJ-VERIFY-001: " + stdout);
+    }
+
+    @Test
+    void tupleConstructionAndListOfExecuteWithoutIncompatibleClassChangeError() throws Exception {
+        String source = """
+            package test.codex.tupleexec;
+
+            public fn firstOfTuple() -> Int effects() {
+                val (x: Int, other: Int) = (42, 7);
+                val xs: List<Int> = listOf(1, 2);
+                val empty: List<Int> = Nil();
+                return x;
+            }
+            """;
+        var lexer = new ngj.parser.Lexer(source, "tupleexec.ngj");
+        var parser = new ngj.parser.Parser(lexer, "tupleexec.ngj");
+        var unit = parser.parse();
+        var resolver = new ngj.typechecker.NameResolver();
+        resolver.resolve(unit);
+        var tc = new ngj.typechecker.TypeChecker();
+        tc.check(unit);
+
+        var gen = new ngj.codegen.Java25CodeGenerator();
+        Path outDir = tempDir.resolve("tupleexec_out");
+        Files.createDirectories(outDir);
+        gen.setOutputDir(outDir);
+        var outputs = gen.generate(unit);
+        Path fnClassPath = outputs.stream()
+            .filter(p -> p.toString().endsWith("firstOfTuple$Fn.class"))
+            .findFirst()
+            .orElseThrow();
+        byte[] fnBytes = Files.readAllBytes(fnClassPath);
+
+        ClassLoader loader = new ClassLoader(getClass().getClassLoader()) {
+            @Override
+            protected Class<?> findClass(String name) throws ClassNotFoundException {
+                if (name.equals("test.codex.tupleexec.firstOfTuple$Fn")) {
+                    return defineClass(name, fnBytes, 0, fnBytes.length);
+                }
+                return super.findClass(name);
+            }
+        };
+        Class<?> clazz = loader.loadClass("test.codex.tupleexec.firstOfTuple$Fn");
+        Object result = clazz.getMethod("invoke").invoke(null);
+        assertEquals(42, result);
+    }
 }

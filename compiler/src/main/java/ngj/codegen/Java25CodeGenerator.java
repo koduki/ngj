@@ -603,7 +603,8 @@ public final class Java25CodeGenerator {
             ctx.code.invokestatic(
                 ClassDesc.of("java.util.List"),
                 "of",
-                MethodTypeDesc.of(ClassDesc.of("java.util.List"))
+                MethodTypeDesc.of(ClassDesc.of("java.util.List")),
+                true
             );
             return;
         }
@@ -619,7 +620,8 @@ public final class Java25CodeGenerator {
         ctx.code.invokestatic(
             ClassDesc.of("java.util.List"),
             "of",
-            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ConstantDescs.CD_Object.arrayType())
+            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ConstantDescs.CD_Object.arrayType()),
+            true
         );
     }
     
@@ -1090,7 +1092,8 @@ public final class Java25CodeGenerator {
                     ctx.code.invokestatic(
                         ClassDesc.of("java.util.List"),
                         "of",
-                        MethodTypeDesc.of(ClassDesc.of("java.util.List"))
+                        MethodTypeDesc.of(ClassDesc.of("java.util.List")),
+                        true
                     );
                     return;
                 }
@@ -1099,7 +1102,8 @@ public final class Java25CodeGenerator {
                         ctx.code.invokestatic(
                             ClassDesc.of("java.util.List"),
                             "of",
-                            MethodTypeDesc.of(ClassDesc.of("java.util.List"))
+                            MethodTypeDesc.of(ClassDesc.of("java.util.List")),
+                            true
                         );
                     } else {
                         ctx.code.ldc(call.args().size());
@@ -1114,7 +1118,8 @@ public final class Java25CodeGenerator {
                         ctx.code.invokestatic(
                             ClassDesc.of("java.util.List"),
                             "of",
-                            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ConstantDescs.CD_Object.arrayType())
+                            MethodTypeDesc.of(ClassDesc.of("java.util.List"), ConstantDescs.CD_Object.arrayType()),
+                            true
                         );
                     }
                     return;
@@ -1571,7 +1576,7 @@ public final class Java25CodeGenerator {
                         recDesc,
                         memberName,
                         MethodTypeDesc.of(
-                            ClassDesc.of("java.util.AbstractMap$SimpleImmutableEntry"),
+                            ConstantDescs.CD_Object,
                             memberName.equals("decodeJson") ? ConstantDescs.CD_String : ConstantDescs.CD_byte.arrayType()
                         )
                     );

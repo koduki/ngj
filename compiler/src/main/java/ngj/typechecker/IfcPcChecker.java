@@ -388,7 +388,11 @@ public final class IfcPcChecker {
             }
             case BinaryExpr b -> {
                 checkExpr(b.left(), untrustedVars, inUntrustedPc);
-                checkExpr(b.right(), untrustedVars, inUntrustedPc);
+                boolean rightPc = inUntrustedPc;
+                if (b.op() == BinaryExpr.BinaryOp.AND || b.op() == BinaryExpr.BinaryOp.OR) {
+                    rightPc = inUntrustedPc || isExprUntrusted(b.left(), untrustedVars);
+                }
+                checkExpr(b.right(), untrustedVars, rightPc);
             }
             case UnaryExpr u -> checkExpr(u.operand(), untrustedVars, inUntrustedPc);
             case ParenExpr p -> checkExpr(p.inner(), untrustedVars, inUntrustedPc);

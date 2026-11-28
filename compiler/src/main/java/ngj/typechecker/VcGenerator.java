@@ -297,6 +297,37 @@ public final class VcGenerator {
                 premises.add(translateExpr(a.condition(), sorts, ssaEnv, new LinkedHashSet<>(), false, longVars));
                 return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
             }
+            case TupleDestructureStmt td -> {
+                if (containsMutationOrWhileOrReturn(td.initializer())) {
+                    return new SmtExpr.UnsupportedExpr("tuple_destructure_mutated_state");
+                }
+                Expr init = td.initializer();
+                while (init instanceof ParenExpr p) init = p.inner();
+                TupleExpr te = init instanceof TupleExpr t ? t : null;
+                List<SmtExpr> rhsList = new ArrayList<>(td.names().size());
+                for (int i = 0; i < td.names().size(); i++) {
+                    if (te != null && i < te.elements().size()) {
+                        rhsList.add(translateExpr(te.elements().get(i), sorts, ssaEnv, new LinkedHashSet<>(), true, longVars));
+                    } else {
+                        rhsList.add(null);
+                    }
+                }
+                for (int i = 0; i < td.names().size(); i++) {
+                    String name = td.names().get(i);
+                    TypeExpr explicitType = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
+                    Sort sort = sortOfType(explicitType);
+                    String lhs = freshSsa(name, sort, sorts, ssaEnv, ssaCounter);
+                    if (isLongType(explicitType)) {
+                        longVars.add(lhs);
+                        longVars.add(name);
+                    }
+                    SmtExpr rhs = rhsList.get(i);
+                    if (rhs != null && !containsUnsupported(rhs)) {
+                        premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), rhs));
+                    }
+                }
+                return translateBlockResult(stmts, idx + 1, tailExpr, sorts, premises, ssaEnv, ssaCounter, longVars);
+            }
             case ReturnStmt r -> {
                 return r.value() != null ? translateExpr(r.value(), sorts, ssaEnv, new LinkedHashSet<>(), true, longVars) : null;
             }

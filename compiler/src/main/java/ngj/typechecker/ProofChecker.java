@@ -188,6 +188,9 @@ public final class ProofChecker {
                         for (var t : td.explicitTypes()) checkNoMathIntInType(t, td.span());
                     }
                     checkRuntimeOrProofExpr(td.initializer(), inProofContext, ctx);
+                    if (!inProofContext && ctx != null) {
+                        ctx.bindTupleDestructure(td);
+                    }
                 }
                 case InvariantStmt inv -> {
                     checkExprPurityAndHoles(inv.condition(), true, Set.of());
@@ -605,6 +608,34 @@ public final class ProofChecker {
             }
             if (!VcGenerator.containsUnsupported(init)) {
                 premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), init));
+            }
+        }
+
+        void bindTupleDestructure(TupleDestructureStmt td) {
+            Expr init = td.initializer();
+            while (init instanceof ParenExpr p) init = p.inner();
+            TupleExpr te = init instanceof TupleExpr t ? t : null;
+            List<SmtExpr> rhsList = new ArrayList<>(td.names().size());
+            for (int i = 0; i < td.names().size(); i++) {
+                if (te != null && i < te.elements().size()) {
+                    rhsList.add(vcGen.translateExecutableExpr(te.elements().get(i), sorts, ssaEnv, longVars));
+                } else {
+                    rhsList.add(null);
+                }
+            }
+            for (int i = 0; i < td.names().size(); i++) {
+                String name = td.names().get(i);
+                TypeExpr explicitType = i < td.explicitTypes().size() ? td.explicitTypes().get(i) : null;
+                SmtExpr.Sort sort = VcGenerator.sortOfType(explicitType);
+                String lhs = freshSsa(name, sort);
+                if (VcGenerator.isLongType(explicitType)) {
+                    longVars.add(lhs);
+                    longVars.add(name);
+                }
+                SmtExpr rhs = rhsList.get(i);
+                if (rhs != null && !VcGenerator.containsUnsupported(rhs)) {
+                    premises.add(new SmtExpr.Eq(new SmtExpr.Var(lhs, sort), rhs));
+                }
             }
         }
 
